@@ -1,0 +1,1 @@
+"""Local video annotation backend."""

@@ -1,0 +1,28 @@
+.comparison-backdrop { position: fixed; inset: 0; z-index: 7; background: #060b13cc; backdrop-filter: blur(5px); }
+.editor-grid.comparison-view { position: fixed; inset: 3vh 4vw; z-index: 8; margin: 0; padding: 16px; display: flex; flex-direction: column; gap: 12px; background: #101923; border: 1px solid #405467; border-radius: 14px; box-shadow: 0 24px 100px #0009; overflow: auto; }
+.comparison-view .workspace-sidebar { display: none; }
+.comparison-view .left-column { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.comparison-view .preview-panel { flex: 1; min-height: 220px; display: flex; flex-direction: column; }
+.comparison-view .video-stage { flex: 1; min-height: 100px; max-height: none; aspect-ratio: auto; }
+.comparison-view .video-stage video { height: 100%; width: 100%; object-fit: contain; }
+.comparison-view .tl-root { flex-shrink: 0; }
+.comparison-view .player-controls, .comparison-view .panel-heading { flex-shrink: 0; }
+.comparison-heading { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.comparison-heading > div { flex: 1; min-width: 0; }
+.comparison-heading h2 { margin: 0 0 5px; font-size: 16px; }
+.comparison-heading p { margin: 0; color: #9cafbe; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comparison-heading button { flex-shrink: 0; }
+.tl-comparison .tl-track-title { gap: 5px; }
+.tl-external-row .tl-gutter { color: #f2d898; background: #353025; }
+.tl-external-row .tl-segment { border-style: dashed; filter: brightness(1.2); }
+.timeline-import-dialog { color: #dce5ef; background: #192530; border: 1px solid #405467; border-radius: 12px; width: min(480px, 90vw); max-height: 90vh; padding: 26px; }
+.timeline-import-dialog::backdrop { background: #060b13bb; backdrop-filter: blur(4px); }
+.timeline-import-dialog h2 { margin: 0 0 10px; font-size: 20px; }
+.timeline-import-dialog p { font-size: 12px; line-height: 1.7; }
+.timeline-import-dialog label { display: grid; gap: 8px; margin: 20px 0; font-size: 13px; }
+.timeline-import-dialog select, .timeline-import-dialog input { width: 100%; box-sizing: border-box; }
+.timeline-import-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 22px; }
+.timeline-import-error { color: #ffb3a6; }
+.timeline-import-summary { background: #243b38; border: 1px solid #466960; border-radius: 6px; padding: 12px; font-size: 13px; }
+.timeline-import-summary p { margin: 6px 0 0; }
+@media(max-width:700px) { .editor-grid.comparison-view { inset: 1vh 1vw; padding: 8px; } .comparison-heading { flex-wrap: wrap; } .comparison-heading > div { flex-basis: 100%; } .comparison-view .left-column { min-height: 600px; } }

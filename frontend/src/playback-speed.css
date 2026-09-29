@@ -1,0 +1,11 @@
+.playback-speed { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+.playback-speed-label { color: #91a6b3; font-size: 11px; }
+.playback-speed-segments { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); width: 280px; padding: 3px; border-radius: 8px; background: #141f2b; isolation: isolate; }
+.playback-speed-highlight { position: absolute; z-index: -1; left: 3px; top: 3px; bottom: 3px; width: calc((100% - 6px) / 7); border: 1px solid #527c8d; border-radius: 5px; background: #243d4a; transition: transform .16s ease; pointer-events: none; }
+.playback-speed-segments button { min-width: 0; min-height: 30px; padding: 3px 2px; border: 0; border-radius: 5px; background: transparent; color: #9cafc1; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.playback-speed-segments button:hover { color: #e5f1fa; background: #ffffff08; }
+.playback-speed-segments button[aria-pressed="true"] { color: #a6e6f4; font-weight: 600; }
+.playback-speed-segments button:focus-visible { outline: 2px solid #83ddca; outline-offset: -2px; }
+@media (max-width: 1100px) { .playback-speed { gap: 6px; } .playback-speed-label { display: none; } .playback-speed-segments { width: 238px; } }
+@media (max-width: 600px) { .playback-speed-segments { width: 210px; } .playback-speed-segments button { font-size: 10px; } }
+@media (prefers-reduced-motion: reduce) { .playback-speed-highlight { transition: none; } }

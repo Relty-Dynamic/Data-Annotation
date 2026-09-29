@@ -1,0 +1,74 @@
+services:
+  worker:
+    image: datamark-worker:${DATAMARK_WORKER_IMAGE_TAG:?Deployment release is required}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cpus: 4.0
+    mem_limit: 6g
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:18120:18120"
+    environment:
+      DATAMARK_WORKER_ROOT: /app
+      DATAMARK_WORKER_TOKEN_FILE: /run/secrets/worker-token
+      DATAMARK_WORKER_SLOTS: "2"
+      DATAMARK_FFMPEG_ENCODER_THREADS: "2"
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      FFPROBE_PATH: /usr/bin/ffprobe
+      PYTHONNOUSERSITE: "1"
+      TMPDIR: /tmp
+    volumes:
+      - type: bind
+        source: ${DATAMARK_WORKER_HOME:?Deployment directory is required}/state
+        target: /app/.local
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_WORKER_HOME}/secrets/worker-token
+        target: /run/secrets/worker-token
+        read_only: true
+        bind:
+          create_host_path: false
+      # The API limits writes to Datamark caches and timeline/ files.
+      - type: bind
+        source: /mnt/nas/homes
+        target: /mnt/nas/homes
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/nas/datasets
+        target: /mnt/nas/datasets
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/nas/collector-data
+        target: /mnt/nas/collector-data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/nas/docker
+        target: /mnt/nas/docker
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "/app/deploy/healthcheck.py"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
