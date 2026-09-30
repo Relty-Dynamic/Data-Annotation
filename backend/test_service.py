@@ -673,7 +673,7 @@ class PersistenceTests(unittest.TestCase):
         first.write_bytes(b"abcdefghij")
         last = self.fpv / "clip10_20260914000002.mp4"
         last.write_bytes(b"1234567890")
-        with TestClient(create_app(self.root / "http-runtime"), base_url="http://127.0.0.1") as client:
+        with TestClient(create_app(self.root / "http-runtime", auth_required=False), base_url="http://127.0.0.1") as client:
             response = client.post("/api/projects/files", json={"paths": [str(last), str(first)]})
             self.assertEqual(response.status_code, 200, response.text)
             project = response.json()

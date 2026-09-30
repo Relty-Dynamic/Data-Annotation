@@ -113,7 +113,7 @@ class ActualMediaTests(unittest.TestCase):
                 self.assertEqual(path.resolve().parent, root.resolve())
                 path.unlink()
                 thumbnail.unlink()
-                application = create_app(root)
+                application = create_app(root, auth_required=False)
                 application.state.service.tool = service.tool
                 with TestClient(application, base_url="http://127.0.0.1") as client:
                     url = f"/api/previews/{project['id']}/v0001"
@@ -150,7 +150,7 @@ class ActualMediaTests(unittest.TestCase):
                 self.assertEqual(service.preparation_status(project["id"])["ready"], 0)
                 self.assertEqual(path.resolve().parent, root.resolve())
                 path.unlink()
-                application = create_app(root)
+                application = create_app(root, auth_required=False)
                 application.state.service.tool = service.tool
                 with patch("backend.service.run_ffmpeg") as encode:
                     with TestClient(application, base_url="http://127.0.0.1") as client:
@@ -215,7 +215,7 @@ class ActualMediaTests(unittest.TestCase):
             thumbnail = service.media(project["id"], "v0002", thumbnail=True)
             self.assertEqual(thumbnail.read_bytes()[:2], b"\xff\xd8")
             self.assertEqual(service.media(project["id"], "v0002"), preview)
-            application = create_app(root)
+            application = create_app(root, auth_required=False)
             application.state.service.tool = service.tool
             with TestClient(application, base_url="http://127.0.0.1") as client:
                 response = client.get(project["videos"][1]["url"], headers={"Range": "bytes=0-31"})

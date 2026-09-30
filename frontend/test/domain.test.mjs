@@ -192,6 +192,13 @@ test('touching equal states merge consistently with server normalization without
   assert.deepEqual(normalizeStateSeams(input).scene, [segment('a', '室内', 0, 10000), segment('c', '室内', 11000, 15000)]);
 });
 
+test('touching states from different creators retain separate attribution', () => {
+  const first = {...segment('a', '室内', 0, 5000), created_by:'user-a', created_at:'2026-09-30T00:00:00Z'};
+  const second = {...segment('b', '室内', 5000, 10000), created_by:'user-b', created_at:'2026-09-30T01:00:00Z'};
+  const input = {scene:[first,second],posture:[],habit:[]};
+  assert.deepEqual(normalizeStateSeams(input).scene,[first,second]);
+});
+
 test('several repaired file seams form one continuous state with stable normalization', () => {
   const input = { scene: [segment('a', '室内', 0, 10000), segment('b', '室内', 10234, 20000), segment('c', '室内', 21000, 30000)], posture: [], habit: [] };
   const result = normalizeStateSeams(input, stateBridges, seamVideos);

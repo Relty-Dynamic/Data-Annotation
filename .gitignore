@@ -17,6 +17,8 @@ meal-runs/
 .env
 .env.*
 !.env.example
+deploy/intranet.env
+deploy/intranet-paths.json
 *.log
 Thumbs.db
 Desktop.ini

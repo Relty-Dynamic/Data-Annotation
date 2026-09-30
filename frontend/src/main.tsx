@@ -1,6 +1,6 @@
 import ReactDOM from 'react-dom/client';
-import App from './App';
+import AuthShell from './AuthShell';
 import './style.css';
 import './layout.css';
-ReactDOM.createRoot(document.getElementById('root')!).render(<App/>);
-
+import './auth.css';
+ReactDOM.createRoot(document.getElementById('root')!).render(<AuthShell/>);

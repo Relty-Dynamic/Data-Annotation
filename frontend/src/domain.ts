@@ -7,6 +7,12 @@ export interface Segment {
   end_ms: number | null;
   kind?: 'point' | 'interval';
   mode?: 'state' | 'overlay';
+  created_by?: string;
+  created_by_name?: string;
+  created_at?: string;
+  updated_by?: string;
+  updated_by_name?: string;
+  updated_at?: string;
 }
 
 export interface Video {
@@ -221,7 +227,9 @@ export function normalizeStateSeams(
       const bridge = previous?.end_ms == null ? undefined : bridgeAtEnd.get(previous.end_ms);
       const acrossSeam = bridge !== undefined && segment.start_ms >= bridge.end_ms &&
         segment.start_ms < (videoEnds.get(bridge.next_video_id) ?? bridge.end_ms);
-      if (previous && previous.label === segment.label &&
+      if (previous && previous.label === segment.label && previous.created_by === segment.created_by &&
+          previous.created_at === segment.created_at && previous.updated_by === segment.updated_by &&
+          previous.updated_at === segment.updated_at &&
           (previous.end_ms === segment.start_ms || acrossSeam)) {
         previous.end_ms = segment.end_ms;
       } else {
@@ -292,7 +300,9 @@ function mergeTouchingStates(segments: Segment[]): Segment[] {
   const result: Segment[] = [];
   for (const segment of orderedCopies(segments)) {
     const previous = result[result.length - 1];
-    if (previous && previous.label === segment.label && previous.end_ms === segment.start_ms &&
+    if (previous && previous.label === segment.label && previous.created_by === segment.created_by &&
+        previous.created_at === segment.created_at && previous.updated_by === segment.updated_by &&
+        previous.updated_at === segment.updated_at && previous.end_ms === segment.start_ms &&
         previous.mode === segment.mode && !isPointSegment(previous) && !isPointSegment(segment)) {
       previous.end_ms = segment.end_ms;
     } else result.push(segment);

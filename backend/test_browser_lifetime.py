@@ -60,7 +60,7 @@ class BrowserLifetimeTests(unittest.TestCase):
 
     def test_websocket_disconnects_track_tabs_and_foreign_origins_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix="lifetime-test-", dir=ROOT / ".tmp") as folder:
-            app = create_app(Path(folder), on_idle=lambda: None)
+            app = create_app(Path(folder), on_idle=lambda: None, auth_required=False)
             with TestClient(app, base_url="http://127.0.0.1") as client:
                 life = app.state.browser_lifetime
                 with client.websocket_connect("ws://127.0.0.1/api/browser/connection", headers={"origin": "http://127.0.0.1"}) as first:

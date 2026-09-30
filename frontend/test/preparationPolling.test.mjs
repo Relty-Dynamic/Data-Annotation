@@ -47,6 +47,7 @@ function mountPreparation(responses) {
   const module = {exports: {}};
   vm.runInContext(`(function(require,module,exports){${source}\n})`, context)(name => {
     if (name === 'react') return react;
+    if (name === './auth.ts') return {authFetch: context.fetch};
     if (name === './sessionAssets') return {forgetSessionAssets() {}, isSessionManifest() {throw new Error('Incomplete batch must not inspect a manifest');},
       prepareSessionAssets() {throw new Error('Incomplete batch must not enter browser warmup');}};
     if (name === './preparationErrors') return {preparationFailureMessage: (_, detail) => detail};

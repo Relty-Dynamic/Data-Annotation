@@ -34,7 +34,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="playback-session-test-", dir=ROOT / ".tmp")
         self.root = Path(self.temp.name)
         self.app_root = self.root / "app"
-        self.app = create_app(self.app_root)
+        self.app = create_app(self.app_root, auth_required=False)
         self.service = self.app.state.service
         self.services = [self.service]
         self.source = self.root / "card"
@@ -958,7 +958,7 @@ class PlaybackSessionTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 206)
                 self.assertEqual(response.content, MEDIA[123:78000])
                 self.assertEqual(response.headers["Content-Range"], f"bytes 123-77999/{len(MEDIA)}")
-                self.assertEqual(response.headers["Cache-Control"], "private, max-age=3600")
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
                 head = client.head(prefix, headers={"Range": "bytes=10-19"})
                 self.assertEqual((head.status_code, head.content, head.headers["content-length"]), (206, b"", "10"))
                 fast = client.get(prefix + "?fast=true", headers={"Range": "bytes=-20"})

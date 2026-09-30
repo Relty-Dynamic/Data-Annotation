@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import {authFetch} from './auth.ts';
 
 export interface PreviewStatus {
   state: 'idle' | 'queued' | 'running' | 'ready' | 'error';
@@ -41,7 +42,7 @@ export function usePreview(projectId: string | undefined, videoId: string, versi
     let failures = 0;
     async function check(start: boolean) {
       try {
-        const response = await fetch(`/api/previews/${key}`, {
+        const response = await authFetch(`/api/previews/${key}`, {
           ...(start ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prefetch: true, retry: true})} : {}),
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
         });

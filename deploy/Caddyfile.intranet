@@ -1,0 +1,9 @@
+{
+	default_sni {$DATAMARK_HOST}
+	skip_install_trust
+}
+
+https://{$DATAMARK_HOST} {
+	tls internal
+	reverse_proxy web:8765
+}

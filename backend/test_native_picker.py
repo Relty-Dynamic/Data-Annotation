@@ -34,13 +34,14 @@ class NativePickerTests(unittest.TestCase):
 
     def test_picker_returns_paths_only_and_cleans_temporary_response(self):
         paths = [str(self.root / "原视频" / "A09999_20260917120000_0000.avi")]
-        with patch("backend.native_picker.subprocess.run", side_effect=self.respond(paths)):
+        with patch("backend.native_picker.os") as fake_os, patch("subprocess.CREATE_NO_WINDOW", 0, create=True), patch("backend.native_picker.subprocess.run", side_effect=self.respond(paths)):
+            fake_os.name = "nt"
             self.assertEqual(choose_local_paths(self.root, "files"), paths)
         self.assertEqual(list((self.root / ".tmp").iterdir()), [])
         self.assertFalse(Path(paths[0]).exists())
 
     def test_cancel_returns_empty_without_creating_a_project(self):
-        app = create_app(self.root)
+        app = create_app(self.root, auth_required=False)
         with TestClient(app, base_url="http://127.0.0.1") as client:
             with patch("backend.app.choose_local_paths", return_value=[]):
                 response = client.post("/api/local-files/pick", json={"kind": "directory"})
@@ -50,14 +51,15 @@ class NativePickerTests(unittest.TestCase):
             self.assertIn("source-local-cache", client.get("/api/health").json()["capabilities"])
 
     def test_timeout_has_actionable_error_and_cleans_response(self):
-        with patch("backend.native_picker.subprocess.run", side_effect=subprocess.TimeoutExpired("picker", 900)):
+        with patch("backend.native_picker.os") as fake_os, patch("subprocess.CREATE_NO_WINDOW", 0, create=True), patch("backend.native_picker.subprocess.run", side_effect=subprocess.TimeoutExpired("picker", 900)):
+            fake_os.name = "nt"
             with self.assertRaises(HTTPException) as context:
                 choose_local_paths(self.root, "files")
         self.assertEqual(context.exception.status_code, 408)
         self.assertEqual(list((self.root / ".tmp").iterdir()), [])
 
     def test_foreign_origin_cannot_open_a_native_dialog(self):
-        app = create_app(self.root)
+        app = create_app(self.root, auth_required=False)
         with TestClient(app, base_url="http://127.0.0.1") as client:
             with patch("backend.app.choose_local_paths") as picker:
                 response = client.post("/api/local-files/pick", json={"kind": "files"}, headers={"Origin": "https://outside.example"})
@@ -65,7 +67,7 @@ class NativePickerTests(unittest.TestCase):
                 picker.assert_not_called()
 
     def test_legacy_uploads_are_rejected_without_parsing_or_saving_video_bytes(self):
-        app = create_app(self.root)
+        app = create_app(self.root, auth_required=False)
         with TestClient(app, base_url="http://127.0.0.1") as client:
             before = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*") if path.is_file())
             with patch("starlette.requests.Request.form", side_effect=AssertionError("must not parse multipart")):

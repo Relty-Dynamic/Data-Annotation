@@ -39,6 +39,6 @@
 ## 外部采集数据
 
 - 原始 FPV/IMU 位于内网共享服务器，仍按原位置读取，例如 `\\Relty\homes\datacollection\habit\smoking\0909zengl3`。
-- 场景、姿势、大类、习惯输出为四个独立 JSON：`scene.timeline.json`、`posture.timeline.json`、`category.timeline.json`、`habit.timeline.json`，现行 `schema_version` 为 2，兼容读取版本 1 的旧三文件格式。按用户要求写回原采集根目录的 `timeline/` 子文件夹，读取优先使用该位置并兼容根目录旧文件；旧文件保留，不混合两个位置的批次；这是项目本地存储规则的明确例外。
+- 场景、姿势、大类、习惯输出为四个独立 JSON：`scene.timeline.json`、`posture.timeline.json`、`category.timeline.json`、`habit.timeline.json`，现行 `schema_version` 为 3，兼容读取版本 1 的旧三文件和版本 2 的旧四文件。按用户要求写回原采集根目录的 `timeline/` 子文件夹，读取优先使用该位置并兼容根目录旧文件；旧文件保留，不混合两个位置的批次；这是项目本地存储规则的明确例外。
 - 共享目录的读取和写入权限分别验证；未写回成功时不能报告已保存到共享目录。
 - 不把原始素材、缓存、草稿数据库或凭证提交到 Git。

@@ -1,0 +1,60 @@
+import {useEffect, useState, type FormEvent} from 'react';
+import {authFetch} from './auth';
+import type {Project} from './domain';
+
+type ManagedUser = {id:string; username:string; display_name:string; role:string; active:number};
+
+export default function AdminPanel({projects,onClose}:{projects:Project[];onClose:()=>void}) {
+  const [users,setUsers]=useState<ManagedUser[]>([]);
+  const [assignments,setAssignments]=useState<Record<string,string>>({});
+  const [username,setUsername]=useState(''),[displayName,setDisplayName]=useState(''),[password,setPassword]=useState('');
+  const [resetId,setResetId]=useState(''),[resetPassword,setResetPassword]=useState('');
+  const [error,setError]=useState(''),[notice,setNotice]=useState('');
+  async function refresh() {
+    const response=await authFetch('/api/users');
+    if(!response.ok)throw new Error('读取账号失败');
+    setUsers(await response.json());
+    const pairs=await Promise.all(projects.map(async project=>{
+      const result=await authFetch(`/api/projects/${project.id}/assignment`);
+      return [project.id,(await result.json()).user_id??''] as const;
+    }));
+    setAssignments(Object.fromEntries(pairs));
+  }
+  useEffect(()=>{void refresh().catch(cause=>setError(String(cause)));},[]);
+  async function create(event:FormEvent) {
+    event.preventDefault();setError('');setNotice('');
+    const response=await authFetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,display_name:displayName,password})});
+    if(!response.ok){setError((await response.json()).detail??'创建账号失败');return;}
+    setUsername('');setDisplayName('');setPassword('');setNotice('账号已创建。');await refresh();
+  }
+  async function assign(projectId:string,userId:string) {
+    setError('');
+    const response=await authFetch(`/api/projects/${projectId}/assignment`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:userId||null})});
+    if(!response.ok){setError((await response.json()).detail??'分配失败');return;}
+    setAssignments(previous=>({...previous,[projectId]:userId}));setNotice('项目分配已保存。');
+  }
+  async function toggle(user:ManagedUser) {
+    const response=await authFetch(`/api/users/${user.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:!user.active})});
+    if(!response.ok){setError((await response.json()).detail??'更新账号失败');return;}
+    await refresh();
+  }
+  async function reset(event:FormEvent) {
+    event.preventDefault();setError('');
+    const response=await authFetch(`/api/users/${resetId}/password`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:resetPassword})});
+    if(!response.ok){setError((await response.json()).detail??'重置密码失败');return;}
+    setResetId('');setResetPassword('');setNotice('密码已重置，该账号原有登录已失效。');
+  }
+  return <div className="modal-backdrop"><section role="dialog" aria-modal="true" aria-label="账号与项目分配" className="admin-panel">
+    <div className="admin-header"><h2>账号与项目分配</h2><button className="secondary" onClick={onClose}>关闭</button></div>
+    {error&&<p role="alert" className="import-error">{error}</p>}{notice&&<p role="status">{notice}</p>}
+    <h3>新建标注账号</h3><form onSubmit={event=>void create(event)} className="admin-form">
+      <label>账号<input value={username} onChange={event=>setUsername(event.target.value)} autoComplete="off" required/></label>
+      <label>标注人姓名<input value={displayName} onChange={event=>setDisplayName(event.target.value)} required/></label>
+      <label>初始密码<input type="password" value={password} onChange={event=>setPassword(event.target.value)} minLength={12} autoComplete="new-password" required/></label>
+      <button className="primary">创建账号</button>
+    </form>
+    <h3>账号</h3><div className="admin-list">{users.map(user=><div key={user.id}><span>{user.display_name} · {user.username} · {user.role==='admin'?'管理员':'标注人'}</span><span className="admin-buttons"><button className="secondary" onClick={()=>setResetId(user.id)}>重置密码</button><button className="secondary" onClick={()=>void toggle(user)}>{user.active?'停用':'启用'}</button></span></div>)}</div>
+    {resetId&&<form className="admin-reset" onSubmit={event=>void reset(event)}><strong>重置 {users.find(user=>user.id===resetId)?.display_name} 的密码</strong><input type="password" autoComplete="new-password" minLength={12} value={resetPassword} onChange={event=>setResetPassword(event.target.value)} required/><button type="button" className="secondary" onClick={()=>{setResetId('');setResetPassword('');}}>取消</button><button className="primary">保存</button></form>}
+    <h3>项目负责人</h3><div className="admin-list">{projects.map(project=><label key={project.id}><span>{project.name}</span><select value={assignments[project.id]??''} onChange={event=>void assign(project.id,event.target.value)}><option value="">未分配</option>{users.filter(user=>user.role==='annotator'&&user.active).map(user=><option key={user.id} value={user.id}>{user.display_name} · {user.username}</option>)}</select></label>)}</div>
+  </section></div>;
+}

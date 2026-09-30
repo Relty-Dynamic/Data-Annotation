@@ -20,7 +20,7 @@ class SupplementTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="supplement-tests-", dir=ROOT / ".tmp")
         self.root = Path(self.temp.name)
-        self.app = create_app(self.root)
+        self.app = create_app(self.root, auth_required=False)
         self.service = self.app.state.service
         self.source = self.root / "originals"
         self.source.mkdir()

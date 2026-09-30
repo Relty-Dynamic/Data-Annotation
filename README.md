@@ -1,6 +1,6 @@
 # DataMark 视频标注工作台
 
-个人本地使用的多视频标注工具。React + TypeScript + Vite 前端与 FastAPI 后端由同一服务提供，地址为 **http://127.0.0.1:8765**。
+支持本机运行和 Ubuntu 内网部署的多账号视频标注工具。React + TypeScript + Vite 前端与 FastAPI 后端由同一服务提供；本机地址为 **http://127.0.0.1:8765**。Ubuntu 内网入口使用 HTTPS，不开放到公网。
 
 本文件是当前安装、使用、数据格式与维护说明。人工 GT 按事实核对，目录分类和采集计划不会自动成为标签；时间轴空白表示未标注，不表示行为没有发生。IMU 对齐、采集总览和模型评估尚未实现。
 
@@ -19,9 +19,37 @@
 .\启动标注平台.lnk
 ```
 
+首次安装时，`setup.cmd` 会在控制台提示创建管理员账号和密码；密码输入不会显示，也不会写入命令历史。若使用现有环境手动更新，可运行 `.venv\Scripts\python.exe -m backend.auth` 创建首位管理员，再启动平台。没有有效管理员时启动程序会拒绝提供标注服务。不要在聊天、代码或文档中填写密码。
+
+## 账号与项目权限
+
+登录后才能读取项目、预览素材、保存草稿或导出。管理员可新建标注账号、停用或启用账号、重置密码，并给每个项目分配一位标注人；标注人只会看到分配给自己的项目，可以浏览视频、编辑草稿和导出结果。导入及补导入素材、关联原目录、重命名、清理本机预览、写回原采集目录由管理员操作。停用账号或重置密码会立即撤销该账号已有登录。任何用户都可在页面上修改自己的密码，修改后需要重新登录。
+
+密码采用带独立随机盐的 scrypt 哈希保存于 `.local/auth.sqlite3`，登录会限制连续失败次数。登录使用 12 小时会话，浏览器只持有不可由 JavaScript 读取的会话 Cookie；修改接口另检查页面安全令牌和来源。本机启动器仍只监听 `127.0.0.1`；Ubuntu 内网部署按下文配置独立 HTTPS 入口。公司邮箱验证码和公网部署暂缓，不要把本机服务端口映射到公网。
+
+每次保存草稿时，服务端根据当前登录账号记录标注的创建者、创建时间、最近编辑者和最近编辑时间；客户端提交的这些字段不能覆盖服务端记录。选中标注可查看其归属，页面可打开编辑历史查看新增、修改、删除和撤销引起的变更。旧版标注没有可验证的操作者，显示为未知。浏览器内尚未提交的习惯输入按账号隔离；有未保存编辑时会阻止直接退出登录。停止服务后备份 `.local/annotations.sqlite3` 与 `.local/auth.sqlite3`，两者分别保存草稿及编辑历史、账号与项目分配；不要提交到 Git。
+
 验证环境：Python 3.14.6、Node 24.18.0。运行时记录见 `runtime-manifest.json`，Python 全部依赖锁定在 `requirements.lock.txt`，前端依赖锁定在 `frontend/package-lock.json`。`setup.ps1 -SkipFrontend` 只检查／安装后端和 FFmpeg，不重建前端。
 
-## 服务器准备 NAS 素材
+## Ubuntu 内网部署
+
+`deploy/compose.intranet.yaml` 部署网页服务和独立 HTTPS 网关，原有 `deploy/compose.yaml` 仍只负责视频处理服务。网关端口只绑定 `DATAMARK_BIND_IP` 指定的 Ubuntu 内网地址；网页容器不发布端口。请同时在主机防火墙及网络边界只允许授权内网访问 443，勿配置公网端口映射。部署需要 Ubuntu 已安装 Docker Compose、NAS 已挂载到本机，并确认服务 UID/GID `1000:1000` 对采集素材有读取权限、对标注输出及缓存目录有写入权限；读取和写入须分别验证。
+
+在 Ubuntu 项目目录复制 `deploy/intranet.env.example` 为 `deploy/intranet.env`，填写实际值：`DATAMARK_HOST` 是浏览器访问的内网 IP，`DATAMARK_BIND_IP` 是服务器持有的 RFC1918 局域网网卡 IP，`DATAMARK_HOME` 是应用持久化目录，`DATAMARK_NAS_MOUNT` 是已挂载的 NAS 根目录，`DATAMARK_WEB_IMAGE_TAG` 是本次发布标识。前两项使用 IP 直连时通常相同。已核实 `relty-server` 的 `192.168.2.126` 是固定内网地址，`192.168.2.25` 是同一服务器的动态有线地址；在该服务器部署时使用前者。配置文件不存放密码，实际配置文件已被 Git 忽略。先核对 NAS 挂载和目标目录，再执行：
+
+```sh
+install -d /home/relty/services/datamark-web/caddy-data /home/relty/services/datamark-web/caddy-config
+docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml config --quiet
+docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml build web
+```
+
+完成下面的数据迁移后执行 `docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml up -d`。若从空库开始，先创建与 `DATAMARK_HOME` 一致、归 UID/GID `1000:1000` 所有的 `state/`，再通过 `docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml run --rm --no-deps web /opt/venv/bin/python -m backend.auth` 交互创建管理员。管理员密码不写入配置文件或命令历史。启动后检查两个容器健康状态，并从授权内网设备访问 `https://<DATAMARK_HOST>/api/health`、登录、项目分配、预览、草稿保存、导出和 NAS 写回。只有实际读回四个 `timeline/` 文件后才能确认 NAS 写回成功。
+
+网关使用内部证书颁发机构自动签发 HTTPS 证书。首次启动后，从持久化的 `caddy-data/caddy/pki/authorities/local/root.crt` 获取公开根证书，按公司设备管理流程导入每台访问设备的受信任根证书库；私钥和整个 `caddy-data` 目录不得分发。浏览器未信任根证书前，不要通过忽略证书警告输入账号密码。持久化备份应覆盖应用 `state/` 中的两个 SQLite 数据库和项目播放缓存，以及 `caddy-data/`；恢复时先停服务，恢复完整目录后再启动并验证登录与项目读写。
+
+现有 Windows 草稿数据库记录了 Windows 原视频绝对路径，不能直接复制到 Ubuntu 使用。**所有用户先保存浏览器中的未提交编辑，停止旧平台并禁止继续编辑**，再在旧机器项目目录运行 `.venv\Scripts\python.exe -m deploy.migrate_projects export --state .local --output <仓库外的安全迁移包目录>`；脚本通过 SQLite 快照备份标注库及已有账号库，并逐个读取原视频计算完整 SHA-256。将整个迁移包经批准的内网传输方式送到 Ubuntu，限制目录权限为仅部署账号可读。按实际 NAS 挂载修改 `deploy/intranet-paths.example.json` 并另存为被 Git 忽略的 `deploy/intranet-paths.json`，补齐其它原视频路径映射。保持 Ubuntu `state/` 不存在，运行 `python3 -m deploy.migrate_projects apply --bundle <迁移包目录> --state <DATAMARK_HOME>/state --mappings deploy/intranet-paths.json`。迁移会逐段比对完整 SHA-256、核对原 `timeline/` 文件，保留项目 ID、已保存草稿、编辑历史、已有账号与分配并使旧登录失效；任一文件不一致就不创建目标状态目录。若旧平台没有账号库，迁移输出会明确提示，随后使用上文交互命令创建首位管理员。迁移不复制可再生成的本机播放缓存，Ubuntu 首次打开项目时需要重新准备或复用 NAS 缓存。迁移完成并创建管理员后再运行上面的 `up -d`，逐项目验收。迁移包含账号和个人数据，确认 Ubuntu 验收和备份后按公司规则保管或清理。网页的本机文件选择窗口仅支持 Windows，Ubuntu 上由管理员填写服务器可访问的完整 NAS 路径；访问者电脑上的本地文件不会自动出现在 Ubuntu 服务器上。
+
+## Windows 本机模式的服务器准备 NAS 素材
 
 NAS 素材可以由 `relty-server` 读取、生成播放缓存并打包，再下载到本机。服务器通过有线网络读取 `/mnt/nas/`；电脑继续使用 Wi-Fi，无需接网线。原视频不上传到服务器，也不下载到本机。标注页面仍读取 `.local/projects/<项目ID>/playback/` 中的普通预览、倍速视频、封面和悬停图，本机草稿及四轴标注流程不变。
 
@@ -104,9 +132,11 @@ Shift + 滚轮默认每次移动 1 秒，原来保存的其他四组步长不受
 - `category.timeline.json`：大类轴。
 - `habit.timeline.json`：习惯轴。
 
-当前正式输出为 `schema_version: 2` 的四文件格式。平台兼容读取 `schema_version: 1` 的旧三文件格式，旧场景、姿势、习惯标注保持原样，大类初始为空；再次正式输出使用四文件格式，仅检查场景、姿势的覆盖。
+当前正式输出为 `schema_version: 3` 的四文件格式。平台兼容读取 `schema_version: 1` 的旧三文件和 `schema_version: 2` 的旧四文件；旧标注没有可信的标注人信息，不会自动推断。再次正式输出使用四文件格式，仅检查场景、姿势的覆盖。
 
 每个文件包含 `schema_version`、共同的保存批次 `save_id`、采集信息、标签表 `labels` 和记录 `segments`。时间单位为毫秒，起点是最早视频的拍摄开始时间；各视频在轴上的位置由文件名中的拍摄时间决定，空档计入总时间跨度。`timebase.videos` 保留各视频相对路径和轴上起止时间，可回溯原始素材。
+
+版本 3 的单条 `segments` 记录可包含 `created_by`、`created_by_name`、`created_at`、`updated_by`、`updated_by_name`、`updated_at`。前两个身份字段分别是账号 ID 与保存时的显示姓名；时间字段为 UTC ISO 8601。已有历史不完整的记录可缺少这些可选字段。独立的编辑历史保存在本机草稿数据库，不加入四文件 ZIP。
 
 每条标注还包含现实时间 `start_time`、`end_time`，采用六位字符串 `HHMMSS`，例如 `"150456"` 表示 15:04:56，`"000005"` 表示 00:00:05。这些时间根据最早录制时间加对应毫秒偏移换算，保留录制间隔；同时输出 `start_date`、`end_date`（`YYYY-MM-DD`）区分跨午夜记录。时区为 `Asia/Shanghai`；现实时间显示到秒，原始毫秒字段保留精度。瞬时事件的两组时间相同。原有草稿无需修改，重新导出或写回即可得到新字段。
 

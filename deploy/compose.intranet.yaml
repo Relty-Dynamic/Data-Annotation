@@ -1,0 +1,95 @@
+name: datamark-intranet
+
+services:
+  web:
+    image: datamark-web:${DATAMARK_WEB_IMAGE_TAG:?Release tag is required}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cpus: 4.0
+    mem_limit: 6g
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      DATAMARK_ROOT: /app
+      DATAMARK_ORIGIN: https://${DATAMARK_HOST:?Internal IP or hostname is required}
+      DATAMARK_BIND_IP: ${DATAMARK_BIND_IP:?Internal interface IP is required}
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      FFPROBE_PATH: /usr/bin/ffprobe
+      PYTHONNOUSERSITE: "1"
+      TMPDIR: /tmp
+    volumes:
+      - type: bind
+        source: ${DATAMARK_HOME:?Deployment directory is required}/state
+        target: /app/.local
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_NAS_MOUNT:?Mounted NAS directory is required}
+        target: /mnt/nas
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "/app/deploy/web_healthcheck.py"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - private
+
+  gateway:
+    image: caddy:2.11.4-alpine
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    environment:
+      DATAMARK_HOST: ${DATAMARK_HOST:?Internal IP or hostname is required}
+    ports:
+      - "${DATAMARK_BIND_IP:?Internal interface IP is required}:443:443"
+    volumes:
+      - type: bind
+        source: ./Caddyfile.intranet
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: bind
+        source: ${DATAMARK_HOME}/caddy-data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_HOME}/caddy-config
+        target: /config
+        bind:
+          create_host_path: false
+    depends_on:
+      web:
+        condition: service_healthy
+    networks:
+      - private
+      - ingress
+
+networks:
+  private:
+    internal: true
+  ingress:

@@ -33,7 +33,7 @@ class AppDeliveryTests(unittest.TestCase):
             index.write_text('<script src="/assets/index-abcdefgh.js"></script>', encoding="utf-8")
             (assets / "index-abcdefgh.js").write_text("old bundle", encoding="utf-8")
             (assets / "helper.js").write_text("not fingerprinted", encoding="utf-8")
-            app = create_app(root)
+            app = create_app(root, auth_required=False)
             with TestClient(app, base_url="http://127.0.0.1") as client:
                 for route in ("/", "/index.html"):
                     old = client.get(route)

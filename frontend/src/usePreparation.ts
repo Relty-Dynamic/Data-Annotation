@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {authFetch} from './auth.ts';
 import type { PreparationStatus } from './PreparePanel';
 import { forgetSessionAssets, isSessionManifest, prepareSessionAssets } from './sessionAssets';
 import type { SessionManifest } from './sessionAssets';
@@ -26,7 +27,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
     const read = async (start: boolean): Promise<void> => {
       try {
         if (start) setStartingId(id);
-        const response = await fetch('/api/projects/' + id + (start ? '/session/prepare' : '/session'), {
+        const response = await authFetch('/api/projects/' + id + (start ? '/session/prepare' : '/session'), {
           ...(start ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({retry_failed: retryFailed.current, cache_generation: cacheGeneration})} : {}),
           cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(60000)]),
         });

@@ -189,7 +189,7 @@ class ProjectNamingTests(unittest.TestCase):
         self.assertEqual(updated["name"], renamed["name"])
 
     def test_api_new_name_routes_rename_validation_origin_guard_and_capability(self):
-        with TestClient(create_app(self.root / "naming-api-runtime"), base_url="http://127.0.0.1") as client:
+        with TestClient(create_app(self.root / "naming-api-runtime", auth_required=False), base_url="http://127.0.0.1") as client:
             self.assertIn("project-naming", client.get("/api/health").json()["capabilities"])
             response = client.post("/api/projects/open", json={"path": str(self.source), "name": " API目录名 "})
             self.assertEqual(response.status_code, 200, response.text)

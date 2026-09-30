@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import {authFetch, type Account} from './auth';
+import AdminPanel from './AdminPanel';
+import PasswordDialog from './PasswordDialog';
+import HistoryPanel from './HistoryPanel';
 import { Upload, FolderOpen, Download, Save, Play, Pause, SkipBack, SkipForward, Plus, X, Trash2, Check, Film, Layers3, ChevronDown, RotateCcw, RotateCw, Keyboard, Maximize, Minimize, Volume2, VolumeX, Circle, ArrowRight, LoaderCircle, Bookmark, ScanLine, Pencil, Settings } from 'lucide-react';
 import Timeline from './Timeline';
 import TimelineImportDialog from './TimelineImportDialog';
 import type { ExternalTimeline } from './externalTimeline';
 import './comparison.css';
-import { useBrowserLifetime } from './useBrowserLifetime';
 import PlaybackSpeed from './PlaybackSpeed';
 import DeleteProjectDialog from './DeleteProjectDialog';
 import RenameProjectDialog from './RenameProjectDialog';
@@ -33,7 +36,7 @@ type SupplementContext = {project:Project; cursor:VideoTimeAnchor|null; composer
 const sceneLabels = SCENE_LABELS;
 
 const names: Record<Track,string> = {scene:'场景',posture:'姿势',category:'大类',habit:'习惯'};
-async function api<T>(url:string,init?:RequestInit):Promise<T>{const r=await fetch(url,init);if(!r.ok){let s='操作失败，请重试';try{const j=await r.json();s=typeof j.detail==='string'?j.detail:JSON.stringify(j.detail);}catch{s=`请求失败 (${r.status})`;}throw new Error(s);}return r.json();}
+async function api<T>(url:string,init?:RequestInit):Promise<T>{const r=await authFetch(url,init);if(!r.ok){let s='操作失败，请重试';try{const j=await r.json();s=typeof j.detail==='string'?j.detail:JSON.stringify(j.detail);}catch{s=`请求失败 (${r.status})`;}throw new Error(s);}return r.json();}
 function json(method:string,body:unknown){return {method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};}
 async function requireSourceCapabilities(supplement=false,nativePicker=false){
  const health=await api<{capabilities?:string[]}>('/api/health',{cache:'no-store'});
@@ -44,10 +47,15 @@ async function requireProjectNaming(){
  const health=await api<{capabilities?:string[]}>('/api/health',{cache:'no-store'});
  if(!health.capabilities?.includes('project-naming'))throw new Error(oldBackendMessage);
 }
-export default function App(){
+export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=>void}){
+ const sharedServer=window.location.protocol==='https:';
+ const composerKey=(id:string)=>`datamark-user-${user.id}-composer-${id}`;
+ const lastProjectKey=`datamark-user-${user.id}-last-project`;
  useWorkspaceGestures();
- useBrowserLifetime();
  const [project,setProject]=useState<Project|null>(null), projectRef=useRef<Project|null>(null);
+ const [adminOpen,setAdminOpen]=useState(false);
+ const [passwordOpen,setPasswordOpen]=useState(false);
+ const [auditOpen,setAuditOpen]=useState(false);
  const [projects,setProjects]=useState<Project[]>([]),[activeTrack,setActiveTrack]=useState<Track>('scene');
  const [trackRevealVersion,setTrackRevealVersion]=useState(0);
  const [time,setTime]=useState(0),timeRef=useRef(0),[videoId,setVideoId]=useState('');
@@ -85,7 +93,7 @@ export default function App(){
  const [renameProject,setRenameProject]=useState<Project|null>(null),[renaming,setRenaming]=useState(false),[renameError,setRenameError]=useState('');
  const [deleteProject,setDeleteProject]=useState<Project|null>(null),[deleting,setDeleting]=useState(false),[deleteError,setDeleteError]=useState('');
  const [clearedPreviewId,setClearedPreviewId]=useState('');
- const [error,setError]=useState(''),[notice,setNotice]=useState(''),[saveState,setSaveState]=useState('已保存本机');
+ const [error,setError]=useState(''),[notice,setNotice]=useState(''),[saveState,setSaveState]=useState('已保存到平台');
  const [saveFailed,setSaveFailed]=useState(false),saveFailedRef=useRef(false),pendingSaves=useRef(0),saveQueue=useRef<Promise<void>>(Promise.resolve()),serverRevision=useRef(0);
  const [selectedId,setSelectedId]=useState<string|null>(null),[label,setLabel]=useState(''),[startText,setStartText]=useState(''),[endText,setEndText]=useState(''),[manual,setManual]=useState(false);
  const [anchors,setAnchors]=useState<number[]>([]),[selectedRange,setSelectedRange]=useState<{start_ms:number;end_ms:number}|null>(null);
@@ -137,14 +145,14 @@ export default function App(){
  const coverageIssues=useMemo(()=>project?(['scene','posture'] as const).map(track=>({track,count:uncoveredSpans(project.annotations[track],project.recording_runs??project.videos).length})).filter(item=>item.count>0):[],[project]);
  const currentStates=project?.annotations[activeTrack].filter(s=>s.start_ms<=time&&(s.end_ms===null||time<s.end_ms))??[];
  const refresh=()=>api<Project[]>('/api/projects').then(setProjects).catch(e=>setError(e.message));
- useEffect(()=>{requireSourceCapabilities().then(()=>api<Project[]>('/api/projects')).then(ps=>{setProjects(ps);const last=readProjectPreference('datamark-last-project');if(last&&ps.some(p=>p.id===last))api<Project>(`/api/projects/${last}`).then(p=>{if(!projectRef.current)adopt(p);}).catch(e=>setError(e.message));}).catch(e=>setError(e.message));},[]);
- useEffect(()=>{if(project&&activeTrack==='habit'&&!manual){try{localStorage.setItem('datamark-composer-'+project.id,JSON.stringify({label,start:startText,end:endText,kind:behaviorKind}));}catch{}}},[project?.id,activeTrack,manual,label,startText,endText,behaviorKind]);
+ useEffect(()=>{requireSourceCapabilities().then(()=>api<Project[]>('/api/projects')).then(ps=>{setProjects(ps);const last=readProjectPreference(lastProjectKey);if(last&&ps.some(p=>p.id===last))api<Project>(`/api/projects/${last}`).then(p=>{if(!projectRef.current)adopt(p);}).catch(e=>setError(e.message));}).catch(e=>setError(e.message));},[]);
+ useEffect(()=>{if(project&&activeTrack==='habit'&&!manual){try{localStorage.setItem(composerKey(project.id),JSON.stringify({label,start:startText,end:endText,kind:behaviorKind}));}catch{}}},[project?.id,activeTrack,manual,label,startText,endText,behaviorKind]);
  useEffect(()=>{if(notice&&!prepareOpen&&!importOpen&&!busy){const t=setTimeout(()=>setNotice(''),9000);return()=>clearTimeout(t);}},[notice,prepareOpen,importOpen,busy]);
  useEffect(()=>{const warn=(e:BeforeUnloadEvent)=>{if(pendingSaves.current||saveFailedRef.current||busyRef.current||hasPendingEdit){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);},[hasPendingEdit]);
  function resetEditorFields(){setSelectedId(null);setLabel('');setStartText('');setEndText('');setManual(false);setBehaviorKind('interval');}
  function clearEditor(){resetEditorFields();if(selectedRange){setStartText(formatTime(selectedRange.start_ms));setEndText(formatTime(selectedRange.end_ms));}else if(activeTrack==='habit'&&project)restoreComposer(project.id);}
- function clearComposer(){if(project){try{localStorage.removeItem('datamark-composer-'+project.id);}catch{}}resetEditorFields();}
- function restoreComposer(id:string){try{const d=JSON.parse(localStorage.getItem('datamark-composer-'+id)??'null');if(d){setLabel(d.label??'');setStartText(d.start??'');setEndText(d.end??'');setBehaviorKind(d.kind==='point'?'point':'interval');}}catch{}}
+ function clearComposer(){if(project){try{localStorage.removeItem(composerKey(project.id));}catch{}}resetEditorFields();}
+ function restoreComposer(id:string){try{const d=JSON.parse(localStorage.getItem(composerKey(id))??'null');if(d){setLabel(d.label??'');setStartText(d.start??'');setEndText(d.end??'');setBehaviorKind(d.kind==='point'?'point':'interval');}}catch{}}
  function selectTrack(t:Track){if(t===activeTrack){setTrackRevealVersion(value=>value+1);return;}if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再切换类型；当前输入已保留。');return;}setError('');setTrackRevealVersion(value=>value+1);setActiveTrack(t);resetEditorFields();if(selectedRange){setStartText(formatTime(selectedRange.start_ms));setEndText(formatTime(selectedRange.end_ms));if(t==='category')setCategoryMode('range');}else if(t==='habit'&&project)restoreComposer(project.id);}
  function setCurrent(ms:number){timeRef.current=ms;setTime(ms);}
  function seek(ms:number){
@@ -219,12 +227,20 @@ export default function App(){
   };
   frame=requestAnimationFrame(tick);return()=>cancelAnimationFrame(frame);
  },[playing,activeVideo,profile.fast]);
- function persist(p:Project,annotations:Project['annotations']){pendingSaves.current++;setSaveState('正在保存…');saveQueue.current=saveQueue.current.then(async()=>{if(saveFailedRef.current)throw new Error('草稿尚未保存，请先重试保存。');const saved=await api<Project>(`/api/projects/${p.id}/draft`,json('PUT',{annotations,expected_revision:serverRevision.current}));if(projectRef.current?.id===p.id){serverRevision.current=saved.revision;const current=projectRef.current;projectRef.current={...current,revision:saved.revision,updated_at:saved.updated_at,annotations:current.annotations===annotations?saved.annotations:current.annotations};setProject(projectRef.current);} }).catch((e:Error)=>{if(projectRef.current?.id===p.id){saveFailedRef.current=true;setSaveFailed(true);setError(e.message);}}).finally(()=>{pendingSaves.current--;if(projectRef.current?.id===p.id)setSaveState(saveFailedRef.current?'保存失败，改动保留在此页':pendingSaves.current?'正在保存…':'已保存本机');});}
+ function persist(p:Project,annotations:Project['annotations']){pendingSaves.current++;setSaveState('正在保存…');saveQueue.current=saveQueue.current.then(async()=>{if(saveFailedRef.current)throw new Error('草稿尚未保存，请先重试保存。');const saved=await api<Project>(`/api/projects/${p.id}/draft`,json('PUT',{annotations,expected_revision:serverRevision.current}));if(projectRef.current?.id===p.id){serverRevision.current=saved.revision;const current=projectRef.current;projectRef.current={...current,revision:saved.revision,updated_at:saved.updated_at,annotations:current.annotations===annotations?saved.annotations:current.annotations};setProject(projectRef.current);} }).catch((e:Error)=>{if(projectRef.current?.id===p.id){saveFailedRef.current=true;setSaveFailed(true);setError(e.message);}}).finally(()=>{pendingSaves.current--;if(projectRef.current?.id===p.id)setSaveState(saveFailedRef.current?'保存失败，改动保留在此页':pendingSaves.current?'正在保存…':'已保存到平台');});}
  function commit(annotations:Project['annotations'],record=true){const p=projectRef.current;if(!p||p.deletion_pending||busyRef.current)return false;annotations=normalizeStateSeams(annotations,p.continuity_bridges??[],p.videos);if(annotationsEqual(p.annotations,annotations))return true;if(record)updateHistory([...historyRef.current.slice(-49),p.annotations],[]);const next={...p,annotations};projectRef.current=next;setProject(next);persist(next,annotations);return true;}
- async function flush(){await saveQueue.current;if(saveFailedRef.current)throw new Error('请先重试保存本机草稿，再继续操作。');}
- async function retrySave(){await doBusy('正在核对草稿保存状态…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);if(annotationsEqual(normalizeStateSeams(remote.annotations,remote.continuity_bridges??[],remote.videos),normalizeStateSeams(local.annotations,remote.continuity_bridges??[],remote.videos))){serverRevision.current=remote.revision;projectRef.current={...local,name:remote.name,revision:remote.revision,updated_at:remote.updated_at,annotations:remote.annotations};setProject(projectRef.current);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存本机');setNotice('已确认当前标注保存成功');return;}if(remote.revision===serverRevision.current){saveFailedRef.current=false;setSaveFailed(false);persist(local,local.annotations);await saveQueue.current;return;}setSaveState('版本冲突，改动保留在此页');setError('草稿已在其他窗口更新。当前改动仍保留在此页；请点击「保存恢复副本并重新载入」，下载包含本页标注的恢复 JSON 后读取服务器草稿。');});}
+ async function flush(){await saveQueue.current;if(saveFailedRef.current)throw new Error('请先重试保存平台草稿，再继续操作。');}
+ async function onLogout(){
+  if(busyRef.current||hasPendingEdit){setError('请先完成或取消当前编辑，再退出登录。');return;}
+  if(project&&activeTrack==='habit'&&!manual&&(label||startText||endText)){
+   try{localStorage.setItem(composerKey(project.id),JSON.stringify({label,start:startText,end:endText,kind:behaviorKind}));}
+   catch{setError('浏览器无法保存当前习惯输入，请先完成或清空后再退出。');return;}
+  }
+  try{await flush();logoutNow();}catch(error){setError(error instanceof Error?error.message:'草稿尚未保存，暂不能退出登录。');}
+ }
+ async function retrySave(){await doBusy('正在核对草稿保存状态…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);if(annotationsEqual(normalizeStateSeams(remote.annotations,remote.continuity_bridges??[],remote.videos),normalizeStateSeams(local.annotations,remote.continuity_bridges??[],remote.videos))){serverRevision.current=remote.revision;projectRef.current={...local,name:remote.name,revision:remote.revision,updated_at:remote.updated_at,annotations:remote.annotations};setProject(projectRef.current);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setNotice('已确认当前标注保存成功');return;}if(remote.revision===serverRevision.current){saveFailedRef.current=false;setSaveFailed(false);persist(local,local.annotations);await saveQueue.current;return;}setSaveState('版本冲突，改动保留在此页');setError('草稿已在其他窗口更新。当前改动仍保留在此页；请点击「保存恢复副本并重新载入」，下载包含本页标注的恢复 JSON 后读取服务器草稿。');});}
  async function recoverAndReload(){await doBusy('正在生成恢复副本并重新载入…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);const content=JSON.stringify(local,null,2);const blob=new Blob([content],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=`${local.name.replace(/[<>:"/\\|?*]/g,'_')}-未保存草稿-恢复副本-${Date.now()}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);adopt(remote);setNotice('恢复副本已开始下载，已重新载入服务器草稿。原有未保存改动保留在恢复 JSON 中。');});}
- function adopt(p:Project){setComparison(null);setComparisonOpen(false);setTimelineImportOpen(false);setClearedPreviewId('');p={...p,annotations:{...p.annotations,category:p.annotations.category??[]}};setAnchors([]);setSelectedRange(null);setCategoryMode('state');setSessionEntered(false);setPrepareOpen(true);preparation.refresh();scrubbingRef.current=false;setScrubbing(false);writeProjectPreference('datamark-last-project',p.id);setMediaVersion(v=>v+1);wantsPlay.current=false;setPlaying(false);videoRef.current?.pause();serverRevision.current=p.revision;projectRef.current=p;setProject(p);setCurrent(0);pendingSeek.current=0;activateVideo(p.videos[0]?.id??'');setMediaError('');resetEditorFields();updateHistory([],[]);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存本机');setError('');if(activeTrack==='habit')restoreComposer(p.id);if((p as Project & {warnings?:string[]}).warnings?.length)setNotice((p as Project & {warnings:string[]}).warnings.join('；'));}
+ function adopt(p:Project){setComparison(null);setComparisonOpen(false);setTimelineImportOpen(false);setClearedPreviewId('');p={...p,annotations:{...p.annotations,category:p.annotations.category??[]}};setAnchors([]);setSelectedRange(null);setCategoryMode('state');setSessionEntered(false);setPrepareOpen(true);preparation.refresh();scrubbingRef.current=false;setScrubbing(false);writeProjectPreference(lastProjectKey,p.id);setMediaVersion(v=>v+1);wantsPlay.current=false;setPlaying(false);videoRef.current?.pause();serverRevision.current=p.revision;projectRef.current=p;setProject(p);setCurrent(0);pendingSeek.current=0;activateVideo(p.videos[0]?.id??'');setMediaError('');resetEditorFields();updateHistory([],[]);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setError('');if(activeTrack==='habit')restoreComposer(p.id);if((p as Project & {warnings?:string[]}).warnings?.length)setNotice((p as Project & {warnings:string[]}).warnings.join('；'));}
  async function doBusy(message:string,fn:()=>Promise<void>,inImport=false){if(busyRef.current)return;busyRef.current=true;setBusy(message);setError('');if(inImport)setImportError('');try{await fn();}catch(e){if(inImport)setImportError((e as Error).message);else setError((e as Error).message);}finally{busyRef.current=false;setBusy('');}}
  async function finishImport(p:Project){const requestedName=newProjectName.trim();adopt(p);setImportOpen(false);if(requestedName&&p.name!==requestedName)setNotice(`这些素材已有项目，已打开「${p.name}」。可点击名称旁的铅笔重命名。`);await refresh();}
  async function openPreparation(){
@@ -265,7 +281,7 @@ export default function App(){
   const current=projectRef.current;if(!current)throw new Error('请先打开要补导入的项目。');
   let composer:ComposerDraft|null=null;
   if(activeTrack==='habit'&&!manual)composer={label,start:startText,end:endText,kind:behaviorKind};
-  else{try{const stored=JSON.parse(localStorage.getItem('datamark-composer-'+current.id)??'null');if(stored)composer={label:stored.label??'',start:stored.start??'',end:stored.end??'',kind:stored.kind==='point'?'point':'interval'};}catch{throw new Error('无法读取当前行为输入草稿。请先打开行为面板，检查并保存输入后再补导入。');}}
+  else{try{const stored=JSON.parse(localStorage.getItem(composerKey(current.id))??'null');if(stored)composer={label:stored.label??'',start:stored.start??'',end:stored.end??'',kind:stored.kind==='point'?'point':'interval'};}catch{throw new Error('无法读取当前行为输入草稿。请先打开行为面板，检查并保存输入后再补导入。');}}
   const capture=(value:string,edge:'start'|'end')=>{
    if(!value.trim())return null;
    const parsed=parseTime(value),anchor=parsed===null?null:anchorVideoTime(current.videos,parsed,edge);
@@ -285,7 +301,7 @@ export default function App(){
    if(composer){
     const restore=(anchor:VideoTimeAnchor|null,value:string)=>{if(!anchor)return value;const next=restoreVideoTime(p.videos,anchor);if(next===null)throw new Error('补导入后原视频不存在，请重新打开项目核对。');return formatTime(next);};
     composer={...composer,start:restore(context.start,composer.start),end:restore(context.end,composer.end)};
-    try{localStorage.setItem('datamark-composer-'+p.id,JSON.stringify(composer));}catch{composerStorageWarning='行为输入已保留在本页，但浏览器无法保存输入草稿，请在关闭网页前保存这条标注。';}
+    try{localStorage.setItem(composerKey(p.id),JSON.stringify(composer));}catch{composerStorageWarning='行为输入已保留在本页，但浏览器无法保存输入草稿，请在关闭网页前保存这条标注。';}
    }
    adopt(p);
    if(composer&&activeTrack==='habit'){setLabel(composer.label);setStartText(composer.start);setEndText(composer.end);setBehaviorKind(composer.kind);}
@@ -396,7 +412,7 @@ export default function App(){
   if(!deleteProject||deleting)return;
   const target=deleteProject;setDeleting(true);setDeleteError('');
   pauseClearedPreviews(target.id);
-  writeProjectPreference('datamark-previews-cleared',JSON.stringify({id:target.id,at:Date.now()}));
+  writeProjectPreference(`datamark-user-${user.id}-previews-cleared`,JSON.stringify({id:target.id,at:Date.now()}));
   try{
    await api(`/api/projects/${target.id}/preview-cache/clear`,json('POST',{confirmed:true,expected_revision:target.revision}));
    setDeleteProject(null);
@@ -470,7 +486,7 @@ export default function App(){
  function remove(){if(!project||!selectedId)return;commit({...project.annotations,[activeTrack]:deleteAnnotation(project.annotations[activeTrack],selectedId,spans,activeTrack)});clearEditor();}
  function undo(){if(busyRef.current)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再撤销；当前输入已保留。');return;}const past=historyRef.current,p=projectRef.current;if(!past.length||!p)return;updateHistory(past.slice(0,-1),[...redoRef.current.slice(-49),p.annotations]);commit(past[past.length-1],false);clearEditor();}
  function redo(){if(busyRef.current)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再恢复；当前输入已保留。');return;}const future=redoRef.current,p=projectRef.current;if(!future.length||!p)return;updateHistory([...historyRef.current.slice(-49),p.annotations],future.slice(0,-1));commit(future[future.length-1],false);clearEditor();}
- async function exportFiles(){if(!project)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再导出；当前输入尚未写入结果。');return;}await doBusy('正在生成四个时间轴文件…',async()=>{await flush();const r=await fetch(`/api/projects/${project.id}/export`);if(!r.ok){const j=await r.json();throw new Error(j.detail);}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${projectDownloadName(project.name)}-timelines.zip`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);setNotice('已导出 ZIP，内含场景、姿势、大类、习惯四个独立 JSON');});}
+ async function exportFiles(){if(!project)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再导出；当前输入尚未写入结果。');return;}await doBusy('正在生成四个时间轴文件…',async()=>{await flush();const r=await authFetch(`/api/projects/${project.id}/export`);if(!r.ok){const j=await r.json();throw new Error(j.detail);}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${projectDownloadName(project.name)}-timelines.zip`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);setNotice('已导出 ZIP，内含场景、姿势、大类、习惯四个独立 JSON');});}
  async function writeback(){if(!project)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再写回原目录；当前输入尚未写入结果。');return;}await doBusy('正在写回 timeline 文件夹…',async()=>{await flush();await api(`/api/projects/${project.id}/writeback`,{method:'POST'});setNotice('四个 JSON 已写回原采集目录的 timeline 文件夹');});}
  useEffect(()=>{
   const key=(e:KeyboardEvent)=>{
@@ -519,13 +535,18 @@ export default function App(){
   <div className="workspace-actions" aria-label="项目操作">{projects.length>0&&<div className="project-switcher"><div className="project-picker"><FolderOpen size={15}/><select aria-label="打开已保存项目" value={project?.id??''} disabled={!!busy} onChange={e=>chooseProject(e.target.value)}><option value="">最近项目</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><ChevronDown size={13}/></div><button className="project-rename-button" aria-label="重命名当前项目" title="重命名当前项目" disabled={!project||!!busy||project.deletion_pending} onClick={askRenameProject}><Pencil size={15}/></button><button className="project-delete-button" aria-label="清理本机预览" title="仅清理本机预览，保留项目、草稿和 NAS 缓存" disabled={!project||!!busy||deleting} onClick={askDeleteProject}><Trash2 size={16}/></button></div>}<button className="secondary new-project-action" aria-label="新建项目" title="导入视频并新建项目" onClick={()=>beginImport('new')} disabled={!!busy}><Plus size={16}/><span>新建项目</span></button>{project&&<button className="secondary supplement-action" onClick={()=>beginImport('supplement')} disabled={!!busy||project.deletion_pending}><Upload size={16}/>补导入视频</button>}{project&&<button className="secondary prepare-action" title="检查全部精简播放缓存、封面和悬停图片" onClick={openPreparation} disabled={!!busy||preparation.busy}>{preparation.status?.state==='ready'?<Check size={15}/>:preparation.status?.state==='running'&&preparation.status.requested?<LoaderCircle className="spin" size={15}/>:<Film size={15}/>}<span>{preparation.status?.checking?'检查缓存中':preparation.status?.state==='ready'?'本机播放就绪':preparation.status?.state==='running'&&preparation.status.requested?`准备中 ${preparation.status.ready}/${preparation.status.total}`:'准备全部预览'}</span></button>}<button className="secondary" disabled={!project||!sessionEntered||!!busy} onClick={event=>{pausePlayback();comparisonTrigger.current=event.currentTarget;if(comparison)setComparisonOpen(true);else setTimelineImportOpen(true);}}><ScanLine size={16}/>时间轴对照</button><button className="primary" disabled={!project||!!busy} onClick={exportFiles}><Download size={16}/>导出 JSON</button>{project?.source_dir&&<button className="secondary writeback-action" disabled={!!busy} title={project.source_dir} onClick={writeback}><Save size={14}/>写回原目录</button>}</div>
   {project&&(coverageIssues.length>0||running.length>0)&&<div className="output-status" role="status" title="补齐场景、姿势并结束进行中的习惯后，可正式导出和写回；大类允许留空">{coverageIssues.length>0&&<span>待补齐：{coverageIssues.map(item=>`${names[item.track]} ${item.count}处`).join(' · ')}</span>}{running.length>0&&<span>{running.length} 项习惯未结束</span>}</div>}
  </section>;
- return <div className="app-shell">
+ return <div className={'app-shell '+(user.role==='admin'?'is-admin':'is-annotator')}>
+  {adminOpen&&<AdminPanel projects={projects} onClose={()=>setAdminOpen(false)}/>}
+  {passwordOpen&&<PasswordDialog onClose={()=>setPasswordOpen(false)} onChanged={logoutNow}/>}
+  {auditOpen&&project&&<HistoryPanel projectId={project.id} onClose={()=>setAuditOpen(false)}/>}
+  {selected&&<div className="annotation-author" role="status">选中标注：创建人 {selected.created_by_name??'未知（旧标注）'}{selected.updated_by_name&&<> · 最近编辑 {selected.updated_by_name}</>}</div>}
+  {project&&<div className="annotation-author"><button className="text-button" onClick={()=>setAuditOpen(true)}>查看标注编辑历史</button></div>}
   {timelineImportOpen&&project&&<TimelineImportDialog project={project} initialTrack={comparison?.track??activeTrack} onCancel={()=>{setTimelineImportOpen(false);if(!comparisonOpen)queueMicrotask(()=>comparisonTrigger.current?.focus());}} onOpen={value=>{setComparison(value);setTimelineImportOpen(false);setComparisonOpen(true);}}/>}
   {comparisonOpen&&<div className="comparison-backdrop"/>}
   {settingsOpen&&<SeekSettingsDialog value={seekSettings} onCancel={()=>setSettingsOpen(false)} onSave={saveSeekSettings}/>}
   {renameProject&&<RenameProjectDialog name={renameProject.name} saving={renaming} error={renameError} onCancel={()=>{setRenameProject(null);setRenameError('');}} onConfirm={confirmRenameProject}/>}
   {deleteProject&&<DeleteProjectDialog project={deleteProject} deleting={deleting} error={deleteError} onCancel={()=>{setDeleteProject(null);setDeleteError('');}} onConfirm={confirmDeleteProject}/>}
-  <header className="topbar" inert={comparisonOpen||timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions"><span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>
+  <header className="topbar" inert={comparisonOpen||timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen||adminOpen||passwordOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions"><span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><span>{user.display_name}</span>{user.role==='admin'&&<button className="quiet" onClick={()=>setAdminOpen(true)}>账号管理</button>}<button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} title="请先保存或取消当前编辑" onClick={()=>setPasswordOpen(true)}>修改密码</button><button className="quiet" onClick={()=>void onLogout()}>退出登录</button><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>
   {error&&<div className="message error" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={()=>setError('')}><X size={16}/></button></div>}
   {notice&&<div className="message success" role="status"><Check size={16}/><span>{notice}</span><button aria-label="关闭提示" onClick={()=>setNotice('')}><X size={16}/></button></div>}
   {project?.needs_source_relink&&<div className="source-relink-notice" inert={importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}><FolderOpen size={16}/><span>此项目仍使用平台内的视频副本。关联原目录后，缓存会移到原视频旁，释放重复存储。</span><button className="secondary" disabled={!!busy||project.deletion_pending} onClick={()=>beginImport('relink')}>关联原目录</button></div>}
@@ -566,22 +587,19 @@ export default function App(){
    <p>{importMode==='relink'?<>选择最初的原视频目录，验证匹配后迁移已有缓存并清理平台内的视频副本。<br/>标注、撤销记录和当前输入都会保留。</>:importMode==='supplement'?<>漏掉的视频会按录制时间插入当前时间轴。<br/>保留已有标注和预览缓存，同名视频自动跳过。</>:<>识别文件名中的录制时间，自动排序。<br/>保留视频之间的真实录制间隔。</>}</p>
    <div className="source-storage-note"><strong>原视频保留原目录，不复制</strong><span>预览缓存生成在原目录的 <code>.datamark-cache</code> 子文件夹，并附有 README.md 用途说明。标注草稿保存在平台内。</span><small>使用移动硬盘、SD 卡或共享目录时，请保持该位置可访问。</small></div>
    {importError&&<p className="import-error" role="alert">{importError}</p>}
-   <div className="prepare-import-option"><Check size={17}/><span><strong>先准备全部播放素材，再开始标注</strong><small>原目录保存完整预览，本机仅保存精简播放缓存，复用已有有效素材。</small></span></div>
-   <div className={'source-pickers'+(importMode==='relink'?' single':'')}>
+   <div className="prepare-import-option"><Check size={17}/><span><strong>先准备全部播放素材，再开始标注</strong><small>原目录保存完整预览，{sharedServer?'服务器':'本机'}仅保存精简播放缓存，复用已有有效素材。</small></span></div>
+   {!sharedServer&&<div className={'source-pickers'+(importMode==='relink'?' single':'')}>
     {importMode!=='relink'&&<button className="upload-zone" disabled={!!busy} onClick={()=>chooseLocalSources('files')}><Film size={23}/><strong>选择视频文件</strong><span>支持一次多选</span></button>}
     <button className="upload-zone" disabled={!!busy} onClick={()=>chooseLocalSources('directory')}><FolderOpen size={23}/><strong>选择原视频目录</strong><span>{importMode==='relink'?'匹配已有视频，迁移缓存':'直接读取目录中的视频'}</span></button>
-   </div>
-   <div className="divider"><span>或直接填写本机 / 内网路径</span></div>
+   </div>}
+   {!sharedServer&&<div className="divider"><span>或直接填写本机 / 内网路径</span></div>}
    <label className="field-label" htmlFor="source-path">{importMode==='relink'?'原视频目录路径':'视频文件或目录路径'}</label>
-   <input id="source-path" disabled={!!busy} value={path} placeholder="粘贴原视频所在目录的完整路径" onChange={e=>setPath(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')openPath();}}/>
-   <p className="input-hint">{importMode==='relink'?'请提供包含这些原视频的目录；校验成功后才会清理对应副本。':importMode==='supplement'?'支持单个视频或整个目录；再次选择原目录可自动补齐遗漏视频。':'支持本机目录、采集根目录或内网共享目录。'}</p>
+   <input id="source-path" disabled={!!busy} value={path} placeholder={sharedServer?'填写服务器上的 NAS 完整路径，例如 /mnt/nas/homes/…':'粘贴原视频所在目录的完整路径'} onChange={e=>setPath(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')openPath();}}/>
+   <p className="input-hint">{importMode==='relink'?'请提供包含这些原视频的目录；校验成功后才会清理对应副本。':importMode==='supplement'?'支持单个视频或整个目录；再次选择原目录可自动补齐遗漏视频。':'请输入服务器可访问的采集根目录或内网共享目录。'}</p>
    <button className="primary wide" disabled={!path.trim()||!!busy} onClick={openPath}><FolderOpen size={16}/>{importMode==='relink'?'关联并迁移缓存':importMode==='supplement'?'补入当前项目':'读取并新建项目'}</button>
    <p className="privacy-note"><span className="status-dot"/>直接读取所选路径，不上传或复制原视频</p>
   </section></div>}
-  {prepareOpen&&project&&<PreparePanel projectName={project.name} status={preparation.status} error={preparation.error} busy={preparation.busy} skippedVideos={project.skipped_videos} onSkipFailed={ids=>changeSkippedVideos(ids)} onRestoreSkipped={()=>changeSkippedVideos()} onRetry={()=>void openPreparation()} onEnter={()=>{if(preparation.status?.state==='ready'&&preparation.manifest&&!preparation.error){setSessionEntered(true);setPrepareOpen(false);}}} onClose={()=>{enterAfterSkip.current=null;setPrepareOpen(false);}}/>}
+  {prepareOpen&&project&&<PreparePanel projectName={project.name} status={preparation.status} error={preparation.error} busy={preparation.busy} skippedVideos={project.skipped_videos} onSkipFailed={user.role==='admin'?ids=>changeSkippedVideos(ids):undefined} onRestoreSkipped={user.role==='admin'?()=>changeSkippedVideos():undefined} onRetry={()=>void openPreparation()} onEnter={()=>{if(preparation.status?.state==='ready'&&preparation.manifest&&!preparation.error){setSessionEntered(true);setPrepareOpen(false);}}} onClose={()=>{enterAfterSkip.current=null;setPrepareOpen(false);}}/>}
   {busy&&<div className="busy-overlay" role="status"><LoaderCircle className="spin" size={28}/><strong>{busy}</strong><span>大文件或内网素材可能需要一些时间</span></div>}
  </div>;
 }
-
-
-

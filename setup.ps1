@@ -86,6 +86,12 @@ try {
         & $npmPath --prefix $frontendRoot run build
         Assert-NativeSuccess 'Frontend build'
     }
+    & $venvPython -m backend.auth --check-admin
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'Create the first administrator account. The password stays in the local credential database.'
+        & $venvPython -m backend.auth
+        Assert-NativeSuccess 'Administrator account creation'
+    }
     $shortcutShell = New-Object -ComObject WScript.Shell
     $shortcut = $shortcutShell.CreateShortcut((Join-Path $projectRoot '启动标注平台.lnk'))
     $shortcut.TargetPath = Join-Path $projectRoot '.venv\Scripts\pythonw.exe'
@@ -99,5 +105,4 @@ try {
     Set-Location -LiteralPath $originalLocation.Path
     foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $originalEnvironment[$name], 'Process') }
 }
-
 

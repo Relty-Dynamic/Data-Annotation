@@ -20,7 +20,7 @@ class ProjectStorageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="storage-test-", dir=ROOT / ".tmp")
         self.root = Path(self.temp.name)
-        self.app = create_app(self.root)
+        self.app = create_app(self.root, auth_required=False)
         self.s = self.app.state.service
         self.s.probe = lambda path: {"duration_ms": 1000, "codec": "mjpeg", "media_start_seconds": 0, "audio_codecs": []}
         self.original = self.root / "originals"

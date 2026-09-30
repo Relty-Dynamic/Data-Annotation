@@ -166,7 +166,8 @@ def normalize_state_seams(records: list[dict], videos: list[dict], bridges: list
     for record in records:
         previous = result[-1] if result else None
         bridge = bridge_ends.get(previous["end_ms"]) if previous else None
-        same = previous is not None and previous["label"] == record["label"]
+        same = previous is not None and previous["label"] == record["label"] and all(
+            previous.get(key) == record.get(key) for key in ("created_by", "created_at", "updated_by", "updated_at"))
         # Only an old state ending exactly at the seam may resume through that
         # seam. An intentionally unlabelled interval elsewhere remains intact.
         across_seam = bridge and bridge["end_ms"] <= record["start_ms"] < video_ends.get(bridge["next_video_id"], bridge["end_ms"])
@@ -244,6 +245,12 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
                     if covered != end - start:
                         raise HTTPException(422, "标注区间不能跨越无视频空档，请分别标注两侧视频。")
             cleaned_record = {"id": ident, "label": label, "kind": kind, "start_ms": start, "end_ms": end}
+            for key in ("created_by", "created_by_name", "created_at", "updated_by", "updated_by_name", "updated_at"):
+                item = record.get(key)
+                if item is not None:
+                    if not isinstance(item, str) or len(item) > 120:
+                        raise HTTPException(422, "标注人信息格式不正确。")
+                    cleaned_record[key] = item
             if axis == "category":
                 mode = record.get("mode", "state")
                 if mode not in ("state", "overlay"):
@@ -307,6 +314,8 @@ class ProjectService:
         with self.connection() as con:
             con.execute("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, source_key TEXT, document TEXT NOT NULL, updated_at TEXT NOT NULL)")
             con.execute("CREATE INDEX IF NOT EXISTS idx_projects_source ON projects(source_key)")
+            con.execute("CREATE TABLE IF NOT EXISTS edit_events (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, revision INTEGER NOT NULL, axis TEXT NOT NULL, segment_id TEXT NOT NULL, action TEXT NOT NULL, actor_id TEXT, actor_name TEXT, recorded_at TEXT NOT NULL, before_json TEXT, after_json TEXT)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_edit_events_project ON edit_events(project_id, revision, id)")
 
     @contextmanager
     def connection(self):
@@ -1033,7 +1042,7 @@ class ProjectService:
                 folder = fpv or path
                 paths = [item for item in folder.iterdir() if item.is_file() and item.suffix.casefold() in VIDEO_EXTENSIONS]
         except OSError:
-            raise HTTPException(422, "无法访问补导入素材，请检查路径、网络及 Windows 共享权限。")
+            raise HTTPException(422, "无法访问补导入素材，请检查服务器路径、网络及共享目录权限。")
         if not paths:
             raise HTTPException(422, "没有找到支持的视频，请选择视频文件或所在目录。")
         return self.supplement(ident, paths, expected_revision)
@@ -1110,7 +1119,7 @@ class ProjectService:
                 raise ValueError()
             for axis, document in documents.items():
                 version = document["schema_version"]
-                if type(version) is not int or version not in (1, 2) or document["axis"] != axis:
+                if type(version) is not int or version not in (1, 2, 3) or document["axis"] != axis:
                     raise ValueError()
                 versions.add(version)
                 fingerprints = [document["timebase"]["source_fingerprint"]]
@@ -1123,7 +1132,7 @@ class ProjectService:
                     raise ValueError()
                 batch_ids.add(document["save_id"])
                 lookup = {item["id"]: item["name"] for item in document["labels"]}
-                annotations[axis] = [{"id": item["id"], "label": lookup[item["label_id"]], "kind": item.get("kind", "interval"), "start_ms": item["start_ms"], "end_ms": item["end_ms"], **({"mode": item.get("mode", "state")} if axis == "category" else {})} for item in document["segments"]]
+                annotations[axis] = [{"id": item["id"], "label": lookup[item["label_id"]], "kind": item.get("kind", "interval"), "start_ms": item["start_ms"], "end_ms": item["end_ms"], **({"mode": item.get("mode", "state")} if axis == "category" else {}), **({key: item[key] for key in ("created_by", "created_by_name", "created_at", "updated_by", "updated_by_name", "updated_at") if key in item} if version == 3 else {})} for item in document["segments"]]
             if len(batch_ids) != 1 or not next(iter(batch_ids)) or len(versions) != 1:
                 raise HTTPException(409, "标注 JSON 不属于同一保存批次或格式版本。请恢复一致的文件后再打开。")
             version = next(iter(versions))
@@ -1143,7 +1152,7 @@ class ProjectService:
     def open_path(self, raw_path: str, name: str | None = None) -> dict:
         name = validate_project_name(name, allow_empty=True)
         if not raw_path or not raw_path.strip():
-            raise HTTPException(422, "请输入 Windows 本地目录或共享目录路径。")
+            raise HTTPException(422, "请输入服务器可访问的原视频目录或共享目录路径。")
         path = Path(raw_path.strip().strip('"')).expanduser()
         try:
             path = path.resolve(strict=True)
@@ -1159,7 +1168,7 @@ class ProjectService:
                 video_dir = fpv or path
             paths = [item for item in video_dir.iterdir() if item.is_file() and item.suffix.casefold() in VIDEO_EXTENSIONS]
         except OSError:
-            raise HTTPException(422, "无法访问目录。请检查路径、网络及 Windows 共享权限。")
+            raise HTTPException(422, "无法访问目录。请检查服务器路径、网络及共享目录权限。")
         with self.lock:
             source_key = os.path.normcase(str(source_dir))
             with self.connection() as con:
@@ -1170,9 +1179,9 @@ class ProjectService:
             if previous and previous.get("_supplemented"):
                 return self.reopen_supplemented(previous, paths)
             fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None)
-            if previous and fresh["source_fingerprint"] != previous["source_fingerprint"]:
+            if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
                 raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
-            imported, hashes = self.read_external(fresh)
+            imported, hashes = self.read_external(previous or fresh)
             if previous:
                 preserved_alignment_warnings = alignment_warnings(previous["videos"])
                 previous["warnings"] = preserved_alignment_warnings
@@ -1208,7 +1217,7 @@ class ProjectService:
         self.save(project)
         return self.public(project)
 
-    def update_draft(self, ident: str, annotations: Any, expected_revision: int) -> dict:
+    def update_draft(self, ident: str, annotations: Any, expected_revision: int, *, actor: dict | None = None) -> dict:
         with self.lock:
             project = self.load(ident)
             if project["revision"] != expected_revision:
@@ -1216,12 +1225,50 @@ class ProjectService:
             if isinstance(annotations, dict) and set(annotations) == set(LEGACY_AXES):
                 # An already open legacy client must never erase the new axis.
                 annotations = {**annotations, "category": project["annotations"].get("category", [])}
-            project["annotations"] = validate_annotations(annotations, project["duration_ms"], videos=active_videos(project))
+            cleaned = validate_annotations(annotations, project["duration_ms"], videos=active_videos(project))
+            events = []
+            if actor is not None:
+                recorded_at = now()
+                for axis in AXES:
+                    old = {item["id"]: item for item in project["annotations"].get(axis, [])}
+                    new = {item["id"]: item for item in cleaned[axis]}
+                    for item_id in old.keys() | new.keys():
+                        before, after = old.get(item_id), new.get(item_id)
+                        if after is not None:
+                            # Attribution from the browser is never authoritative.
+                            for key in ("created_by", "created_by_name", "created_at", "updated_by", "updated_by_name", "updated_at"):
+                                after.pop(key, None)
+                            if before is not None:
+                                for key in ("created_by", "created_by_name", "created_at", "updated_by", "updated_by_name", "updated_at"):
+                                    if key in before:
+                                        after[key] = before[key]
+                            if before is None:
+                                after.update(created_by=actor["id"], created_by_name=actor["display_name"], created_at=recorded_at)
+                            elif any(before.get(key) != after.get(key) for key in ("label", "kind", "mode", "start_ms", "end_ms")):
+                                after.update(updated_by=actor["id"], updated_by_name=actor["display_name"], updated_at=recorded_at)
+                        if before != after:
+                            events.append((uuid.uuid4().hex, ident, project["revision"] + 1, axis, item_id,
+                                           "create" if before is None else "delete" if after is None else "update",
+                                           actor["id"], actor["display_name"], recorded_at,
+                                           json.dumps(before, ensure_ascii=False) if before else None,
+                                           json.dumps(after, ensure_ascii=False) if after else None))
+            project["annotations"] = cleaned
             project["revision"] += 1
             project["updated_at"] = now()
             project["draft_dirty"] = True
-            self.save(project)
+            if actor is None:
+                self.save(project)
+            else:
+                with self.connection() as con:
+                    con.execute("INSERT INTO projects VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_key=excluded.source_key, document=excluded.document, updated_at=excluded.updated_at", (project["id"], project.get("_source_key"), json.dumps(project, ensure_ascii=False), project["updated_at"]))
+                    con.executemany("INSERT INTO edit_events VALUES (?,?,?,?,?,?,?,?,?,?,?)", events)
             return self.public(project)
+
+    def edit_history(self, ident: str, *, limit: int = 200) -> list[dict]:
+        self.load(ident)
+        with self.connection() as con:
+            rows = con.execute("SELECT id,revision,axis,segment_id,action,actor_id,actor_name,recorded_at,before_json,after_json FROM edit_events WHERE project_id=? ORDER BY revision DESC,id DESC LIMIT ?", (ident, limit)).fetchall()
+        return [{"id": row[0], "revision": row[1], "axis": row[2], "segment_id": row[3], "action": row[4], "actor_id": row[5], "actor_name": row[6], "recorded_at": row[7], "before": json.loads(row[8]) if row[8] else None, "after": json.loads(row[9]) if row[9] else None} for row in rows]
 
     @staticmethod
     def current_source_fingerprint(project: dict) -> str:
@@ -1309,7 +1356,7 @@ class ProjectService:
                     "start_date": start_at.date().isoformat(),
                     "end_date": end_at.date().isoformat(),
                 })
-            document = {"schema_version": 2, "save_id": save_id, "saved_at": now(), "collection_id": project["id"], "collection_name": project["name"], "axis": axis, "timebase": timebase, "labels": [{"id": value, "name": label} for label, value in labels.items()], "segments": records}
+            document = {"schema_version": 3, "save_id": save_id, "saved_at": now(), "collection_id": project["id"], "collection_name": project["name"], "axis": axis, "timebase": timebase, "labels": [{"id": value, "name": label} for label, value in labels.items()], "segments": records}
             result[axis] = document_bytes(document)
         return save_id, result
 
@@ -1511,7 +1558,9 @@ class ProjectService:
         for candidate in (spec.target, spec.legacy_preview):
             if candidate is not None and candidate.is_file() and candidate.stat().st_size:
                 return candidate
-        if compatible and available:
+        # A LAN browser must never receive the original file through the
+        # compatibility shortcut; prepare an actual preview first.
+        if compatible and available and not os.getenv("DATAMARK_ORIGIN"):
             return path
         return None
 

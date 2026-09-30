@@ -44,6 +44,18 @@ class PreviewQueueTests(unittest.TestCase):
     def spec(self, key):
         return PreviewSpec(key, self.root / (key + ".avi"), {"duration_ms": 1000}, self.root / (key + ".mp4"), self.root / (key + ".error.json"))
 
+    def test_intranet_does_not_serve_original_as_preview(self):
+        original = self.root / "original.mp4"
+        original.write_bytes(b"original-video")
+        source = {"media_start_seconds": 0, "format_start_seconds": 0,
+                  "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}
+        spec = PreviewSpec("original", original, source, self.root / "preview.mp4", self.root / "preview.error.json")
+        with patch.object(ProjectService, "source_available", return_value=True):
+            with patch.dict(os.environ, {"DATAMARK_ORIGIN": "https://192.168.2.126"}):
+                self.assertIsNone(ProjectService.cached_preview_for_spec(spec))
+            with patch.dict(os.environ, {"DATAMARK_ORIGIN": ""}):
+                self.assertEqual(ProjectService.cached_preview_for_spec(spec), original)
+
     def manager(self, render):
         manager = PreviewManager(render)
         self.managers.append(manager)
@@ -141,7 +153,7 @@ class PreviewApiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="preview-api-test-", dir=ROOT / ".tmp")
         self.root = Path(self.temp.name)
-        self.app = create_app(self.root)
+        self.app = create_app(self.root, auth_required=False)
         self.service = self.app.state.service
         self.service.probe = lambda path: {"duration_ms": 1000, "media_start_seconds": 0, "format_start_seconds": 0, "codec": "mjpeg", "pixel_format": "yuvj420p", "audio_codecs": []}
         self.paths = [self.root / f"A09999_2026091409000{index}_000{index}.avi" for index in range(4)]
@@ -518,7 +530,7 @@ class PreviewApiTests(unittest.TestCase):
             self.complete_storyboard(spec)
         for path in self.paths:
             path.unlink()
-        restarted = create_app(self.root)
+        restarted = create_app(self.root, auth_required=False)
         with patch.object(restarted.state.service.previews, "render") as render:
             with TestClient(restarted, base_url="http://127.0.0.1") as client:
                 before = restarted.state.service.load(ident)
@@ -640,7 +652,7 @@ class PreviewApiTests(unittest.TestCase):
         spec = self.service.preview_spec(self.service.load(ident), "v0001")
         self.complete_batch_item(spec)
         self.paths[0].unlink()
-        restarted = create_app(self.root)
+        restarted = create_app(self.root, auth_required=False)
         with patch.object(restarted.state.service.previews, "render") as render:
             with TestClient(restarted, base_url="http://127.0.0.1") as client:
                 before = restarted.state.service.load(ident)

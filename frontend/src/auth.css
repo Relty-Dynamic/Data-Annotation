@@ -1,0 +1,14 @@
+.auth-page{min-height:100vh;display:grid;place-items:center;padding:24px;background:#101317}
+.auth-card{width:min(100%,400px);display:grid;gap:18px;padding:32px;background:#181d23;border:1px solid #343e49;border-radius:12px}
+.auth-card h1{font-size:24px}.auth-card p{color:#9babb9;line-height:1.5}
+.auth-card label,.admin-form label{display:grid;gap:7px;color:#aab8c4}
+.auth-card input{width:100%}
+.admin-panel{width:min(100%,720px);max-height:90vh;overflow:auto;padding:26px;background:#1b222a;border:1px solid #3a4855;border-radius:12px}
+.admin-header,.admin-list>div,.admin-list>label{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.admin-panel h3{margin:22px 0 10px;font-size:14px}.admin-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.admin-form button{align-self:end}.admin-list{display:grid;gap:8px}.admin-list>div,.admin-list>label{padding:8px;border:1px solid #343e49;border-radius:6px}
+.admin-list select{max-width:260px}.annotation-author{margin:8px 30px;color:#b8c8d5;font-size:12px}
+.is-annotator .new-project-action,.is-annotator .supplement-action,.is-annotator .project-rename-button,.is-annotator .project-delete-button,.is-annotator .writeback-action,.is-annotator .empty-preview button,.is-annotator .source-relink-notice button{display:none}
+.password-actions{display:flex;justify-content:flex-end;gap:8px}
+.admin-buttons{display:flex;gap:6px}.admin-reset{display:flex;align-items:center;gap:8px;margin-top:12px}.admin-reset input{max-width:220px}
+@media(max-width:650px){.admin-form{grid-template-columns:1fr}.admin-list>label{flex-direction:column;align-items:stretch}}

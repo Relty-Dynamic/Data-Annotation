@@ -106,10 +106,16 @@ class FourAxisValidationTests(unittest.TestCase):
         annotations["category"] = [interval("a", "专注", 0, 500), interval("b", "专注", 500, 1000, mode="overlay")]
         self.assertEqual([r["id"] for r in validate_annotations(annotations, 1000, final=True)["category"]], ["a", "b"])
 
+    def test_touching_state_records_keep_distinct_authors(self):
+        annotations = self.full()
+        annotations["scene"] = [interval("a", "室内", 0, 500, created_by="user-a", created_at="2026-09-30T00:00:00Z"),
+                                interval("b", "室内", 500, 1000, created_by="user-b", created_at="2026-09-30T01:00:00Z")]
+        self.assertEqual([item["id"] for item in validate_annotations(annotations, 1000)["scene"]], ["a", "b"])
+
     def test_supplement_splits_category_state_and_overlay_without_labelling_added_frames(self):
-        old = {"duration_ms": 2000, "videos": [{"id": "a", "start_ms": 0, "end_ms": 1000}, {"id": "b", "start_ms": 1000, "end_ms": 2000}], "annotations": empty_annotations()}
+        old = {"duration_ms": 2000, "videos": [{"id": "a", "name": "a.mp4", "start_ms": 0, "end_ms": 1000}, {"id": "b", "name": "b.mp4", "start_ms": 1000, "end_ms": 2000}], "annotations": empty_annotations()}
         old["annotations"]["category"] = [interval("base", "专注", 0, 2000), interval("extra", "用餐", 500, 1500, mode="overlay")]
-        videos = [{"id": "a", "start_ms": 0, "end_ms": 1000}, {"id": "added", "start_ms": 1000, "end_ms": 2000}, {"id": "b", "start_ms": 2000, "end_ms": 3000}]
+        videos = [{"id": "a", "name": "a.mp4", "start_ms": 0, "end_ms": 1000}, {"id": "added", "name": "added.mp4", "start_ms": 1000, "end_ms": 2000}, {"id": "b", "name": "b.mp4", "start_ms": 2000, "end_ms": 3000}]
         result, warnings = ProjectService.remap_annotations(old, videos, 3000)
         self.assertEqual(warnings, [])
         records = result["category"]
@@ -176,7 +182,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual(set(self.service.load(stored["id"])["_external_hashes"]), set(AXES))
         for axis in AXES:
             document = json.loads((self.source / "timeline" / FILENAMES[axis]).read_bytes())
-            self.assertEqual(document["schema_version"], 2)
+            self.assertEqual(document["schema_version"], 3)
             self.assertEqual(document["save_id"], saved["save_id"])
         self.assertEqual(json.loads((self.source / FILENAMES["scene"]).read_bytes())["schema_version"], 1)
 
@@ -199,6 +205,23 @@ class FourAxisPersistenceTests(unittest.TestCase):
         finally:
             fresh.previews.close()
 
+    def test_v3_attribution_survives_export_writeback_and_reopen(self):
+        project = self.annotated_project()
+        annotations = copy.deepcopy(project["annotations"])
+        annotations["habit"] = [interval("water", "喝水", 500, 600, created_by="forged")]
+        actor = {"id": "user-1", "display_name": "标注甲"}
+        saved = self.service.update_draft(project["id"], annotations, project["revision"], actor=actor)
+        author = saved["annotations"]["habit"][0]
+        self.assertEqual(author["created_by"], "user-1")
+        self.assertEqual(author["created_by_name"], "标注甲")
+        with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+            exported = json.loads(archive.read(FILENAMES["habit"]))
+        self.assertEqual(exported["schema_version"], 3)
+        self.assertEqual(exported["segments"][0]["created_by"], "user-1")
+        self.service.writeback(project["id"])
+        imported, _ = self.service.read_external(self.service.load(project["id"]))
+        self.assertEqual(imported["habit"][0], author)
+
     def test_category_state_and_overlay_survive_save_export_import(self):
         project = self.annotated_project()
         annotations = project["annotations"]
@@ -219,7 +242,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
             self.assertEqual(set(archive.namelist()), set(FILENAMES.values()))
             documents = {axis: json.loads(archive.read(FILENAMES[axis])) for axis in AXES}
-        self.assertEqual({document["schema_version"] for document in documents.values()}, {2})
+        self.assertEqual({document["schema_version"] for document in documents.values()}, {3})
         self.assertEqual(len({document["save_id"] for document in documents.values()}), 1)
         category_fields = ("id", "label", "kind", "start_ms", "end_ms", "mode")
         self.assertEqual([{key: record[key] for key in category_fields}
@@ -234,7 +257,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual(stored["annotations"], expected)
         for axis in AXES:
             document = json.loads((self.source / "timeline" / FILENAMES[axis]).read_bytes())
-            self.assertEqual(document["schema_version"], 2)
+            self.assertEqual(document["schema_version"], 3)
             self.assertEqual(document["save_id"], saved["save_id"])
         fresh = ProjectService(self.root / "optional-category-fresh")
         try:
@@ -342,7 +365,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
                 self.assertEqual(document["segments"][0]["label_id"], legacy_id)
 
     def test_health_advertises_four_axis_support(self):
-        with TestClient(create_app(self.root / "four-axis-health"), base_url="http://127.0.0.1") as client:
+        with TestClient(create_app(self.root / "four-axis-health", auth_required=False), base_url="http://127.0.0.1") as client:
             self.assertIn("four-axis-annotations", client.get("/api/health").json()["capabilities"])
 
     def test_writeback_creates_timeline_directory_and_keeps_root_clear(self):

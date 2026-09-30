@@ -44,7 +44,7 @@ def open_browser():
 
 def reuse_running(args):
     current = health()
-    if not current or current.get("application") != "datamark" or current.get("stopping"):
+    if not current or current.get("application") != "datamark" or current.get("stopping") or "account-login" not in current.get("capabilities", []):
         return False
     if not args.no_browser and current.get("browser_lifetime") and not reserve_browser():
         return False
@@ -89,6 +89,12 @@ def main():
         (ROOT / folder).mkdir(parents=True, exist_ok=True)
     os.environ.update(settings)
     os.chdir(ROOT)
+    from backend.auth import AuthStore
+    if not AuthStore(ROOT).has_admin():
+        raise RuntimeError("尚未创建管理员账号。请先在项目虚拟环境运行 python -m backend.auth，然后重启平台。")
+    current = health()
+    if current and current.get("application") == "datamark" and "account-login" not in current.get("capabilities", []):
+        raise RuntimeError("端口 8765 仍由旧版无登录服务占用。请先关闭旧平台的所有网页，等待服务退出后重新启动。")
     for name in ("stdout", "stderr"):
         if getattr(sys, name) is None:
             setattr(sys, name, (ROOT / ".local" / "logs" / f"server.{name}.log").open("a", encoding="utf-8", buffering=1))

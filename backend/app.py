@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import re
 import uuid
+import hmac
+import hashlib
+import ipaddress
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -19,6 +22,7 @@ from .service import ProjectService
 from .browser_lifetime import BrowserLifetime
 from .native_picker import choose_local_paths
 from .media_response import CancellableFileResponse
+from .auth import AuthStore
 
 
 class OpenRequest(BaseModel):
@@ -72,12 +76,59 @@ class SkipFailedRequest(DeleteProjectRequest):
     video_ids: list[str] = Field(min_length=1, max_length=1000)
 
 
-def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class UserRequest(LoginRequest):
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class AssignmentRequest(BaseModel):
+    user_id: str | None = None
+
+
+class ActiveRequest(BaseModel):
+    active: bool
+
+
+class PasswordRequest(BaseModel):
+    password: str = Field(min_length=12, max_length=1024)
+
+
+class ChangePasswordRequest(PasswordRequest):
+    current_password: str
+
+
+def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = True) -> FastAPI:
     root = root or Path(os.getenv("DATAMARK_ROOT", str(Path(__file__).resolve().parents[1])))
+    configured_origin = os.getenv("DATAMARK_ORIGIN", "").strip()
+    allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
+    if configured_origin:
+        bind_ip = os.getenv("DATAMARK_BIND_IP", "").strip()
+        if bind_ip:
+            address = ipaddress.ip_address(bind_ip)
+            private_ranges = (ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"),
+                              ipaddress.ip_network("192.168.0.0/16"))
+            if not any(address in network for network in private_ranges):
+                raise ValueError("DATAMARK_BIND_IP must be an RFC1918 LAN address")
+        parsed_origin = urlsplit(configured_origin)
+        if (parsed_origin.scheme != "https" or not parsed_origin.hostname
+                or parsed_origin.username or parsed_origin.password
+                or parsed_origin.path or parsed_origin.query or parsed_origin.fragment
+                or parsed_origin.netloc != parsed_origin.netloc.lower()
+                or "*" in parsed_origin.netloc or any(char.isspace() for char in configured_origin)):
+            raise ValueError("DATAMARK_ORIGIN must be an HTTPS origin without a path or credentials")
+        parsed_origin.port  # Validate an optional numeric port before accepting the origin.
+        allowed_hosts.append(parsed_origin.hostname)
     service = ProjectService(root)
+    auth = AuthStore(root)
     lifetime = BrowserLifetime(on_idle)
     @asynccontextmanager
     async def lifespan(app):
+        if configured_origin and not auth.has_admin():
+            raise RuntimeError("请先创建管理员账号，再启动 Ubuntu 内网服务。")
         service.migrate_legacy_projects()
         lifetime.start()
         try:
@@ -91,26 +142,46 @@ def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
 
     app = FastAPI(title="日常行为视频标注台", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.service = service
+    app.state.auth = auth
     app.state.browser_lifetime = lifetime
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
     @app.middleware("http")
     async def local_access(request: Request, call_next):
-        # Block cross-site drive-by mutations while allowing the same localhost UI
-        # and CLI tools. Bind uvicorn to 127.0.0.1 in the project launcher.
+        path = request.url.path
+        if auth_required and path.startswith("/api/") and path not in {"/api/health", "/api/auth/login", "/api/browser/reserve"}:
+            session = auth.session(request.cookies.get("datamark_session"))
+            if not session:
+                return JSONResponse(status_code=401, content={"detail": "请先登录。"}, headers={"Cache-Control": "no-store"})
+            user, csrf_hash = session
+            request.state.user = user
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                csrf = request.headers.get("x-csrf-token", "")
+                if not csrf or not hmac.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), csrf_hash) or csrf != request.cookies.get("datamark_csrf"):
+                    return JSONResponse(status_code=403, content={"detail": "页面安全令牌已失效，请刷新页面。"})
+            admin_only = path in {"/api/local-files/pick", "/api/projects/open", "/api/projects/files", "/api/projects/upload", "/api/users"}
+            admin_only = admin_only or path.startswith("/api/users/")
+            match = re.match(r"^/api/projects/([^/]+)(?:/|$)", path) or re.match(r"^/api/(?:previews|storyboards|media|thumbnails|session-media|session-thumbnails|session-storyboards)/([^/]+)(?:/|$)", path)
+            if match:
+                project_id = match.group(1)
+                if not auth.allowed(user, project_id):
+                    return JSONResponse(status_code=403, content={"detail": "未获分配此项目。"})
+                suffix = path[len("/api/projects/" + project_id):] if path.startswith("/api/projects/") else ""
+                if suffix in {"/name", "/writeback", "/preview-cache/clear", "/assignment", "/session/skip-failed", "/session/restore-skipped"} or suffix.startswith("/videos/") or suffix.startswith("/sources/") or (path.startswith("/api/projects/") and request.method == "DELETE"):
+                    admin_only = True
+            if admin_only and user["role"] != "admin":
+                return JSONResponse(status_code=403, content={"detail": "此操作仅管理员可执行。"})
+        # The deployed HTTPS origin is explicit, so TLS termination cannot make
+        # the backend's internal HTTP scheme invalidate browser requests.
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
             fetch_site = request.headers.get("sec-fetch-site")
             if fetch_site == "cross-site":
-                return JSONResponse(status_code=403, content={"detail": "仅允许本机标注页面修改数据。"})
+                return JSONResponse(status_code=403, content={"detail": "仅允许标注页面修改数据。"})
             if origin:
-                try:
-                    parsed = urlsplit(origin)
-                    valid = parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-                except ValueError:
-                    valid = False
-                if not valid:
-                    return JSONResponse(status_code=403, content={"detail": "仅允许本机标注页面修改数据。"})
+                expected_origin = configured_origin or f"{request.url.scheme}://{request.headers.get('host', '')}"
+                if origin != expected_origin:
+                    return JSONResponse(status_code=403, content={"detail": "仅允许标注页面修改数据。"})
         tracked = request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}
         if tracked:
             lifetime.active_requests += 1
@@ -121,7 +192,9 @@ def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
                 lifetime.active_requests -= 1
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        if request.url.path.startswith(("/api/projects", "/api/previews")) or (request.url.path.startswith("/api/storyboards/") and "/sheets/" not in request.url.path):
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        if request.url.path.startswith(("/api/auth/", "/api/users", "/api/projects", "/api/previews", "/api/media/", "/api/thumbnails/", "/api/session-media/", "/api/session-thumbnails/", "/api/session-storyboards/", "/api/storyboards/")):
             response.headers["Cache-Control"] = "no-store"
         elif request.url.path in {"/", "/index.html"}:
             # Every reopening must check the current UI after a local update.
@@ -141,7 +214,69 @@ def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "application": "datamark", "browser_lifetime": bool(on_idle), "stopping": lifetime.stopping, "ffmpeg": bool(service.tool("ffmpeg")), "ffprobe": bool(service.tool("ffprobe")), "remote_processing": service.remote is not None, "capabilities": ["source-local-cache", "native-file-picker", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "remote-nas-processing"]}
+        capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "remote-nas-processing", "account-login"]
+        if os.name == "nt" and not configured_origin:
+            capabilities.append("native-file-picker")
+        return {"status": "ok", "application": "datamark", "browser_lifetime": bool(on_idle), "stopping": lifetime.stopping, "ffmpeg": bool(service.tool("ffmpeg")), "ffprobe": bool(service.tool("ffprobe")), "remote_processing": service.remote is not None, "capabilities": capabilities}
+
+    @app.post("/api/auth/login")
+    def login(body: LoginRequest, request: Request):
+        user, token, csrf = auth.login(body.username, body.password, request.client.host if request.client else "unknown")
+        response = JSONResponse({"user": user, "csrf": csrf})
+        secure = bool(configured_origin) or request.url.scheme == "https"
+        response.set_cookie("datamark_session", token, httponly=True, secure=secure, samesite="strict", max_age=12 * 3600, path="/")
+        response.set_cookie("datamark_csrf", csrf, httponly=False, secure=secure, samesite="strict", max_age=12 * 3600, path="/")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/auth/me")
+    def me(request: Request):
+        return request.state.user
+
+    @app.post("/api/auth/logout")
+    def logout(request: Request):
+        auth.logout(request.cookies.get("datamark_session"))
+        response = JSONResponse({"ok": True})
+        response.delete_cookie("datamark_session", path="/")
+        response.delete_cookie("datamark_csrf", path="/")
+        return response
+
+    @app.post("/api/auth/password")
+    def change_password(body: ChangePasswordRequest, request: Request):
+        auth.change_password(request.state.user["id"], body.current_password, body.password)
+        response = JSONResponse({"ok": True})
+        response.delete_cookie("datamark_session", path="/")
+        response.delete_cookie("datamark_csrf", path="/")
+        return response
+
+    @app.get("/api/users")
+    def users():
+        return auth.list_users()
+
+    @app.post("/api/users")
+    def create_user(body: UserRequest):
+        return auth.create_user(body.username, body.display_name, body.password)
+
+    @app.patch("/api/users/{user_id}")
+    def set_user_active(user_id: str, body: ActiveRequest):
+        auth.set_active(user_id, body.active)
+        return {"ok": True}
+
+    @app.put("/api/users/{user_id}/password")
+    def reset_password(user_id: str, body: PasswordRequest):
+        auth.reset_password(user_id, body.password)
+        return {"ok": True}
+
+    @app.get("/api/projects/{project_id}/assignment")
+    def project_assignment(project_id: str):
+        service.load(project_id)
+        return {"user_id": auth.assignment(project_id)}
+
+    @app.put("/api/projects/{project_id}/assignment")
+    def assign_project(project_id: str, body: AssignmentRequest):
+        service.load(project_id)
+        auth.assign(project_id, body.user_id)
+        return {"user_id": body.user_id}
 
     @app.post("/api/browser/reserve")
     def reserve_browser():
@@ -152,9 +287,9 @@ def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
     @app.websocket("/api/browser/connection")
     async def browser_connection(websocket: WebSocket):
         origin = websocket.headers.get("origin")
-        expected = {"http://" + websocket.headers.get("host", "")}
+        expected = {configured_origin} if configured_origin else {"http://" + websocket.headers.get("host", "")}
         # Vite's local development page uses a different local port.
-        if not on_idle:
+        if not configured_origin and not on_idle:
             expected.update({"http://127.0.0.1:5173", "http://localhost:5173"})
         if origin not in expected or lifetime.stopping:
             await websocket.close(code=1008)
@@ -173,8 +308,12 @@ def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
             lifetime.disconnect(token)
 
     @app.get("/api/projects")
-    def projects():
-        return service.projects()
+    def projects(request: Request):
+        result = service.projects()
+        if not auth_required:
+            return result
+        allowed = auth.allowed_project_ids(request.state.user)
+        return result if allowed is None else [project for project in result if project["id"] in allowed]
 
     @app.post("/api/projects/open")
     def open_project(body: OpenRequest):
@@ -238,8 +377,12 @@ def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
         return service.clear_local_previews(project_id, body.expected_revision)
 
     @app.put("/api/projects/{project_id}/draft")
-    def draft(project_id: str, body: DraftRequest):
-        return service.update_draft(project_id, body.annotations, body.expected_revision)
+    def draft(project_id: str, body: DraftRequest, request: Request):
+        return service.update_draft(project_id, body.annotations, body.expected_revision, actor=request.state.user if auth_required else None)
+
+    @app.get("/api/projects/{project_id}/history")
+    def edit_history(project_id: str):
+        return service.edit_history(project_id)
 
     @app.get("/api/projects/{project_id}/export")
     def export(project_id: str):
@@ -349,4 +492,3 @@ def create_app(root: Path | None = None, on_idle=None) -> FastAPI:
         def not_built():
             return JSONResponse(status_code=503, content={"detail": "前端尚未构建，请先运行项目安装脚本。"})
     return app
-

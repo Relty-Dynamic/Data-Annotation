@@ -1,0 +1,5 @@
+[
+  {"from": "\\\\Relty\\homes", "to": "/mnt/nas/homes"},
+  {"from": "\\\\Relty\\datasets", "to": "/mnt/nas/datasets"},
+  {"from": "\\\\Relty\\collector-data", "to": "/mnt/nas/collector-data"}
+]
