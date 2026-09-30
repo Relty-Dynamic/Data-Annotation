@@ -28,7 +28,11 @@ pipeline {
                     set -eu
                     tag="$(git rev-parse HEAD)"
                     docker build -f deploy/Dockerfile.web -t "datamark-web:$tag" .
-                    docker run --rm --network none "datamark-web:$tag" \
+                    docker run --rm --network none \
+                        --tmpfs /app/.tmp:rw,uid=1000,gid=1000,mode=0700 \
+                        --mount "type=bind,source=$PWD/launch.py,target=/app/launch.py,readonly" \
+                        --mount "type=bind,source=$PWD/deploy/migrate_projects.py,target=/app/deploy/migrate_projects.py,readonly" \
+                        "datamark-web:$tag" \
                         /opt/venv/bin/python -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("backend", pattern="test_*.py"); count = suite.countTestCases(); print(f"Discovered {count} backend tests"); assert count > 0, "backend tests missing from image"; result = unittest.TextTestRunner(verbosity=1).run(suite); sys.exit(not result.wasSuccessful())'
                 '''
             }
