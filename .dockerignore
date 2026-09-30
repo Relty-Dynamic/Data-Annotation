@@ -11,6 +11,8 @@
 !frontend/src/**
 !frontend/public/
 !frontend/public/**
+!frontend/test/
+!frontend/test/**
 !frontend/index.html
 !frontend/package.json
 !frontend/package-lock.json
@@ -19,4 +21,3 @@
 !requirements.lock.txt
 **/__pycache__/
 **/*.pyc
-backend/test_*.py

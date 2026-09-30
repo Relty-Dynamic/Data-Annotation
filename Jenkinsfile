@@ -29,7 +29,7 @@ pipeline {
                     tag="$(git rev-parse HEAD)"
                     docker build -f deploy/Dockerfile.web -t "datamark-web:$tag" .
                     docker run --rm --network none "datamark-web:$tag" \
-                        /opt/venv/bin/python -m unittest discover -s backend -p 'test_*.py' -q
+                        /opt/venv/bin/python -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("backend", pattern="test_*.py"); count = suite.countTestCases(); print(f"Discovered {count} backend tests"); assert count > 0, "backend tests missing from image"; result = unittest.TextTestRunner(verbosity=1).run(suite); sys.exit(not result.wasSuccessful())'
                 '''
             }
         }
