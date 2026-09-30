@@ -1,6 +1,6 @@
 # DataMark 视频标注工作台
 
-支持本机运行和 Ubuntu 内网部署的多账号视频标注工具。React + TypeScript + Vite 前端与 FastAPI 后端由同一服务提供；本机地址为 **http://127.0.0.1:8765**。Ubuntu 内网入口使用 HTTPS，不开放到公网。
+Ubuntu 内网部署是现行主服务，本机模式用于开发和旧数据处理。平台支持多账号视频标注，React + TypeScript + Vite 前端与 FastAPI 后端由同一服务提供；本机地址为 **http://127.0.0.1:8765**。Ubuntu 内网入口使用 HTTPS，不开放到公网。
 
 本文件是当前安装、使用、数据格式与维护说明。人工 GT 按事实核对，目录分类和采集计划不会自动成为标签；时间轴空白表示未标注，不表示行为没有发生。IMU 对齐、采集总览和模型评估尚未实现。
 
@@ -46,6 +46,14 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 完成下面的数据迁移后执行 `docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml up -d`。若从空库开始，先创建与 `DATAMARK_HOME` 一致、归 UID/GID `1000:1000` 所有的 `state/`，再通过 `docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml run --rm --no-deps web /opt/venv/bin/python -m backend.auth` 交互创建管理员。管理员密码不写入配置文件或命令历史。启动后检查两个容器健康状态，并从授权内网设备访问 `https://<DATAMARK_HOST>/api/health`、登录、项目分配、预览、草稿保存、导出和 NAS 写回。只有实际读回四个 `timeline/` 文件后才能确认 NAS 写回成功。
 
 网关使用内部证书颁发机构自动签发 HTTPS 证书。首次启动后，从持久化的 `caddy-data/caddy/pki/authorities/local/root.crt` 获取公开根证书，按公司设备管理流程导入每台访问设备的受信任根证书库；私钥和整个 `caddy-data` 目录不得分发。浏览器未信任根证书前，不要通过忽略证书警告输入账号密码。持久化备份应覆盖应用 `state/` 中的两个 SQLite 数据库和项目播放缓存，以及 `caddy-data/`；恢复时先停服务，恢复完整目录后再启动并验证登录与项目读写。
+
+### Jenkins 自动发布
+
+`main` 是 Ubuntu 发布分支。`relty-server` 上的 Jenkins 任务应建为 **Pipeline script from SCM**：仓库地址 `https://github.com/Relty-Dynamic/Data-Annotation.git`，分支指定 `*/main`，脚本路径 `Jenkinsfile`，只允许运行在同机的 `built-in` 节点。Jenkinsfile 使用 `pollSCM('H/2 * * * *')`，约每 2 分钟检查一次；只有 `main` 出现新提交才构建。不要把具有 Docker 权限的此任务用于未合并分支或外部提交。任务创建后的首次运行会注册轮询规则；单有 Jenkinsfile 不会自动创建任务。
+
+首次启用前，由 `relty` 在 Ubuntu 上把当前发布目录中的 `deploy/intranet.env` 复制到持久目录 `/home/relty/services/datamark-web/intranet.env`，权限设为 `600`，并将 `/home/relty/services/datamark-web/current` 链接到已运行的发布目录。配置文件、数据库、证书和 NAS 素材始终留在仓库外。Jenkins 与网页容器使用同一台主机上的 `relty` 账号，且该账号已有 Docker 权限；流水线不会创建管理员或更改系统服务。
+
+每次新提交先在镜像构建中运行前端测试和构建，再在隔离容器中运行后端测试；失败时不触碰运行中的服务。通过后，`deploy/ci-deploy-intranet.sh` 从该提交创建独立发布目录、在线备份两个 SQLite 数据库、仅更新 DataMark 的 Compose 服务，并通过内网证书验证健康接口。健康检查失败会尝试恢复先前容器版本，`current` 链接仅在健康检查成功后切换。备份存放于 `backups/<提交>-<时间>/`，不会自动删除；数据库模式不兼容时须人工评估恢复，不能直接覆盖仍在写入的数据库。Jenkins 的测试通过和健康接口正常不等于真实项目的 NAS 写回验收；仍需用授权账号实际标注并读回四个文件。
 
 现有 Windows 草稿数据库记录了 Windows 原视频绝对路径，不能直接复制到 Ubuntu 使用。**所有用户先保存浏览器中的未提交编辑，停止旧平台并禁止继续编辑**，再在旧机器项目目录运行 `.venv\Scripts\python.exe -m deploy.migrate_projects export --state .local --output <仓库外的安全迁移包目录>`；脚本通过 SQLite 快照备份标注库及已有账号库，并逐个读取原视频计算完整 SHA-256。将整个迁移包经批准的内网传输方式送到 Ubuntu，限制目录权限为仅部署账号可读。按实际 NAS 挂载修改 `deploy/intranet-paths.example.json` 并另存为被 Git 忽略的 `deploy/intranet-paths.json`，补齐其它原视频路径映射。保持 Ubuntu `state/` 不存在，运行 `python3 -m deploy.migrate_projects apply --bundle <迁移包目录> --state <DATAMARK_HOME>/state --mappings deploy/intranet-paths.json`。迁移会逐段比对完整 SHA-256、核对原 `timeline/` 文件，保留项目 ID、已保存草稿、编辑历史、已有账号与分配并使旧登录失效；任一文件不一致就不创建目标状态目录。若旧平台没有账号库，迁移输出会明确提示，随后使用上文交互命令创建首位管理员。迁移不复制可再生成的本机播放缓存，Ubuntu 首次打开项目时需要重新准备或复用 NAS 缓存。迁移完成并创建管理员后再运行上面的 `up -d`，逐项目验收。迁移包含账号和个人数据，确认 Ubuntu 验收和备份后按公司规则保管或清理。网页的本机文件选择窗口仅支持 Windows，Ubuntu 上由管理员填写服务器可访问的完整 NAS 路径；访问者电脑上的本地文件不会自动出现在 Ubuntu 服务器上。
 
