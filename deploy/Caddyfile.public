@@ -1,0 +1,3 @@
+{$DATAMARK_PUBLIC_ORIGIN} {
+	reverse_proxy web:8765
+}

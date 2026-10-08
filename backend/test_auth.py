@@ -166,6 +166,40 @@ class AccountAccessTests(unittest.TestCase):
                 with TestClient(app, base_url="http://10.20.30.40"):
                     pass
 
+    def test_public_https_origin_keeps_intranet_origin_and_rejects_other_hosts(self):
+        with tempfile.TemporaryDirectory(prefix="public-auth-") as folder:
+            root = Path(folder)
+            AuthStore(root).create_user("admin", "管理员", "correct horse battery staple", "admin")
+            with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40",
+                                            "DATAMARK_PUBLIC_ORIGIN": "https://annotate.example.com"}):
+                app = create_app(root)
+            with TestClient(app, base_url="http://annotate.example.com") as public:
+                self.assertEqual(public.get("/api/health").status_code, 200)
+                rejected = public.post("/api/auth/login", headers={"Origin": "https://other.example.com"},
+                                       json={"username": "admin", "password": "correct horse battery staple"})
+                self.assertEqual(rejected.status_code, 403)
+                response = public.post("/api/auth/login", headers={"Origin": "https://annotate.example.com"},
+                                       json={"username": "admin", "password": "correct horse battery staple"})
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("secure", response.headers["set-cookie"].lower())
+                with public.websocket_connect("ws://annotate.example.com/api/browser/connection",
+                                              headers={"origin": "https://annotate.example.com"}) as socket:
+                    socket.send_text("connected")
+            with TestClient(app, base_url="http://10.20.30.40") as intranet:
+                self.assertEqual(intranet.get("/api/health").status_code, 200)
+            with TestClient(app, base_url="http://other.example.com") as other:
+                self.assertEqual(other.get("/api/health").status_code, 400)
+
+    def test_public_origin_must_be_an_exact_https_origin(self):
+        for public_origin in ("http://annotate.example.com", "https://annotate.example.com/path",
+                              "https://*.example.com", "https://annotate.example.com:invalid",
+                              "https://bad..example.com"):
+            with self.subTest(public_origin=public_origin):
+                with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40",
+                                                "DATAMARK_PUBLIC_ORIGIN": public_origin}):
+                    with self.assertRaises(ValueError):
+                        create_app(self.root)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,8 +105,23 @@ class ChangePasswordRequest(PasswordRequest):
 def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = True, source_root: Path | None = None) -> FastAPI:
     root = root or Path(os.getenv("DATAMARK_ROOT", str(Path(__file__).resolve().parents[1])))
     configured_origin = os.getenv("DATAMARK_ORIGIN", "").strip()
+    public_origin = os.getenv("DATAMARK_PUBLIC_ORIGIN", "").strip()
     nas_source_root = source_root or Path(os.getenv("DATAMARK_SOURCE_ROOT", "/mnt/nas/homes/datacollection"))
     allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
+    allowed_origins: set[str] = set()
+
+    def allow_https_origin(origin: str, setting: str) -> None:
+        parsed_origin = urlsplit(origin)
+        if (parsed_origin.scheme != "https" or not parsed_origin.hostname
+                or parsed_origin.username or parsed_origin.password
+                or parsed_origin.path or parsed_origin.query or parsed_origin.fragment
+                or parsed_origin.netloc != parsed_origin.netloc.lower()
+                or "*" in parsed_origin.netloc or any(char.isspace() for char in origin)):
+            raise ValueError(f"{setting} must be an HTTPS origin without a path or credentials")
+        parsed_origin.port  # Validate an optional numeric port before accepting the origin.
+        allowed_hosts.append(parsed_origin.hostname)
+        allowed_origins.add(origin)
+
     if configured_origin:
         bind_ip = os.getenv("DATAMARK_BIND_IP", "").strip()
         if bind_ip:
@@ -115,15 +130,18 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                               ipaddress.ip_network("192.168.0.0/16"))
             if not any(address in network for network in private_ranges):
                 raise ValueError("DATAMARK_BIND_IP must be an RFC1918 LAN address")
-        parsed_origin = urlsplit(configured_origin)
-        if (parsed_origin.scheme != "https" or not parsed_origin.hostname
-                or parsed_origin.username or parsed_origin.password
-                or parsed_origin.path or parsed_origin.query or parsed_origin.fragment
-                or parsed_origin.netloc != parsed_origin.netloc.lower()
-                or "*" in parsed_origin.netloc or any(char.isspace() for char in configured_origin)):
-            raise ValueError("DATAMARK_ORIGIN must be an HTTPS origin without a path or credentials")
-        parsed_origin.port  # Validate an optional numeric port before accepting the origin.
-        allowed_hosts.append(parsed_origin.hostname)
+        allow_https_origin(configured_origin, "DATAMARK_ORIGIN")
+    if public_origin:
+        if not configured_origin:
+            raise ValueError("DATAMARK_PUBLIC_ORIGIN requires DATAMARK_ORIGIN")
+        allow_https_origin(public_origin, "DATAMARK_PUBLIC_ORIGIN")
+        hostname = urlsplit(public_origin).hostname or ""
+        labels = hostname.split(".")
+        if (len(labels) < 2 or len(hostname) > 253
+                or any(not 1 <= len(label) <= 63 or not label[0].isalnum() or not label[-1].isalnum()
+                       or any(not (character.isascii() and (character.isalnum() or character == "-"))
+                              for character in label) for label in labels)):
+            raise ValueError("DATAMARK_PUBLIC_ORIGIN must use a valid DNS hostname")
     service = ProjectService(root)
     auth = AuthStore(root)
     lifetime = BrowserLifetime(on_idle)
@@ -196,8 +214,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             if fetch_site == "cross-site":
                 return JSONResponse(status_code=403, content={"detail": "仅允许标注页面修改数据。"})
             if origin:
-                expected_origin = configured_origin or f"{request.url.scheme}://{request.headers.get('host', '')}"
-                if origin != expected_origin:
+                expected_origins = allowed_origins or {f"{request.url.scheme}://{request.headers.get('host', '')}"}
+                if origin not in expected_origins:
                     return JSONResponse(status_code=403, content={"detail": "仅允许标注页面修改数据。"})
         tracked = request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}
         if tracked:
@@ -306,7 +324,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.websocket("/api/browser/connection")
     async def browser_connection(websocket: WebSocket):
         origin = websocket.headers.get("origin")
-        expected = {configured_origin} if configured_origin else {"http://" + websocket.headers.get("host", "")}
+        expected = allowed_origins.copy() if configured_origin else {"http://" + websocket.headers.get("host", "")}
         # Vite's local development page uses a different local port.
         if not configured_origin and not on_idle:
             expected.update({"http://127.0.0.1:5173", "http://localhost:5173"})
