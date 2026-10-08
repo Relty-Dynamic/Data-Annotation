@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import {apiWebSocketUrl} from './apiOrigin.ts';
 
 export function useBrowserLifetime() {
   useEffect(() => {
@@ -7,7 +8,7 @@ export function useBrowserLifetime() {
     let suspended = false;
     const connect = () => {
       if (suspended || (socket && socket.readyState < WebSocket.CLOSING)) return;
-      const connection = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/browser/connection`);
+      const connection = new WebSocket(apiWebSocketUrl(location.origin));
       socket = connection;
       connection.onclose = () => {
         if (socket !== connection) return;

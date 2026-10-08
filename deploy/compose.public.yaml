@@ -11,7 +11,7 @@ services:
     cap_add:
       - NET_BIND_SERVICE
     environment:
-      DATAMARK_PUBLIC_ORIGIN: ${DATAMARK_PUBLIC_ORIGIN:?Public HTTPS origin is required}
+      DATAMARK_PUBLIC_API_ORIGIN: ${DATAMARK_PUBLIC_API_ORIGIN:?Public API HTTPS origin is required}
     ports:
       - target: 80
         published: "80"

@@ -37,7 +37,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
           let capabilities: string[] | undefined;
           if (response.status === 404) {
             try {
-              const healthResponse = await fetch('/api/health', {cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(8000)])});
+              const healthResponse = await authFetch('/api/health', {cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(8000)])});
               const health = await healthResponse.json();
               if (healthResponse.ok && Array.isArray(health.capabilities)) capabilities = health.capabilities;
             } catch { /* Preserve the original failure when health cannot be read. */ }
@@ -53,7 +53,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
         }
         if (status.state === 'ready') {
           publish({...status, state: 'running', checking: false, stage: 'browser', progress: 0, detail: '正在载入封面和悬停预览图片'});
-          const manifestResponse = await fetch('/api/projects/' + id + '/session/manifest', {cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)])});
+          const manifestResponse = await authFetch('/api/projects/' + id + '/session/manifest', {cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)])});
           const manifest = await manifestResponse.json();
           if (!manifestResponse.ok) throw new Error(typeof manifest.detail === 'string' ? manifest.detail : '无法读取播放素材列表');
           if (!isSessionManifest(manifest) || manifest.videos.length !== status.total ||

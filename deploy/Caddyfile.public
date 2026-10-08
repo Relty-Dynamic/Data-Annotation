@@ -1,3 +1,9 @@
-{$DATAMARK_PUBLIC_ORIGIN} {
-	reverse_proxy web:8765
+{$DATAMARK_PUBLIC_API_ORIGIN} {
+	@api path /api/*
+	handle @api {
+		reverse_proxy web:8765
+	}
+	handle {
+		respond 404
+	}
 }

@@ -171,32 +171,72 @@ class AccountAccessTests(unittest.TestCase):
             root = Path(folder)
             AuthStore(root).create_user("admin", "管理员", "correct horse battery staple", "admin")
             with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40",
-                                            "DATAMARK_PUBLIC_ORIGIN": "https://annotate.example.com"}):
+                                            "DATAMARK_PUBLIC_ORIGIN": "https://annotate.example.com",
+                                            "DATAMARK_PUBLIC_API_ORIGIN": "https://api-annotate.example.com"}):
                 app = create_app(root)
-            with TestClient(app, base_url="http://annotate.example.com") as public:
+            with TestClient(app, base_url="https://api-annotate.example.com") as public:
                 self.assertEqual(public.get("/api/health").status_code, 200)
+                preflight = public.options("/api/auth/login", headers={
+                    "Origin": "https://annotate.example.com", "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type"})
+                self.assertEqual(preflight.status_code, 200)
+                self.assertEqual(preflight.headers["access-control-allow-origin"], "https://annotate.example.com")
+                self.assertEqual(preflight.headers["access-control-allow-credentials"], "true")
+                media_preflight = public.options("/api/session-media/test-project/v1/v0001", headers={
+                    "Origin": "https://annotate.example.com", "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "range"})
+                self.assertEqual(media_preflight.status_code, 200)
                 rejected = public.post("/api/auth/login", headers={"Origin": "https://other.example.com"},
                                        json={"username": "admin", "password": "correct horse battery staple"})
                 self.assertEqual(rejected.status_code, 403)
                 response = public.post("/api/auth/login", headers={"Origin": "https://annotate.example.com"},
                                        json={"username": "admin", "password": "correct horse battery staple"})
                 self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["access-control-allow-origin"], "https://annotate.example.com")
                 self.assertIn("secure", response.headers["set-cookie"].lower())
-                with public.websocket_connect("ws://annotate.example.com/api/browser/connection",
+                me = public.get("/api/auth/me", headers={"Origin": "https://annotate.example.com"})
+                self.assertEqual(me.status_code, 200)
+                self.assertEqual(me.json()["csrf"], response.json()["csrf"])
+                media_file = root / "public-range-test.mp4"
+                media_file.write_bytes(b"0123456789")
+                with patch.object(app.state.service.sessions, "asset", return_value=media_file):
+                    media = public.get("/api/session-media/test-project/v1/v0001", headers={
+                        "Origin": "https://annotate.example.com", "Range": "bytes=2-5"})
+                self.assertEqual((media.status_code, media.content), (206, b"2345"))
+                self.assertEqual(media.headers["content-range"], "bytes 2-5/10")
+                self.assertEqual(media.headers["access-control-allow-origin"], "https://annotate.example.com")
+                self.assertEqual(public.post("/api/auth/logout", headers={"Origin": "https://annotate.example.com",
+                                                                "X-CSRF-Token": me.json()["csrf"]}).status_code, 200)
+                with public.websocket_connect("ws://api-annotate.example.com/api/browser/connection",
                                               headers={"origin": "https://annotate.example.com"}) as socket:
                     socket.send_text("connected")
             with TestClient(app, base_url="http://10.20.30.40") as intranet:
                 self.assertEqual(intranet.get("/api/health").status_code, 200)
-            with TestClient(app, base_url="http://other.example.com") as other:
+            with TestClient(app, base_url="http://annotate.example.com") as other:
                 self.assertEqual(other.get("/api/health").status_code, 400)
 
     def test_public_origin_must_be_an_exact_https_origin(self):
-        for public_origin in ("http://annotate.example.com", "https://annotate.example.com/path",
+        for public_origin in ("http://annotate.example.com", "https://annotate.example.com:443",
+                              "https://annotate.example.com/path",
                               "https://*.example.com", "https://annotate.example.com:invalid",
                               "https://bad..example.com"):
             with self.subTest(public_origin=public_origin):
                 with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40",
-                                                "DATAMARK_PUBLIC_ORIGIN": public_origin}):
+                                                "DATAMARK_PUBLIC_ORIGIN": public_origin,
+                                                "DATAMARK_PUBLIC_API_ORIGIN": "https://api-annotate.example.com"}):
+                    with self.assertRaises(ValueError):
+                        create_app(self.root)
+        with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40",
+                                        "DATAMARK_PUBLIC_ORIGIN": "https://annotate.example.com"}):
+            with self.assertRaises(ValueError):
+                create_app(self.root)
+        for api_origin in ("http://api.example.com", "https://api.example.com:443",
+                           "https://api.example.com/path", "https://bad..example.com",
+                           "https://annotate.example.com"):
+            with self.subTest(api_origin=api_origin):
+                with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40",
+                                                "DATAMARK_PUBLIC_ORIGIN": "https://annotate.example.com",
+                                                "DATAMARK_PUBLIC_API_ORIGIN": api_origin}):
                     with self.assertRaises(ValueError):
                         create_app(self.root)
 

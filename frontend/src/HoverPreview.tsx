@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import {authFetch} from './auth.ts';
+import {apiUrl, separateApiOrigin} from './apiOrigin.ts';
 import { sessionAssetUrl, sessionStoryboard, sessionDecodedImages } from './sessionAssets';
 import { formatTime, type Video } from './domain';
 import { isStoryboardManifest, storyboardFrame, spritePosition } from './storyboard';
@@ -10,10 +12,19 @@ const legacyImages = new Map<string, HTMLImageElement>();
 const IMAGE_LIMIT = 8;
 const MANIFEST_LIMIT = 64;
 
-function remember<T>(cache: Map<string, T>, key: string, value: T, limit: number) {
+function remember<T>(cache: Map<string, T>, key: string, value: T, limit: number, dispose?: (value: T) => void) {
   cache.delete(key);
   cache.set(key, value);
-  while (cache.size > limit) cache.delete(cache.keys().next().value!);
+  while (cache.size > limit) {
+    const oldest = cache.keys().next().value!;
+    const removed = cache.get(oldest)!;
+    cache.delete(oldest);
+    dispose?.(removed);
+  }
+}
+
+function releaseLegacyImage(image: HTMLImageElement) {
+  if (image.src.startsWith('blob:')) URL.revokeObjectURL(image.src);
 }
 
 /** Hover only reads prepared images; it never seeks or creates a video decoder. */
@@ -45,7 +56,7 @@ export default function HoverPreview({ projectId, video, time }: { projectId: st
     const read = async () => {
       let delay = 1500;
       try {
-        const response = await fetch(endpoint, {
+        const response = await authFetch(endpoint, {
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]),
         });
         if (!response.ok) throw new Error('Storyboard status unavailable');
@@ -77,12 +88,15 @@ export default function HoverPreview({ projectId, video, time }: { projectId: st
     const url = target.url;
     const cached = images.get(url);
     if (cached) {
-      remember(images, url, cached, IMAGE_LIMIT);
+      remember(images, url, cached, IMAGE_LIMIT, images === legacyImages ? releaseLegacyImage : undefined);
       setLoaded(url);
       return;
     }
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    let blobUrl = '';
+    let remembered = false;
+    const controller = new AbortController();
     const image = new Image();
     image.decoding = 'async';
     const failed = () => {
@@ -91,27 +105,40 @@ export default function HoverPreview({ projectId, video, time }: { projectId: st
       image.removeEventListener('load', ready);
       image.removeEventListener('error', failed);
       image.removeAttribute('src');
+      controller.abort();
+      if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = ''; }
       setImageFailure(url);
       retry = setTimeout(() => setImageAttempt((attempt) => attempt + 1), 5000);
     };
     const ready = () => {
       if (cancelled) return;
       clearTimeout(timeout);
-      remember(images, url, image, IMAGE_LIMIT);
+      remember(images, url, image, IMAGE_LIMIT, images === legacyImages ? releaseLegacyImage : undefined);
+      remembered = true;
       setImageFailure('');
       setLoaded(url);
     };
     const timeout = setTimeout(failed, 8000);
     image.addEventListener('load', ready);
     image.addEventListener('error', failed);
-    image.src = url;
+    if (separateApiOrigin && url.startsWith('/api/')) {
+      void authFetch(url, {signal: controller.signal}).then(async response => {
+        if (!response.ok) throw new Error('Storyboard image unavailable');
+        const blob = await response.blob();
+        if (cancelled) return;
+        blobUrl = URL.createObjectURL(blob);
+        image.src = blobUrl;
+      }).catch(() => { if (!cancelled) failed(); });
+    } else image.src = url;
     return () => {
       cancelled = true;
       clearTimeout(timeout);
       clearTimeout(retry);
+      controller.abort();
       image.removeEventListener('load', ready);
       image.removeEventListener('error', failed);
       if (!image.complete) image.removeAttribute('src');
+      if (blobUrl && !remembered) URL.revokeObjectURL(blobUrl);
     };
   }, [target?.url, sourceKey, imageAttempt, images]);
 
@@ -132,10 +159,10 @@ export default function HoverPreview({ projectId, video, time }: { projectId: st
     <div className="tl-hover-picture" data-preview-state={state} data-video-id={video?.id ?? ''} data-frame-index={displayed?.index}>
       {displayed ? <div className="tl-hover-sprite" role="img" aria-label={`预览帧 ${formatTime((video?.start_ms ?? 0) + displayed.localTime)}`} style={{
         aspectRatio: displayed.aspectRatio,
-        backgroundImage: `url(${JSON.stringify(displayed.url)})`,
+        backgroundImage: `url(${JSON.stringify(images.get(displayed.url)?.src ?? apiUrl(displayed.url))})`,
         backgroundSize: `${displayed.columns * 100}% ${displayed.rows * 100}%`,
         backgroundPosition: spritePosition(displayed),
-      }} /> : video?.thumbnail_url && <img key={sourceKey} className="tl-hover-cover" src={sessionAssetUrl(projectId, video.thumbnail_url)} alt="片段封面" onLoad={() => setCover(`${sourceKey}|${video.thumbnail_url}`)} />}
+      }} /> : video?.thumbnail_url && <img key={sourceKey} className="tl-hover-cover" crossOrigin={separateApiOrigin?'use-credentials':undefined} src={sessionAssetUrl(projectId, video.thumbnail_url)} alt="片段封面" onLoad={() => setCover(`${sourceKey}|${video.thumbnail_url}`)} />}
       {!video && <div className="tl-hover-placeholder"><span>此处为断录间隔</span></div>}
       {video && !displayed && !coverReady && <div className="tl-hover-placeholder"><span>{notice}</span></div>}
       {notice && (displayed || coverReady) && <div className="tl-hover-notice">{notice}</div>}

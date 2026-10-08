@@ -1,4 +1,6 @@
 import { isStoryboardManifest } from './storyboard.ts';
+import {authFetch} from './auth.ts';
+import {apiUrl} from './apiOrigin.ts';
 import type { StoryboardManifest } from './storyboard.ts';
 
 export interface SessionVideo {
@@ -31,7 +33,7 @@ export function forgetSessionAssets(projectId: string) {
 }
 
 export function sessionAssetUrl(projectId: string, url: string): string {
-  return caches.get(projectId)?.urls.get(url) ?? url;
+  return caches.get(projectId)?.urls.get(url) ?? apiUrl(url);
 }
 
 export function sessionDecodedImages(projectId: string): Map<string, HTMLImageElement> | undefined {
@@ -64,7 +66,7 @@ export async function prepareSessionAssets(
     while (cursor < assets.length) {
       combined.throwIfAborted();
       const url = assets[cursor++];
-      const response = await fetch(url, {cache: 'no-store', signal: AbortSignal.any([combined, AbortSignal.timeout(30000)])});
+      const response = await authFetch(url, {cache: 'no-store', signal: AbortSignal.any([combined, AbortSignal.timeout(30000)])});
       if (!response.ok) throw new Error('预览图片读取失败，请重试准备素材。');
       const blob = await response.blob();
       if (!blob.size || !blob.type.startsWith('image/')) throw new Error('预览图片数据不完整，请重试准备素材。');

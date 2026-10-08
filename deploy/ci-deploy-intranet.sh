@@ -28,39 +28,47 @@ docker image inspect "datamark-web:$commit" >/dev/null || die 'tested release im
 configured_home="$(sed -n 's/^DATAMARK_HOME=//p' "$env_file" | tail -n 1)"
 host="$(sed -n 's/^DATAMARK_HOST=//p' "$env_file" | tail -n 1)"
 public_origin="$(sed -n 's/^DATAMARK_PUBLIC_ORIGIN=//p' "$env_file" | tail -n 1)"
+public_api_origin="$(sed -n 's/^DATAMARK_PUBLIC_API_ORIGIN=//p' "$env_file" | tail -n 1)"
 public_bind_ip="$(sed -n 's/^DATAMARK_PUBLIC_BIND_IP=//p' "$env_file" | tail -n 1)"
 [[ "$configured_home" == "$deploy_home" ]] || die 'DATAMARK_HOME does not match the deployment directory'
 [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'DATAMARK_HOST must be the internal IPv4 address'
-[[ -z "$public_origin" && -z "$public_bind_ip" || -n "$public_origin" && -n "$public_bind_ip" ]] ||
-    die 'DATAMARK_PUBLIC_ORIGIN and DATAMARK_PUBLIC_BIND_IP must be set together'
-if [[ -n "$public_origin" ]]; then
-    public_host="$(python3 - "$public_origin" "$public_bind_ip" "$host" <<'PY'
+[[ -z "$public_origin" && -z "$public_api_origin" && -z "$public_bind_ip" ||
+   -n "$public_origin" && -n "$public_api_origin" && -n "$public_bind_ip" ]] ||
+    die 'both public origins and DATAMARK_PUBLIC_BIND_IP must be set together'
+if [[ -n "$public_api_origin" ]]; then
+    public_host="$(python3 - "$public_origin" "$public_api_origin" "$public_bind_ip" "$host" <<'PY'
 import ipaddress
 import json
 import subprocess
 import sys
 from urllib.parse import urlsplit
 
-origin, bind_ip, intranet_host = sys.argv[1:]
-parsed = urlsplit(origin)
-if (parsed.scheme != "https" or not parsed.hostname or parsed.port is not None
-        or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment
-        or parsed.netloc != parsed.netloc.lower() or "*" in parsed.netloc
-        or any(char.isspace() for char in origin)):
-    raise SystemExit("DATAMARK_PUBLIC_ORIGIN must be one exact HTTPS hostname")
-labels = parsed.hostname.split(".")
-if (len(labels) < 2 or len(parsed.hostname) > 253
-        or any(not 1 <= len(label) <= 63 or not label[0].isalnum() or not label[-1].isalnum()
-               or any(not (character.isascii() and (character.isalnum() or character == "-"))
-                      for character in label) for label in labels)):
-    raise SystemExit("DATAMARK_PUBLIC_ORIGIN must use a valid DNS hostname")
+front_origin, api_origin, bind_ip, intranet_host = sys.argv[1:]
+def hostname(origin, setting):
+    parsed = urlsplit(origin)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.port is not None
+            or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment
+            or parsed.netloc != parsed.netloc.lower() or "*" in parsed.netloc
+            or any(char.isspace() for char in origin)):
+        raise SystemExit(f"{setting} must be one exact HTTPS hostname")
+    labels = parsed.hostname.split(".")
+    if (len(labels) < 2 or len(parsed.hostname) > 253
+            or any(not 1 <= len(label) <= 63 or not label[0].isalnum() or not label[-1].isalnum()
+                   or any(not (character.isascii() and (character.isalnum() or character == "-"))
+                          for character in label) for label in labels)):
+        raise SystemExit(f"{setting} must use a valid DNS hostname")
+    return parsed.hostname
+front_host = hostname(front_origin, "DATAMARK_PUBLIC_ORIGIN")
+api_host = hostname(api_origin, "DATAMARK_PUBLIC_API_ORIGIN")
+if front_host == api_host:
+    raise SystemExit("public frontend and API must use separate hostnames")
 address = ipaddress.ip_address(bind_ip)
 if address.is_loopback or address.is_unspecified or bind_ip == intranet_host:
     raise SystemExit("DATAMARK_PUBLIC_BIND_IP must be a separate local interface address")
 interfaces = json.loads(subprocess.check_output(["ip", "-j", "address", "show"]))
 if bind_ip not in {item["local"] for interface in interfaces for item in interface.get("addr_info", [])}:
     raise SystemExit("DATAMARK_PUBLIC_BIND_IP is not assigned to this server")
-print(parsed.hostname)
+print(api_host)
 PY
 )" || die 'invalid public gateway settings'
     [[ -d "$deploy_home/public-caddy-data" && -d "$deploy_home/public-caddy-config" ]] ||
@@ -71,7 +79,7 @@ previous="$(readlink -f "$current")"
 [[ "$previous" == "$deploy_home"/releases/* && -f "$previous/deploy/compose.intranet.yaml" ]] || die 'current symlink points outside a valid release'
 compose_files=(-f "$deploy_home/releases/$commit/deploy/compose.intranet.yaml")
 previous_compose_files=(-f "$previous/deploy/compose.intranet.yaml")
-if [[ -n "$public_origin" ]]; then
+if [[ -n "$public_api_origin" ]]; then
     [[ -f "$previous/deploy/compose.public.yaml" ]] ||
         die 'deploy an intranet-only release with public gateway support before enabling its public settings'
     compose_files+=(-f "$deploy_home/releases/$commit/deploy/compose.public.yaml")
@@ -142,13 +150,13 @@ docker compose --env-file "$env_file" "${compose_files[@]}" \
 curl --fail --silent --show-error --cacert "$root_ca" \
     "https://$host/api/health" |
     python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and "account-login" in data["capabilities"]'
-if [[ -n "$public_origin" ]]; then
+if [[ -n "$public_api_origin" ]]; then
     resolve_ip="$public_bind_ip"
     [[ "$resolve_ip" != *:* ]] || resolve_ip="[$resolve_ip]"
     public_ok=0
     for attempt in {1..12}; do
         if curl --fail --silent --show-error --noproxy '*' --connect-timeout 5 --max-time 10 \
-            --resolve "$public_host:443:$resolve_ip" "$public_origin/api/health" |
+            --resolve "$public_host:443:$resolve_ip" "$public_api_origin/api/health" |
             python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and "account-login" in data["capabilities"]' 2>/dev/null; then
             public_ok=1
             break

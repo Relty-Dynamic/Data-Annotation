@@ -25,7 +25,7 @@ Windows 首次重新安装或更新源码后，先运行 **setup.cmd**。脚本�
 
 登录后才能读取项目、预览素材、保存草稿或导出。管理员可新建标注账号、停用或启用账号、重置密码，并给每个项目分配一位标注人；标注人只会看到分配给自己的项目，也可从 NAS 新建项目并自动成为该项目的标注人，对已分配项目补导入、跳过或恢复准备失败的视频、写回原目录。已有目录若属于他人项目，须由管理员分配后才能打开；不会另建同目录项目覆盖其标注。关联原目录、重命名、清理本机预览和项目删除仍由管理员操作。停用账号或重置密码会立即撤销该账号已有登录。任何用户都可在页面上修改自己的密码，修改后需要重新登录。
 
-密码采用带独立随机盐的 scrypt 哈希保存于 `.local/auth.sqlite3`，登录会限制连续失败次数。登录使用 12 小时会话，浏览器只持有不可由 JavaScript 读取的会话 Cookie；修改接口另检查页面安全令牌和来源。本机启动器仍只监听 `127.0.0.1`；Ubuntu 内网部署按下文配置独立 HTTPS 入口。公司邮箱验证码暂缓；公网入口按下文的 Ubuntu 公网直连方案单独启用，不要把本机服务端口映射到公网。
+密码采用带独立随机盐的 scrypt 哈希保存于 `.local/auth.sqlite3`，登录会限制连续失败次数。登录使用 12 小时会话，浏览器只持有不可由 JavaScript 读取的会话 Cookie；修改接口另检查页面安全令牌和来源。本机启动器仍只监听 `127.0.0.1`；Ubuntu 内网部署按下文配置独立 HTTPS 入口。公司邮箱验证码暂缓；公网入口按下文的 Vercel 网页与 Ubuntu 接口拆分方案单独启用，不要把本机服务端口映射到公网。
 
 每次保存草稿时，服务端根据当前登录账号记录标注的创建者、创建时间、最近编辑者和最近编辑时间；客户端提交的这些字段不能覆盖服务端记录。选中标注可查看其归属，页面可打开编辑历史查看新增、修改、删除和撤销引起的变更。旧版标注没有可验证的操作者，显示为未知。浏览器内尚未提交的习惯输入按账号隔离；有未保存编辑时会阻止直接退出登录。停止服务后备份 `.local/annotations.sqlite3` 与 `.local/auth.sqlite3`，两者分别保存草稿及编辑历史、账号与项目分配；不要提交到 Git。
 
@@ -55,11 +55,15 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 每次新提交先在镜像构建中运行前端测试和构建，再在隔离容器中运行后端测试；失败时不触碰运行中的服务。通过后，`deploy/ci-deploy-intranet.sh` 从该提交创建独立发布目录、在线备份两个 SQLite 数据库、仅更新 DataMark 的 Compose 服务，并通过内网证书验证健康接口。健康检查失败会尝试恢复先前容器版本，`current` 链接仅在健康检查成功后切换。备份存放于 `backups/<提交>-<时间>/`，不会自动删除；数据库模式不兼容时须人工评估恢复，不能直接覆盖仍在写入的数据库。Jenkins 的测试通过和健康接口正常不等于真实项目的 NAS 写回验收；仍需用授权账号实际标注并读回四个文件。
 
-### Ubuntu 公网直连准备
+### Vercel 网页与 Ubuntu 公网接口（待启用）
 
-公网入口仍由 Ubuntu 上同一网页服务提供，NAS 原片和草稿库不迁移。先让只含内网配置的发布版本包含公网网关支持，并完成真实内网验收；**不要在 DNS、路由器和防火墙就绪前填写公网环境变量**。公网地址须使用独立域名，例如 `https://annotate.reltydynamic.com`。Cloudflare 在此方案中仅提供 DNS：为该域名创建明确的 **DNS only** 记录，指向可入站访问的公网 IPv4 或 IPv6；不能让视频经过 Cloudflare 代理或 Tunnel。若使用路由器的公网 IPv4，先为 Ubuntu 的目标内网地址设置稳定地址或 DHCP 保留，再将公网 TCP 80、443 转发到该地址的同端口。核实主机及路由器防火墙只放行所需入口；Docker 发布端口不能仅靠 UFW 规则隔离。若仅有 IPv6，先确认标注者网络可用 IPv6。Caddy 自动签发公网证书要求域名已解析、80 和 443 可从外网到达。
+公网网页只在 Vercel 托管构建后的 React 静态文件；账号、项目、SQLite 草稿、NAS 读取、预览生成和写回继续由 Ubuntu 提供。网页 `https://annotate.reltydynamic.com` 与接口 `https://api-annotate.reltydynamic.com` 使用两个独立域名；视频和预览图片从 Ubuntu 接口域名直达浏览器，不经过 Vercel 转发。Cloudflare 可继续管理 DNS，但这两个明确记录须为 DNS only。现有内网 HTTPS 入口与本机启动模式保留；当前未配置公网入口，不代表公网已上线。
 
-首次启用时，在持久目录创建归 UID/GID `1000:1000` 所有的 `public-caddy-data/` 和 `public-caddy-config/`，再于仓库外的 `intranet.env` 同时设置 `DATAMARK_PUBLIC_ORIGIN=https://<公网域名>` 与 `DATAMARK_PUBLIC_BIND_IP=<Ubuntu 实际持有的入口网卡地址>`。公网入口必须与现有内网 `DATAMARK_BIND_IP:443` 使用不同的本机地址。发布脚本会在原有内网服务之外加载 `deploy/compose.public.yaml`，为公网域名单独运行 Caddy 网关；内网证书、数据库和 NAS 挂载沿用现有服务。部署成功须分别检查内网和公网健康接口，并从真正的外网以授权账号完成 NAS 导入、预览播放和定位、草稿保存、导出、写回及四个 `timeline/` 文件读回；健康接口本身不代表这些流程通过。
+Vercel 项目的 Root Directory 为 `frontend`，框架为 Vite，构建命令 `npm run build`，输出目录 `dist`，并设置公开的构建变量 `VITE_DATAMARK_API_ORIGIN=https://api-annotate.reltydynamic.com`。缺少该变量时 Vercel 构建会失败。登录会话 Cookie 仅发给 Ubuntu 接口域名，网页跨域请求明确携带凭据；页面安全令牌由登录响应或已登录状态接口返回。两个正式域名应同属 `reltydynamic.com`，以便继续使用严格同站 Cookie；默认 `*.vercel.app` 预览网址与接口不同站，不能用于已登录流程验收。若需要预览验收，先绑定同站的测试子域名，并将该测试域名配置为后端允许的页面来源。用户已选个人版；[Vercel 条款](https://vercel.com/legal/terms)限定 Hobby 供个人或非商业使用，正式公司或商业用途需使用符合条款的套餐。
+
+先完成真实内网验收及 Ubuntu 公网入站检查：若使用路由器公网 IPv4，为 Ubuntu 入口设置稳定内网地址，再转发 TCP 80、443；若使用 IPv6，确认外部标注者网络和防火墙可达。Docker 发布端口不能仅靠 UFW 规则隔离。域名解析和入站均就绪后，在持久目录创建归 UID/GID `1000:1000` 所有的 `public-caddy-data/` 与 `public-caddy-config/`，再于仓库外的 `intranet.env` 同时设置 `DATAMARK_PUBLIC_ORIGIN=https://annotate.reltydynamic.com`、`DATAMARK_PUBLIC_API_ORIGIN=https://api-annotate.reltydynamic.com`、`DATAMARK_PUBLIC_BIND_IP=<Ubuntu 实际持有且不同于内网入口的地址>`。发布脚本只在三项同时设置时启动独立公网 Caddy 网关；该网关仅转发 `/api/`，并以公网可信证书验证健康接口。公网草稿、账号库和 NAS 挂载仍与内网服务共用，不在 Vercel 存储。
+
+启用后须从真实外网使用授权账号核对登录、项目权限、视频 HTTP Range 定位、预览图片、草稿保存、导出、NAS 写回和四个 `timeline/` 文件读回。健康接口本身不代表业务流程通过。Ubuntu 本机目录导入和外部标注人员电脑的本机助手是后续步骤，目前不能将它们描述成已上线能力。
 
 现有 Windows 草稿数据库记录了 Windows 原视频绝对路径，不能直接复制到 Ubuntu 使用。**所有用户先保存浏览器中的未提交编辑，停止旧平台并禁止继续编辑**，再在旧机器项目目录运行 `.venv\Scripts\python.exe -m deploy.migrate_projects export --state .local --output <仓库外的安全迁移包目录>`；脚本通过 SQLite 快照备份标注库及已有账号库，并逐个读取原视频计算完整 SHA-256。将整个迁移包经批准的内网传输方式送到 Ubuntu，限制目录权限为仅部署账号可读。按实际 NAS 挂载修改 `deploy/intranet-paths.example.json` 并另存为被 Git 忽略的 `deploy/intranet-paths.json`，补齐其它原视频路径映射。保持 Ubuntu `state/` 不存在，运行 `python3 -m deploy.migrate_projects apply --bundle <迁移包目录> --state <DATAMARK_HOME>/state --mappings deploy/intranet-paths.json`。迁移会逐段比对完整 SHA-256、核对原 `timeline/` 文件，保留项目 ID、已保存草稿、编辑历史、已有账号与分配并使旧登录失效；任一文件不一致就不创建目标状态目录。若旧平台没有账号库，迁移输出会明确提示，随后使用上文交互命令创建首位管理员。迁移不复制可再生成的本机播放缓存，Ubuntu 首次打开项目时需要重新准备或复用 NAS 缓存。迁移完成并创建管理员后再运行上面的 `up -d`，逐项目验收。迁移包含账号和个人数据，确认 Ubuntu 验收和备份后按公司规则保管或清理。本机服务在 Windows 和 macOS 均可点选视频文件或原视频目录；Ubuntu 内网服务可在网页中浏览已挂载的 NAS，选择视频或目录，并继续支持填写 NAS 完整路径。访问者电脑上的本地文件不会自动出现在 Ubuntu 服务器上。
 

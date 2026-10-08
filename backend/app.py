@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
+from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
@@ -106,11 +107,12 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     root = root or Path(os.getenv("DATAMARK_ROOT", str(Path(__file__).resolve().parents[1])))
     configured_origin = os.getenv("DATAMARK_ORIGIN", "").strip()
     public_origin = os.getenv("DATAMARK_PUBLIC_ORIGIN", "").strip()
+    public_api_origin = os.getenv("DATAMARK_PUBLIC_API_ORIGIN", "").strip()
     nas_source_root = source_root or Path(os.getenv("DATAMARK_SOURCE_ROOT", "/mnt/nas/homes/datacollection"))
     allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
     allowed_origins: set[str] = set()
 
-    def allow_https_origin(origin: str, setting: str) -> None:
+    def validate_https_origin(origin: str, setting: str, *, dns_hostname: bool = False) -> str:
         parsed_origin = urlsplit(origin)
         if (parsed_origin.scheme != "https" or not parsed_origin.hostname
                 or parsed_origin.username or parsed_origin.password
@@ -119,8 +121,17 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 or "*" in parsed_origin.netloc or any(char.isspace() for char in origin)):
             raise ValueError(f"{setting} must be an HTTPS origin without a path or credentials")
         parsed_origin.port  # Validate an optional numeric port before accepting the origin.
-        allowed_hosts.append(parsed_origin.hostname)
-        allowed_origins.add(origin)
+        hostname = parsed_origin.hostname
+        if dns_hostname:
+            if parsed_origin.port is not None:
+                raise ValueError(f"{setting} must not include a port")
+            labels = hostname.split(".")
+            if (len(labels) < 2 or len(hostname) > 253
+                    or any(not 1 <= len(label) <= 63 or not label[0].isalnum() or not label[-1].isalnum()
+                           or any(not (character.isascii() and (character.isalnum() or character == "-"))
+                                  for character in label) for label in labels)):
+                raise ValueError(f"{setting} must use a valid DNS hostname")
+        return hostname
 
     if configured_origin:
         bind_ip = os.getenv("DATAMARK_BIND_IP", "").strip()
@@ -130,18 +141,17 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                               ipaddress.ip_network("192.168.0.0/16"))
             if not any(address in network for network in private_ranges):
                 raise ValueError("DATAMARK_BIND_IP must be an RFC1918 LAN address")
-        allow_https_origin(configured_origin, "DATAMARK_ORIGIN")
-    if public_origin:
-        if not configured_origin:
-            raise ValueError("DATAMARK_PUBLIC_ORIGIN requires DATAMARK_ORIGIN")
-        allow_https_origin(public_origin, "DATAMARK_PUBLIC_ORIGIN")
-        hostname = urlsplit(public_origin).hostname or ""
-        labels = hostname.split(".")
-        if (len(labels) < 2 or len(hostname) > 253
-                or any(not 1 <= len(label) <= 63 or not label[0].isalnum() or not label[-1].isalnum()
-                       or any(not (character.isascii() and (character.isalnum() or character == "-"))
-                              for character in label) for label in labels)):
-            raise ValueError("DATAMARK_PUBLIC_ORIGIN must use a valid DNS hostname")
+        allowed_hosts.append(validate_https_origin(configured_origin, "DATAMARK_ORIGIN"))
+        allowed_origins.add(configured_origin)
+    if public_origin or public_api_origin:
+        if not configured_origin or not public_origin or not public_api_origin:
+            raise ValueError("public frontend and API origins require DATAMARK_ORIGIN and each other")
+        frontend_host = validate_https_origin(public_origin, "DATAMARK_PUBLIC_ORIGIN", dns_hostname=True)
+        api_host = validate_https_origin(public_api_origin, "DATAMARK_PUBLIC_API_ORIGIN", dns_hostname=True)
+        if frontend_host == api_host:
+            raise ValueError("public frontend and API must use separate hostnames")
+        allowed_hosts.append(api_host)
+        allowed_origins.add(public_origin)
     service = ProjectService(root)
     auth = AuthStore(root)
     lifetime = BrowserLifetime(on_idle)
@@ -190,6 +200,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 return JSONResponse(status_code=401, content={"detail": "请先登录。"}, headers={"Cache-Control": "no-store"})
             user, csrf_hash = session
             request.state.user = user
+            request.state.csrf_hash = csrf_hash
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 csrf = request.headers.get("x-csrf-token", "")
                 if not csrf or not hmac.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), csrf_hash) or csrf != request.cookies.get("datamark_csrf"):
@@ -268,7 +279,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.get("/api/auth/me")
     def me(request: Request):
-        return request.state.user
+        csrf = request.cookies.get("datamark_csrf", "")
+        if not csrf or not hmac.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), request.state.csrf_hash):
+            raise HTTPException(401, "登录状态不完整，请重新登录。")
+        return {**request.state.user, "csrf": csrf}
 
     @app.post("/api/auth/logout")
     def logout(request: Request):
@@ -556,4 +570,11 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         @app.get("/")
         def not_built():
             return JSONResponse(status_code=503, content={"detail": "前端尚未构建，请先运行项目安装脚本。"})
+    if public_origin:
+        # Keep CORS outside authentication and host checks so a browser's
+        # credential-free preflight reaches the exact-origin policy first.
+        app.add_middleware(CORSMiddleware, allow_origins=[public_origin], allow_credentials=True,
+                           allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+                           allow_headers=["Content-Type", "X-CSRF-Token", "Range"],
+                           expose_headers=["Accept-Ranges", "Content-Range", "Content-Length"])
     return app
