@@ -22,7 +22,7 @@ import { usePreloadNext } from './usePreloadNext';
 import { useMediaBuffering } from './useMediaBuffering';
 import PreparePanel from './PreparePanel';
 import { sessionAssetUrl } from './sessionAssets';
-import { readProjectPreference, writeProjectPreference } from './projectPreferences';
+import { readProjectPreference, readRestorableProjectPreference, writeProjectPreference } from './projectPreferences';
 import { advanceVideoTime, playbackProfile, seekMediaTime, sourceTime } from './playback';
 import { formatTime, parseTime, switchCoveredState, applyAnnotationRange, deleteAnnotation, uncoveredSpans, SCENE_LABELS, POSTURE_LABELS, CATEGORY_LABELS, TRACKS, locateVideo, annotationsEqual, normalizeStateSeams, anchorVideoTime, restoreVideoTime, isSegmentDraftDirty } from './domain';
 import { POSTURE_SHORTCUTS, postureShortcutLabel } from './postureShortcuts';
@@ -53,6 +53,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const sharedServer=window.location.protocol==='https:';
  const composerKey=(id:string)=>`datamark-user-${user.id}-composer-${id}`;
  const lastProjectKey=`datamark-user-${user.id}-last-project`;
+ const previewsClearedKey=`datamark-user-${user.id}-previews-cleared`;
  useWorkspaceGestures();
  const [project,setProject]=useState<Project|null>(null), projectRef=useRef<Project|null>(null);
  const [adminOpen,setAdminOpen]=useState(false);
@@ -153,7 +154,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const coverageIssues=useMemo(()=>project?(['scene','posture'] as const).map(track=>({track,count:uncoveredSpans(project.annotations[track],project.recording_runs??project.videos).length})).filter(item=>item.count>0):[],[project]);
  const currentStates=project?.annotations[activeTrack].filter(s=>s.start_ms<=time&&(s.end_ms===null||time<s.end_ms))??[];
  const refresh=()=>api<Project[]>('/api/projects').then(setProjects).catch(e=>setError(e.message));
- useEffect(()=>{requireSourceCapabilities().then(()=>api<Project[]>('/api/projects')).then(ps=>{setProjects(ps);const last=readProjectPreference(lastProjectKey);if(last&&ps.some(p=>p.id===last))api<Project>(`/api/projects/${last}`).then(p=>{if(!projectRef.current)adopt(p,true);}).catch(e=>setError(e.message));}).catch(e=>setError(e.message));},[]);
+ useEffect(()=>{requireSourceCapabilities().then(()=>api<Project[]>('/api/projects')).then(ps=>{setProjects(ps);const last=readRestorableProjectPreference(lastProjectKey,previewsClearedKey);if(last&&ps.some(p=>p.id===last))api<Project>(`/api/projects/${last}`).then(p=>{if(!projectRef.current)adopt(p,true);}).catch(e=>setError(e.message));}).catch(e=>setError(e.message));},[]);
  useEffect(()=>{if(project&&activeTrack==='habit'&&!manual){try{localStorage.setItem(composerKey(project.id),JSON.stringify({label,start:startText,end:endText,kind:behaviorKind}));}catch{}}},[project?.id,activeTrack,manual,label,startText,endText,behaviorKind]);
  useEffect(()=>{if(notice&&!prepareOpen&&!importOpen&&!busy){const t=setTimeout(()=>setNotice(''),9000);return()=>clearTimeout(t);}},[notice,prepareOpen,importOpen,busy]);
  useEffect(()=>{const warn=(e:BeforeUnloadEvent)=>{if(pendingSaves.current||saveFailedRef.current||busyRef.current||hasPendingEdit){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);},[hasPendingEdit]);
@@ -248,7 +249,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  }
  async function retrySave(){await doBusy('正在核对草稿保存状态…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);if(annotationsEqual(normalizeStateSeams(remote.annotations,remote.continuity_bridges??[],remote.videos),normalizeStateSeams(local.annotations,remote.continuity_bridges??[],remote.videos))){serverRevision.current=remote.revision;projectRef.current={...local,name:remote.name,revision:remote.revision,updated_at:remote.updated_at,annotations:remote.annotations};setProject(projectRef.current);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setNotice('已确认当前标注保存成功');return;}if(remote.revision===serverRevision.current){saveFailedRef.current=false;setSaveFailed(false);persist(local,local.annotations);await saveQueue.current;return;}setSaveState('版本冲突，改动保留在此页');setError('草稿已在其他窗口更新。当前改动仍保留在此页；请点击「保存恢复副本并重新载入」，下载包含本页标注的恢复 JSON 后读取服务器草稿。');});}
  async function recoverAndReload(){await doBusy('正在生成恢复副本并重新载入…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);const content=JSON.stringify(local,null,2);const blob=new Blob([content],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=`${local.name.replace(/[<>:"/\\|?*]/g,'_')}-未保存草稿-恢复副本-${Date.now()}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);adopt(remote);setNotice('恢复副本已开始下载，已重新载入服务器草稿。原有未保存改动保留在恢复 JSON 中。');});}
- function adopt(p:Project,restore=false){setComparison(null);setComparisonOpen(false);setTimelineImportOpen(false);setClearedPreviewId('');p={...p,annotations:{...p.annotations,category:p.annotations.category??[]}};setAnchors([]);setSelectedRange(null);setCategoryMode('state');restoreOnReady.current=restore?p.id:null;setSessionEntered(false);setPrepareOpen(!restore);if(!restore)preparation.refresh();scrubbingRef.current=false;setScrubbing(false);writeProjectPreference(lastProjectKey,p.id);setMediaVersion(v=>v+1);wantsPlay.current=false;setPlaying(false);videoRef.current?.pause();serverRevision.current=p.revision;projectRef.current=p;setProject(p);setCurrent(0);pendingSeek.current=0;activateVideo(p.videos[0]?.id??'');setMediaError('');resetEditorFields();updateHistory([],[]);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setError('');if(activeTrack==='habit')restoreComposer(p.id);if((p as Project & {warnings?:string[]}).warnings?.length)setNotice((p as Project & {warnings:string[]}).warnings.join('；'));}
+ function adopt(p:Project,restore=false){setComparison(null);setComparisonOpen(false);setTimelineImportOpen(false);setClearedPreviewId('');p={...p,annotations:{...p.annotations,category:p.annotations.category??[]}};setAnchors([]);setSelectedRange(null);setCategoryMode('state');restoreOnReady.current=restore?p.id:null;setSessionEntered(false);setPrepareOpen(!restore);if(!restore)preparation.refresh();scrubbingRef.current=false;setScrubbing(false);writeProjectPreference(previewsClearedKey,null);writeProjectPreference(lastProjectKey,p.id);setMediaVersion(v=>v+1);wantsPlay.current=false;setPlaying(false);videoRef.current?.pause();serverRevision.current=p.revision;projectRef.current=p;setProject(p);setCurrent(0);pendingSeek.current=0;activateVideo(p.videos[0]?.id??'');setMediaError('');resetEditorFields();updateHistory([],[]);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setError('');if(activeTrack==='habit')restoreComposer(p.id);if((p as Project & {warnings?:string[]}).warnings?.length)setNotice((p as Project & {warnings:string[]}).warnings.join('；'));}
  async function doBusy(message:string,fn:()=>Promise<void>,inImport=false){if(busyRef.current)return;busyRef.current=true;setBusy(message);setError('');if(inImport)setImportError('');try{await fn();}catch(e){if(inImport)setImportError((e as Error).message);else setError((e as Error).message);}finally{busyRef.current=false;setBusy('');}}
  async function finishImport(p:Project){const requestedName=newProjectName.trim();adopt(p);setImportOpen(false);if(requestedName&&p.name!==requestedName)setNotice(`这些素材已有项目，已打开「${p.name}」。可点击名称旁的铅笔重命名。`);await refresh();}
  async function openPreparation(){
@@ -445,16 +446,17 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(!deleteProject||deleting)return;
   const target=deleteProject;setDeleting(true);setDeleteError('');
   pauseClearedPreviews(target.id);
-  writeProjectPreference(`datamark-user-${user.id}-previews-cleared`,JSON.stringify({id:target.id,at:Date.now()}));
   try{
    await api(`/api/projects/${target.id}/preview-cache/clear`,json('POST',{confirmed:true,expected_revision:target.revision}));
+   writeProjectPreference(previewsClearedKey,JSON.stringify({id:target.id,at:Date.now()}));
+   if(readProjectPreference(lastProjectKey)===target.id)writeProjectPreference(lastProjectKey,null);
    setDeleteProject(null);
-   setNotice(`已清理「${target.name}」的本机预览。项目、草稿、原视频和 NAS 缓存包均保留。`);
+   setNotice(`已清理「${target.name}」的本机预览。重新打开页面将等待选择素材；项目、草稿、原视频和 NAS 缓存包均保留。`);
    await refresh();
   }catch(e){setDeleteError((e as Error).message);}finally{setDeleting(false);}
  }
  useEffect(()=>{
-  const removed=(event:StorageEvent)=>{if(event.key!=='datamark-previews-cleared'||!event.newValue)return;try{const {id}=JSON.parse(event.newValue);pauseClearedPreviews(id);setDeleteProject(null);setNotice('其他窗口正在清理本机预览，当前输入和标注草稿均保留。');}catch{}};
+  const removed=(event:StorageEvent)=>{if(event.key!==previewsClearedKey||!event.newValue)return;try{const {id}=JSON.parse(event.newValue);pauseClearedPreviews(id);if(readProjectPreference(lastProjectKey)===id)writeProjectPreference(lastProjectKey,null);setDeleteProject(null);setNotice('其他窗口已清理本机预览，当前输入和标注草稿均保留。');}catch{}};
   window.addEventListener('storage',removed);return()=>window.removeEventListener('storage',removed);
  },[]);
  async function chooseProject(id:string){if(!id)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再切换项目；当前输入已保留。');return;}await doBusy('正在打开草稿…',async()=>{await flush();adopt(await api<Project>(`/api/projects/${id}`));});}

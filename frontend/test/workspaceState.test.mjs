@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isSegmentDraftDirty } from '../src/domain.ts';
-import { readProjectPreference, writeProjectPreference } from '../src/projectPreferences.ts';
+import { readProjectPreference, readRestorableProjectPreference, writeProjectPreference } from '../src/projectPreferences.ts';
 import { preparationFailureMessage, OLD_PLAYBACK_BACKEND } from '../src/preparationErrors.ts';
 
 const interval = {id:'a', label:'喝水', start_ms:1500, end_ms:5000};
@@ -39,6 +39,25 @@ test('project preferences retain normal remembered-project and deletion behavior
   assert.equal(readProjectPreference('last', storage), 'project');
   assert.equal(writeProjectPreference('last', null, storage), true);
   assert.equal(readProjectPreference('last', storage), null);
+});
+
+test('cleared preview stays at project selection until the user explicitly opens a project', () => {
+  const values = new Map();
+  const storage = {getItem:key=>values.get(key)??null, setItem:(key,value)=>values.set(key,value), removeItem:key=>values.delete(key)};
+  writeProjectPreference('last', 'a', storage);
+  writeProjectPreference('cleared', JSON.stringify({id:'a', at:1}), storage);
+  assert.equal(readRestorableProjectPreference('last', 'cleared', storage), null);
+  assert.equal(readProjectPreference('last', storage), null);
+
+  writeProjectPreference('cleared', null, storage);
+  writeProjectPreference('last', 'a', storage);
+  assert.equal(readRestorableProjectPreference('last', 'cleared', storage), 'a');
+});
+
+test('clearing another project does not hide the remembered project', () => {
+  const values = new Map([['last', 'b'], ['cleared', JSON.stringify({id:'a', at:1})]]);
+  const storage = {getItem:key=>values.get(key)??null, setItem:(key,value)=>values.set(key,value), removeItem:key=>values.delete(key)};
+  assert.equal(readRestorableProjectPreference('last', 'cleared', storage), 'b');
 });
 
 test('missing session route on confirmed old server gives exact restart steps', () => {
