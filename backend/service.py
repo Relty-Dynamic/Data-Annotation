@@ -191,7 +191,7 @@ def document_bytes(value: Any) -> bytes:
 
 
 def validate_annotations(value: Any, duration_ms: int, final: bool = False, videos: list | None = None,
-                         *, require_coverage: bool = True) -> dict:
+                         *, require_coverage: bool = True, require_scene_coverage: bool = True) -> dict:
     if not isinstance(value, dict) or set(value) not in (set(AXES), set(LEGACY_AXES)):
         raise HTTPException(422, "标注必须包含场景、姿势、大类和习惯四个时间轴。")
     # Legacy drafts can be opened without mutating stored annotations/revisions.
@@ -266,6 +266,8 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
     if final and require_coverage:
         runs = coverage if videos is not None else [{"start_ms": 0, "end_ms": duration_ms}]
         for axis in COVERAGE_AXES:
+            if axis == "scene" and not require_scene_coverage:
+                continue
             records = cleaned[axis]
             index = 0
             for run in runs:
@@ -276,7 +278,8 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
                     if cursor >= run["end_ms"]:
                         break
                 if cursor < run["end_ms"]:
-                    raise HTTPException(422, f"{AXIS_NAMES[axis]}轴尚未覆盖全部有视频的时间，请补齐后再导出或写回。")
+                    action = "导出" if axis == "scene" else "导出或写回"
+                    raise HTTPException(422, f"{AXIS_NAMES[axis]}轴尚未覆盖全部有视频的时间，请补齐后再{action}。")
     return cleaned
 
 
@@ -1140,10 +1143,10 @@ class ProjectService:
             if set(documents) != set(expected_axes):
                 raise HTTPException(409, "原目录标注文件不齐全或格式版本不一致。旧版须有三个文件，新版须有四个文件。")
             # Previously exported partial annotations remain readable for manual
-            # completion. Current files require full scene and posture coverage;
-            # category annotations may be empty or cover only selected intervals.
+            # completion. Current files require posture coverage; scene and
+            # category may contain unannotated intervals after writeback.
             cleaned = validate_annotations(annotations, project["duration_ms"], final=True, videos=active_videos(selected),
-                                           require_coverage=version >= 2)
+                                           require_coverage=version >= 2, require_scene_coverage=False)
             project['_skipped_video_names'] = names
             return cleaned, hashes
         except (KeyError, ValueError, TypeError):
@@ -1288,8 +1291,9 @@ class ProjectService:
                           "url": None, "thumbnail_url": None, "stamp": source["stamp"]})
         return digest(document_bytes(items))
 
-    def export_documents(self, project: dict) -> tuple[str, dict[str, bytes]]:
-        annotations = validate_annotations(project["annotations"], project["duration_ms"], final=True, videos=active_videos(project))
+    def export_documents(self, project: dict, *, for_writeback: bool = False) -> tuple[str, dict[str, bytes]]:
+        annotations = validate_annotations(project["annotations"], project["duration_ms"], final=True,
+                                           videos=active_videos(project), require_scene_coverage=not for_writeback)
         save_id = uuid.uuid4().hex
         recording_start = datetime.fromisoformat(project["recording_start"]).astimezone(timezone(timedelta(hours=8)))
         timebase = {"unit": "ms", "origin": "recording_datetime", "real_time_format": "HHMMSS", "recording_start": project["recording_start"], "timezone": "Asia/Shanghai", "gaps": project["gaps"], "interval": "[start,end)", "point_semantics": "instant; start_ms=end_ms", "duration_ms": project["duration_ms"], "source_fingerprint": project["source_fingerprint"], "videos": [{key: video[key] for key in ("id", "relative_path", "recording_start", "original_media_start_ms", "duration_ms", "start_ms", "end_ms")} for video in project["videos"]]}
@@ -1406,7 +1410,7 @@ class ProjectService:
                 raise HTTPException(400, "项目尚未关联统一的原采集目录，请导出四个 JSON 后自行保存。")
             if self.remote and self.remote.map_path(project['source_dir']) is not None:
                 # Local validation is preserved; the server performs source/conflict checks and commits.
-                self.export_documents(project)
+                self.export_documents(project, for_writeback=True)
                 response = self.remote.writeback(project)
                 for field in ('_external_hashes', 'draft_dirty', 'warnings', 'last_writeback', 'updated_at'):
                     project[field] = response['project'][field]
@@ -1414,7 +1418,7 @@ class ProjectService:
                 result = dict(response['result'])
                 result['paths'] = [str(Path(project['source_dir']) / 'timeline' / FILENAMES[axis]) for axis in AXES]
                 return result
-            save_id, documents = self.export_documents(project)
+            save_id, documents = self.export_documents(project, for_writeback=True)
             self.verify_sources(project)
             source = Path(project["source_dir"])
             expected = self.expected_external_hashes(project)

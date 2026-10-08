@@ -536,7 +536,8 @@ class Worker:
         hashes = project.get('_external_hashes')
         if not isinstance(hashes, dict) or any(value is not None and not re.fullmatch('[0-9a-f]{64}', str(value)) for value in hashes.values()):
             raise HTTPException(422, 'Invalid writeback conflict hashes.')
-        project['annotations'] = validate_annotations(project.get('annotations'), duration, final=True, videos=videos)
+        project['annotations'] = validate_annotations(project.get('annotations'), duration, final=True,
+                                                       videos=videos, require_scene_coverage=False)
         project.setdefault('gaps', [])
         project.setdefault('warnings', [])
         project.setdefault('updated_at', datetime.now().isoformat())

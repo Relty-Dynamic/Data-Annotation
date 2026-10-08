@@ -275,26 +275,50 @@ class FourAxisPersistenceTests(unittest.TestCase):
             interval("extra", "用餐", 800, 2000, mode="overlay"),
         ])
 
-    def test_missing_scene_or_posture_still_blocks_export_and_writeback_with_empty_category(self):
+    def test_missing_posture_still_blocks_export_and_writeback_with_empty_category(self):
         project = self.annotated_project()
         revision = project["revision"]
-        for axis, name in (("scene", "场景"), ("posture", "姿势")):
-            for partial in (False, True):
-                with self.subTest(axis=axis, partial=partial):
-                    annotations = copy.deepcopy(project["annotations"])
-                    annotations["category"] = []
-                    label = annotations[axis][0]["label"]
-                    annotations[axis] = [interval("partial", label, 100, 3000)] if partial else []
-                    updated = self.service.update_draft(project["id"], annotations, revision)
-                    revision = updated["revision"]
-                    for operation in (self.service.export_zip, self.service.writeback):
-                        with self.assertRaises(HTTPException) as error:
-                            operation(project["id"])
-                        self.assertEqual(error.exception.status_code, 422)
-                        self.assertIn(f"{name}轴尚未覆盖", error.exception.detail)
-                    self.assertFalse(any((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                annotations = copy.deepcopy(project["annotations"])
+                annotations["category"] = []
+                label = annotations["posture"][0]["label"]
+                annotations["posture"] = [interval("partial", label, 100, 3000)] if partial else []
+                updated = self.service.update_draft(project["id"], annotations, revision)
+                revision = updated["revision"]
+                for operation in (self.service.export_zip, self.service.writeback):
+                    with self.assertRaises(HTTPException) as error:
+                        operation(project["id"])
+                    self.assertEqual(error.exception.status_code, 422)
+                    self.assertIn("姿势轴尚未覆盖", error.exception.detail)
+                self.assertFalse(any((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
 
-    def test_deleted_scene_first_segment_remains_saved_draft_but_cannot_export(self):
+    def test_incomplete_scene_blocks_export_but_writes_back_and_reopens_without_filling(self):
+        project = self.annotated_project()
+        for scene in ([], [interval("partial", "室内", 100, 1500)]):
+            with self.subTest(scene=scene):
+                annotations = copy.deepcopy(project["annotations"])
+                annotations["scene"] = scene
+                updated = self.service.update_draft(project["id"], annotations, project["revision"])
+                project = updated
+                with self.assertRaises(HTTPException) as error:
+                    self.service.export_zip(project["id"])
+                self.assertEqual(error.exception.status_code, 422)
+                self.assertIn("场景轴尚未覆盖", error.exception.detail)
+                self.service.writeback(project["id"])
+                document = json.loads((self.source / "timeline" / FILENAMES["scene"]).read_bytes())
+                self.assertEqual([(item["start_ms"], item["end_ms"]) for item in document["segments"]],
+                                 [(item["start_ms"], item["end_ms"]) for item in scene])
+                imported, _ = self.service.read_external(self.service.load(project["id"]))
+                self.assertEqual(imported["scene"], scene)
+                fresh = ProjectService(self.root / "partial-scene-fresh")
+                try:
+                    self.assertEqual(fresh.open_path(str(self.source))["annotations"]["scene"], scene)
+                finally:
+                    fresh.previews.close()
+                project = self.service.load(project["id"])
+
+    def test_deleted_scene_first_segment_remains_saved_draft_and_can_write_back(self):
         project = self.annotated_project()
         annotations = project["annotations"]
         annotations["scene"] = annotations["scene"][1:]
@@ -302,10 +326,10 @@ class FourAxisPersistenceTests(unittest.TestCase):
         updated = self.service.update_draft(project["id"], annotations, project["revision"])
         self.assertEqual(updated["annotations"]["scene"][0]["start_ms"], 1500)
         self.assertEqual(updated["annotations"]["category"], [])
-        for operation in (self.service.export_zip, self.service.writeback):
-            with self.assertRaises(HTTPException):
-                operation(project["id"])
-        self.assertFalse(any((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
+        with self.assertRaises(HTTPException):
+            self.service.export_zip(project["id"])
+        self.service.writeback(project["id"])
+        self.assertTrue(all((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
 
     def test_missing_new_category_file_or_mixed_version_batch_is_rejected(self):
         project = self.annotated_project()

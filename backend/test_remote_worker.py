@@ -296,6 +296,16 @@ class RemoteWorkerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(any((self.nas / '.annotation-backups').iterdir()))
 
+    def test_writeback_accepts_unannotated_scene_and_reopens_it(self):
+        project = self.project()
+        project['annotations']['scene'] = []
+        response = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(response.status_code, 200, response.text)
+        document = json.loads((self.nas / 'timeline' / FILENAMES['scene']).read_bytes())
+        self.assertEqual(document['segments'], [])
+        restored, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
+        self.assertEqual(restored['scene'], [])
+
     def test_writeback_replays_committed_save_after_lost_response_and_restart(self):
         project = self.project()
         with patch.object(self.worker, '_writeback_response', side_effect=ConnectionResetError('response lost')):
