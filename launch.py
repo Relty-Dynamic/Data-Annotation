@@ -46,6 +46,8 @@ def reuse_running(args):
     current = health()
     if not current or current.get("application") != "datamark" or current.get("stopping") or "account-login" not in current.get("capabilities", []):
         return False
+    if sys.platform == "darwin" and "native-file-picker" not in current.get("capabilities", []):
+        return False
     if not args.no_browser and current.get("browser_lifetime") and not reserve_browser():
         return False
     if not args.no_browser and not args.no_open:
@@ -95,6 +97,8 @@ def main():
     current = health()
     if current and current.get("application") == "datamark" and "account-login" not in current.get("capabilities", []):
         raise RuntimeError("端口 8765 仍由旧版无登录服务占用。请先关闭旧平台的所有网页，等待服务退出后重新启动。")
+    if sys.platform == "darwin" and current and current.get("application") == "datamark" and "native-file-picker" not in current.get("capabilities", []):
+        raise RuntimeError("端口 8765 仍由不支持 macOS 文件选择的旧服务占用。请先关闭旧平台的所有网页，等待服务退出后重新启动新版。")
     for name in ("stdout", "stderr"):
         if getattr(sys, name) is None:
             setattr(sys, name, (ROOT / ".local" / "logs" / f"server.{name}.log").open("a", encoding="utf-8", buffering=1))
@@ -114,9 +118,9 @@ def main():
                 raise RuntimeError("端口 8765 长时间被占用，请检查后台服务或手动打开 " + BASE_URL)
             time.sleep(.2)
     if not (ROOT / "frontend" / "dist" / "index.html").is_file():
-        raise RuntimeError("页面尚未构建，请先运行 setup.cmd。")
+        raise RuntimeError("页面尚未构建，请先在 Windows 运行 setup.cmd，或在 macOS 的项目目录构建前端。")
     if sys.prefix == sys.base_prefix:
-        raise RuntimeError("请使用项目内的启动标注平台快捷方式。")
+        raise RuntimeError("请使用项目内虚拟环境启动平台。Windows 可使用启动快捷方式，macOS 可运行 .venv/bin/python launch.py。")
     import uvicorn
     from backend.app import create_app
     server = None

@@ -128,6 +128,12 @@ class AccountAccessTests(unittest.TestCase):
                 response = client.post("/api/auth/login", headers={"Origin": "https://10.20.30.40"},
                                        json={"username": "admin", "password": "correct horse battery staple"})
                 self.assertEqual(response.status_code, 200, response.text)
+                with patch("backend.app.choose_local_paths") as picker:
+                    cookie = "; ".join(f"{name}={response.cookies[name]}" for name in ("datamark_session", "datamark_csrf"))
+                    selected = client.post("/api/local-files/pick", headers={"Origin": "https://10.20.30.40", "x-csrf-token": response.json()["csrf"], "Cookie": cookie},
+                                           json={"kind": "files"})
+                    self.assertEqual(selected.status_code, 503, selected.text)
+                    picker.assert_not_called()
                 self.assertIn("secure", response.headers["set-cookie"].lower())
                 with client.websocket_connect("ws://10.20.30.40/api/browser/connection",
                                               headers={"origin": "https://10.20.30.40"}) as socket:

@@ -11,7 +11,7 @@ import launch
 class LauncherTests(unittest.TestCase):
     def test_reuses_running_server_and_opens_browser(self):
         args = SimpleNamespace(no_browser=False, no_open=False)
-        with patch.object(launch, "health", return_value={"application": "datamark", "stopping": False, "browser_lifetime": True, "capabilities": ["account-login"]}), patch.object(launch, "reserve_browser", return_value=True) as reserve, patch.object(launch, "open_browser") as open_browser:
+        with patch.object(launch, "health", return_value={"application": "datamark", "stopping": False, "browser_lifetime": True, "capabilities": ["account-login", "native-file-picker"]}), patch.object(launch, "reserve_browser", return_value=True) as reserve, patch.object(launch, "open_browser") as open_browser:
             self.assertTrue(launch.reuse_running(args))
             reserve.assert_called_once_with()
             open_browser.assert_called_once_with()

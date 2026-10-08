@@ -11,25 +11,58 @@ from pathlib import Path
 from fastapi import HTTPException
 
 
+_MAC_PICKER_SCRIPT = r"""
+function run(argv) {
+    var app = Application.currentApplication();
+    app.includeStandardAdditions = true;
+    try {
+        var selected = argv[0] === "directory"
+            ? [app.chooseFolder({withPrompt: "选择原视频目录（原视频保留在此处）"})]
+            : app.chooseFile({withPrompt: "选择视频（直接读取，不复制）", multipleSelectionsAllowed: true});
+        if (!Array.isArray(selected)) selected = [selected];
+        return JSON.stringify({paths: selected.map(function(item) { return item.toString(); })});
+    } catch (error) {
+        return JSON.stringify(error.errorNumber === -128 ? {paths: []} : {error: true});
+    }
+}
+"""
+
+
+def native_picker_available() -> bool:
+    return os.name == "nt" or sys.platform == "darwin"
+
+
 def choose_local_paths(root: Path, kind: str) -> list[str]:
     if kind not in {"files", "directory"}:
         raise HTTPException(422, "请选择视频文件或目录。")
-    if os.name != "nt":
+    if not native_picker_available():
         raise HTTPException(503, "当前系统不支持本机选择窗口，请填写素材完整路径。")
-    temporary = root.resolve() / ".tmp"
-    temporary.mkdir(exist_ok=True)
-    result_path = temporary / ("file-picker-" + uuid.uuid4().hex + ".json")
+    result_path = None
     try:
-        # The helper owns its Tk event loop on its main thread. CREATE_NO_WINDOW
-        # hides the Python console; the native picker is shown after a UI click.
-        completed = subprocess.run(
-            [sys.executable, "-B", str(Path(__file__).resolve()), kind, str(result_path)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW, timeout=900,
-        )
-        if completed.returncode or not result_path.is_file():
-            raise HTTPException(503, "未能打开本机选择窗口，请直接填写视频文件或目录的完整路径。")
-        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if os.name == "nt":
+            temporary = root.resolve() / ".tmp"
+            temporary.mkdir(exist_ok=True)
+            result_path = temporary / ("file-picker-" + uuid.uuid4().hex + ".json")
+            # The helper owns its Tk event loop on its main thread. CREATE_NO_WINDOW
+            # hides the Python console while the picker is open on Windows.
+            completed = subprocess.run(
+                [sys.executable, "-B", str(Path(__file__).resolve()), kind, str(result_path)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW, timeout=900,
+            )
+            if completed.returncode or not result_path.is_file():
+                raise HTTPException(503, "未能打开本机选择窗口，请直接填写视频文件或目录的完整路径。")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        else:
+            # Apple's built-in dialog works even when the local Python lacks a usable Tk runtime.
+            completed = subprocess.run(
+                ["/usr/bin/osascript", "-l", "JavaScript", "-e", _MAC_PICKER_SCRIPT, kind],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=900,
+            )
+            if completed.returncode:
+                raise HTTPException(503, "未能打开本机选择窗口，请直接填写视频文件或目录的完整路径。")
+            result = json.loads(completed.stdout)
         if not isinstance(result, dict) or result.get("error"):
             raise HTTPException(503, "未能读取文件选择结果，请直接填写素材完整路径。")
         paths = result.get("paths")
@@ -41,7 +74,8 @@ def choose_local_paths(root: Path, kind: str) -> list[str]:
     except (OSError, ValueError):
         raise HTTPException(503, "无法使用本机选择窗口，请填写素材完整路径。")
     finally:
-        result_path.unlink(missing_ok=True)
+        if result_path is not None:
+            result_path.unlink(missing_ok=True)
 
 
 def _dialog(kind: str, result_path: Path) -> None:

@@ -20,7 +20,7 @@ from starlette.staticfiles import StaticFiles
 
 from .service import ProjectService
 from .browser_lifetime import BrowserLifetime
-from .native_picker import choose_local_paths
+from .native_picker import choose_local_paths, native_picker_available
 from .media_response import CancellableFileResponse
 from .auth import AuthStore
 
@@ -215,7 +215,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.get("/api/health")
     def health():
         capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "remote-nas-processing", "account-login"]
-        if os.name == "nt" and not configured_origin:
+        if native_picker_available() and not configured_origin:
             capabilities.append("native-file-picker")
         return {"status": "ok", "application": "datamark", "browser_lifetime": bool(on_idle), "stopping": lifetime.stopping, "ffmpeg": bool(service.tool("ffmpeg")), "ffprobe": bool(service.tool("ffprobe")), "remote_processing": service.remote is not None, "capabilities": capabilities}
 
@@ -322,6 +322,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/local-files/pick")
     def local_files(body: PickFilesRequest):
+        if configured_origin:
+            raise HTTPException(503, "服务器模式不支持本机选择窗口，请填写服务器可访问的素材路径。")
         return {"paths": choose_local_paths(root, body.kind)}
 
     @app.post("/api/projects/files")

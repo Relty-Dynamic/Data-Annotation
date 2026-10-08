@@ -595,7 +595,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    {!sharedServer&&<div className="divider"><span>或直接填写本机 / 内网路径</span></div>}
    <label className="field-label" htmlFor="source-path">{importMode==='relink'?'原视频目录路径':'视频文件或目录路径'}</label>
    <input id="source-path" disabled={!!busy} value={path} placeholder={sharedServer?'填写服务器上的 NAS 完整路径，例如 /mnt/nas/homes/…':'粘贴原视频所在目录的完整路径'} onChange={e=>setPath(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')openPath();}}/>
-   <p className="input-hint">{importMode==='relink'?'请提供包含这些原视频的目录；校验成功后才会清理对应副本。':importMode==='supplement'?'支持单个视频或整个目录；再次选择原目录可自动补齐遗漏视频。':'请输入服务器可访问的采集根目录或内网共享目录。'}</p>
+   <p className="input-hint">{importMode==='relink'?'请提供包含这些原视频的目录；校验成功后才会清理对应副本。':importMode==='supplement'?'支持单个视频或整个目录；再次选择原目录可自动补齐遗漏视频。':sharedServer?'请输入服务器可访问的采集根目录或内网共享目录。':'可选择文件或目录，也可填写本机可访问的完整路径。'}</p>
    <button className="primary wide" disabled={!path.trim()||!!busy} onClick={openPath}><FolderOpen size={16}/>{importMode==='relink'?'关联并迁移缓存':importMode==='supplement'?'补入当前项目':'读取并新建项目'}</button>
    <p className="privacy-note"><span className="status-dot"/>直接读取所选路径，不上传或复制原视频</p>
   </section></div>}

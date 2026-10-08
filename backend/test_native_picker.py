@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.native_picker import choose_local_paths
+from launch import reuse_running
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +41,45 @@ class NativePickerTests(unittest.TestCase):
             self.assertEqual(choose_local_paths(self.root, "files"), paths)
         self.assertEqual(list((self.root / ".tmp").iterdir()), [])
         self.assertFalse(Path(paths[0]).exists())
+
+    def test_mac_picker_returns_selected_files_and_directory(self):
+        cases = {"files": [str(self.root / "原视频" / "first.avi"), str(self.root / "原视频" / "second.mp4")],
+                 "directory": [str(self.root / "原视频")]}
+        for kind, paths in cases.items():
+            with self.subTest(kind=kind), patch("backend.native_picker.os") as fake_os, patch("backend.native_picker.sys.platform", "darwin"), patch("backend.native_picker.subprocess.run", return_value=subprocess.CompletedProcess([], 0, json.dumps({"paths": paths}))) as run:
+                fake_os.name = "posix"
+                self.assertEqual(choose_local_paths(self.root, kind), paths)
+                self.assertEqual(run.call_args.args[0][:4], ["/usr/bin/osascript", "-l", "JavaScript", "-e"])
+                self.assertEqual(run.call_args.args[0][-1], kind)
+                self.assertNotIn("creationflags", run.call_args.kwargs)
+                self.assertFalse((self.root / ".tmp").exists())
+
+    def test_mac_picker_cancel_returns_no_paths(self):
+        with patch("backend.native_picker.os") as fake_os, patch("backend.native_picker.sys.platform", "darwin"), patch("backend.native_picker.subprocess.run", return_value=subprocess.CompletedProcess([], 0, '{"paths": []}')):
+            fake_os.name = "posix"
+            self.assertEqual(choose_local_paths(self.root, "files"), [])
+
+    def test_linux_picker_does_not_start_a_desktop_dialog(self):
+        with patch("backend.native_picker.os") as fake_os, patch("backend.native_picker.sys.platform", "linux"), patch("backend.native_picker.subprocess.run") as run:
+            fake_os.name = "posix"
+            with self.assertRaises(HTTPException) as context:
+                choose_local_paths(self.root, "files")
+        self.assertEqual(context.exception.status_code, 503)
+        run.assert_not_called()
+
+    def test_local_health_advertises_picker_when_platform_supports_it(self):
+        app = create_app(self.root, auth_required=False)
+        with TestClient(app, base_url="http://127.0.0.1") as client:
+            with patch("backend.app.native_picker_available", return_value=True):
+                self.assertIn("native-file-picker", client.get("/api/health").json()["capabilities"])
+            with patch("backend.app.native_picker_available", return_value=False):
+                self.assertNotIn("native-file-picker", client.get("/api/health").json()["capabilities"])
+
+    def test_mac_launcher_does_not_reuse_an_old_service_without_picker(self):
+        old_health = {"application": "datamark", "capabilities": ["account-login"]}
+        with patch("launch.sys.platform", "darwin"), patch("launch.health", return_value=old_health), patch("launch.open_browser") as browser:
+            self.assertFalse(reuse_running(SimpleNamespace(no_browser=False, no_open=False)))
+            browser.assert_not_called()
 
     def test_cancel_returns_empty_without_creating_a_project(self):
         app = create_app(self.root, auth_required=False)
