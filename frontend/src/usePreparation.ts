@@ -9,6 +9,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
   const retryFailed = useRef(false);
+  const startRequested = useRef(false);
   const [result, setResult] = useState<{id: string; status: PreparationStatus | null; manifest: SessionManifest | null; error: string}>({id: '', status: null, manifest: null, error: ''});
   const [startingId, setStartingId] = useState('');
   const [epoch, setEpoch] = useState(0);
@@ -46,6 +47,10 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
         if (stopped) return;
         retryFailed.current = false;
         const status = body as PreparationStatus;
+        if (!start && status.state === 'idle') {
+          await read(true);
+          return;
+        }
         if (status.state === 'ready') {
           publish({...status, state: 'running', checking: false, stage: 'browser', progress: 0, detail: '正在载入封面和悬停预览图片'});
           const manifestResponse = await fetch('/api/projects/' + id + '/session/manifest', {cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)])});
@@ -74,7 +79,9 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
         if (start && !stopped) setStartingId(previous => previous === id ? '' : previous);
       }
     };
-    void read(true);
+    const startNow = startRequested.current;
+    startRequested.current = false;
+    void read(startNow);
     return () => {
       stopped = true;
       clearTimeout(timer);
@@ -85,6 +92,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
 
   const refresh = useCallback(() => {
     retryFailed.current = false;
+    startRequested.current = true;
     setResult({id: projectRef.current ?? '', status: null, manifest: null, error: ''});
     setEpoch(value => value + 1);
   }, []);
@@ -92,6 +100,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
   const start = useCallback(async (id: string, retry = false) => {
     if (projectRef.current !== id) return;
     retryFailed.current = retry;
+    startRequested.current = true;
     setResult({id, status: null, manifest: null, error: ''});
     setEpoch(value => value + 1);
   }, []);

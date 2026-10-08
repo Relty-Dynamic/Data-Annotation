@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function mountPreparation(responses) {
+function mountPreparation(responses, complete = false) {
   const slots = [], timers = new Map(), requests = [];
   let cursor = 0, dirty = false, effects = [], nextTimer = 0, result;
   const same = (left, right) => left?.length === right?.length && left?.every((value, index) => Object.is(value, right[index]));
@@ -48,8 +48,13 @@ function mountPreparation(responses) {
   vm.runInContext(`(function(require,module,exports){${source}\n})`, context)(name => {
     if (name === 'react') return react;
     if (name === './auth.ts') return {authFetch: context.fetch};
-    if (name === './sessionAssets') return {forgetSessionAssets() {}, isSessionManifest() {throw new Error('Incomplete batch must not inspect a manifest');},
-      prepareSessionAssets() {throw new Error('Incomplete batch must not enter browser warmup');}};
+    if (name === './sessionAssets') return {forgetSessionAssets() {}, isSessionManifest() {
+      if (!complete) throw new Error('Incomplete batch must not inspect a manifest');
+      return true;
+    }, prepareSessionAssets: async (_id, _manifest, _signal, onProgress) => {
+      if (!complete) throw new Error('Incomplete batch must not enter browser warmup');
+      onProgress(1, 1);
+    }};
     if (name === './preparationErrors') return {preparationFailureMessage: (_, detail) => detail};
     throw new Error('Unexpected hook import: ' + name);
   }, module, module.exports);
@@ -80,6 +85,7 @@ test('a failed clip keeps polling active peers, then partial stops without expos
   const base = {project_id: 'fixture-project', state: 'running', stage: 'local', operation: 'download',
     total: 3, failed: 1, running: 1, items: [{video_id: 'failed', state: 'error', detail: 'Checksum mismatch'}]};
   const hook = mountPreparation([
+    {...base, state: 'idle', ready: 0, queued: 3, running: 0, failed: 0, progress: 0},
     {...base, ready: 0, queued: 1, progress: 10},
     {...base, ready: 1, queued: 0, progress: 50},
     {...base, state: 'partial', ready: 2, queued: 0, running: 0, progress: 66.7},
@@ -100,13 +106,29 @@ test('a failed clip keeps polling active peers, then partial stops without expos
     assert.equal(hook.result.status.progress, 66.7);
     assert.equal(hook.timers.size, 0);
     assert.equal(hook.result.manifest, null);
-    assert.deepEqual(hook.requests.map(request => request.method), ['POST', 'GET', 'GET']);
+    assert.deepEqual(hook.requests.map(request => request.method), ['GET', 'POST', 'GET', 'GET']);
     assert.ok(hook.requests.every(request => !request.url.includes('/manifest')));
     await hook.result.start('fixture-project', true);
     await hook.settle();
-    assert.equal(hook.requests.length, 4);
-    assert.deepEqual(hook.requests[3].body, {retry_failed: true, cache_generation: 7});
+    assert.equal(hook.requests.length, 5);
+    assert.deepEqual(hook.requests[4].body, {retry_failed: true, cache_generation: 7});
     assert.equal(hook.result.status.ready, 2);
     assert.equal(hook.result.status.state, 'running');
+  } finally {hook.close();}
+});
+
+test('refreshing an already ready project reads its session without restarting preparation', async () => {
+  const status = {project_id: 'fixture-project', state: 'ready', total: 1, ready: 1,
+    items: [{video_id: 'clip', state: 'ready'}]};
+  const manifest = {version: 'ready-version', videos: [{id: 'clip'}]};
+  const hook = mountPreparation([status, manifest], true);
+  try {
+    await hook.settle();
+    assert.equal(hook.result.status.state, 'ready');
+    assert.equal(hook.result.manifest.version, 'ready-version');
+    assert.deepEqual(hook.requests.map(request => [request.method, request.url]), [
+      ['GET', '/api/projects/fixture-project/session'],
+      ['GET', '/api/projects/fixture-project/session/manifest'],
+    ]);
   } finally {hook.close();}
 });
