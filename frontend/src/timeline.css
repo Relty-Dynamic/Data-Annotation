@@ -149,3 +149,23 @@
 .tl-anchor { position: absolute; top: 29px; bottom: 0; width: 0; z-index: 5; border-left: 1px dashed #e7b97eaa; pointer-events: none; }
 .tl-anchor-label { position: absolute; top: 0; left: 2px; width: 16px; height: 20px; padding-top: 1px; background: #e7b97e; color: #302214; font-size: 10px; font-weight: 700; text-align: center; clip-path: polygon(0 0, 100% 0, 100% 74%, 50% 100%, 0 74%); }
 .tl-anchor-label-left { left: -18px; }
+
+/* The ruler and tracks share the same visual language as the editor panels. */
+.tl-root { --tl-panel: #17212b; --tl-border: #344653; --tl-muted: #9aafbe; background: var(--tl-panel); border-color: var(--tl-border); border-radius: 10px; box-shadow: 0 8px 24px #060b1133, inset 0 1px #ffffff08; }
+.tl-toolbar { background: linear-gradient(180deg, #1d2c37, #192630); }
+.tl-heading h2 { color: #d8e8ec; }
+.tl-heading-icon { color: #8dcfc4; }
+.tl-gutter { background: #1b2a35; color: #c3d4dc; }
+.tl-ruler { background: #15232d; }
+.tl-video-strip { background: #13212b; }
+.tl-track-surface { background: #182632; }
+.tl-track-select:hover, .tl-track-active .tl-track-select { background: #25404b; }
+.tl-track-active .tl-track-select { box-shadow: inset 3px 0 #82d8c9; }
+.tl-track-active .tl-track-surface { background: #20333e; }
+.tl-track-row { border-bottom-color: #30424f; }
+.tl-segment { border-radius: 5px; box-shadow: inset 0 1px #ffffff1a; }
+.tl-segment-selected { outline-color: #e0f8f2; }
+.tl-empty-track { color: #9aacba; }
+.tl-browse-controls button { background: #263b48; border-color: #4b6573; color: #c6dce5; }
+.tl-browse-controls button:hover:not(:disabled) { background: #355361; border-color: #85bdb9; }
+.tl-hover-tooltip { background: #172832f5; border-color: #52707b; box-shadow: 0 10px 24px #04090db3; }

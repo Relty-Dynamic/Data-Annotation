@@ -8,7 +8,7 @@
 .admin-panel h3{margin:22px 0 10px;font-size:14px}.admin-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .admin-form button{align-self:end}.admin-list{display:grid;gap:8px}.admin-list>div,.admin-list>label{padding:8px;border:1px solid #343e49;border-radius:6px}
 .admin-list select{max-width:260px}.annotation-author{margin:8px 30px;color:#b8c8d5;font-size:12px}
-.is-annotator .new-project-action,.is-annotator .supplement-action,.is-annotator .project-rename-button,.is-annotator .project-delete-button,.is-annotator .writeback-action,.is-annotator .empty-preview button,.is-annotator .source-relink-notice button{display:none}
+.is-annotator .project-rename-button,.is-annotator .project-delete-button,.is-annotator .source-relink-notice button{display:none}
 .password-actions{display:flex;justify-content:flex-end;gap:8px}
 .admin-buttons{display:flex;gap:6px}.admin-reset{display:flex;align-items:center;gap:8px;margin-top:12px}.admin-reset input{max-width:220px}
 @media(max-width:650px){.admin-form{grid-template-columns:1fr}.admin-list>label{flex-direction:column;align-items:stretch}}
