@@ -221,6 +221,18 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 .source-pickers.single { grid-template-columns: 1fr; }
 .source-pickers .upload-zone { min-width: 0; margin-top: 0; padding: 19px 7px; gap: 9px; }
 .source-pickers .upload-zone strong { font-size: 12px; }
+.import-modal.nas-picker-open { width: min(660px, calc(100vw - 30px)); max-height: calc(100vh - 30px); overflow-y: auto; }
+.nas-browser { margin-top: 12px; padding: 12px; border: 1px solid #3c6058; border-radius: 8px; background: #151f22; }
+.nas-browser-heading, .nas-browser-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.nas-browser-heading strong { font-size: 12px; }
+.nas-browser-path { margin: 9px 0; color: #9ab7b0; font-size: 11px; overflow-wrap: anywhere; }
+.nas-browser-list { max-height: 230px; overflow-y: auto; border: 1px solid #34414b; border-radius: 6px; }
+.nas-browser-list > button, .nas-browser-row > button, .nas-browser-row > label, .nas-browser-row > span { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; text-align: left; font-size: 12px; }
+.nas-browser-list > button, .nas-browser-row > button { justify-content: flex-start; }
+.nas-browser-row + .nas-browser-row { border-top: 1px solid #29383b; }
+.nas-browser-row input[type='checkbox'] { width: auto; margin: 0; }
+.nas-browser-list p { padding: 12px; font-size: 11px; }
+.nas-browser-actions { justify-content: flex-end; margin-top: 10px; }
 @media (max-width: 1100px) { .source-relink-notice { margin-inline: 18px; } }
 
 /* Four dimensions and reusable anchor selection. */

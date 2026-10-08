@@ -54,7 +54,17 @@ class AccountAccessTests(unittest.TestCase):
         self.auth.assign(project_id, self.annotator["id"])
         self.assertEqual(len(self.client.get("/api/projects").json()), 1)
         self.assertEqual(self.client.get(f"/api/projects/{project_id}").status_code, 200)
-        self.assertEqual(self.client.post(f"/api/projects/{project_id}/writeback", headers={"X-CSRF-Token": csrf}).status_code, 403)
+        with patch.object(self.app.state.service, "writeback", return_value={"ok": True}) as writeback:
+            self.assertEqual(self.client.post(f"/api/projects/{project_id}/writeback", headers={"X-CSRF-Token": csrf}).status_code, 200)
+            writeback.assert_called_once_with(project_id)
+        with patch.object(self.app.state.service, "skip_failed_videos", return_value={"ok": True}) as skip:
+            response = self.client.post(f"/api/projects/{project_id}/session/skip-failed", json={"confirmed": True, "expected_revision": 0, "video_ids": ["v0001"]}, headers={"X-CSRF-Token": csrf})
+            self.assertEqual(response.status_code, 200, response.text)
+            skip.assert_called_once_with(project_id, ["v0001"], 0)
+        with patch.object(self.app.state.service, "restore_skipped_videos", return_value={"ok": True}) as restore:
+            response = self.client.post(f"/api/projects/{project_id}/session/restore-skipped", json={"confirmed": True, "expected_revision": 0}, headers={"X-CSRF-Token": csrf})
+            self.assertEqual(response.status_code, 200, response.text)
+            restore.assert_called_once_with(project_id, 0)
         self.auth.set_active(self.annotator["id"], False)
         self.assertEqual(self.client.get("/api/projects").status_code, 401)
 

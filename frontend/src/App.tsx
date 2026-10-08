@@ -31,6 +31,8 @@ type ImportMode = 'new' | 'supplement' | 'relink';
 type ComposerDraft = {label:string; start:string; end:string; kind:'point'|'interval'};
 type SupplementResponse = {project:Project; added_count:number; skipped_names:string[]};
 type RelinkResponse = {project:Project; relinked_count:number; removed_copies:number; warnings?:string[]};
+type NasEntry = {name:string; path:string; kind:'directory'|'file'; size?:number};
+type NasListing = {root:string; path:string; parent:string|null; entries:NasEntry[]; page:number; has_more:boolean};
 const oldBackendMessage = '后台仍是旧版本，请关闭所有平台网页，等待约15秒后重新启动。';
 type SupplementContext = {project:Project; cursor:VideoTimeAnchor|null; composer:ComposerDraft|null; start:VideoTimeAnchor|null; end:VideoTimeAnchor|null};
 const sceneLabels = SCENE_LABELS;
@@ -67,6 +69,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const [prepareOpen,setPrepareOpen]=useState(false),[sessionEntered,setSessionEntered]=useState(false);
  const enterAfterSkip=useRef<string|null>(null);
  const [importOpen,setImportOpen]=useState(false),[importMode,setImportMode]=useState<ImportMode>('new'),[importError,setImportError]=useState(''),[path,setPath]=useState(''),[busy,setBusy]=useState('');
+ const [nasPickerKind,setNasPickerKind]=useState<'files'|'directory'|null>(null),[nasListing,setNasListing]=useState<NasListing|null>(null),[nasSelected,setNasSelected]=useState<string[]>([]),[nasLoading,setNasLoading]=useState(false);
  const busyRef=useRef(false),importDialogRef=useRef<HTMLElement>(null),importTriggerRef=useRef<HTMLElement|null>(null);
  const [newProjectName,setNewProjectName]=useState('');
  const [timelineImportOpen,setTimelineImportOpen]=useState(false);
@@ -262,7 +265,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   pausePlayback();importTriggerRef.current=document.activeElement as HTMLElement|null;
   await doBusy('正在检查导入功能…',async()=>{
    await requireSourceCapabilities(mode==='supplement');
-   setImportMode(mode);setImportError('');setPath('');setNewProjectName('');setImportOpen(true);
+   setImportMode(mode);setImportError('');setPath('');setNewProjectName('');setNasPickerKind(null);setNasListing(null);setNasSelected([]);setImportOpen(true);
   });
  }
  async function changeSkippedVideos(ids?:string[]){
@@ -350,11 +353,35 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    if(!Array.isArray(chosen.paths))throw new Error('未能读取所选路径，请重试或手动填写原目录。');
    if(!chosen.paths.length)return;
    if(kind==='directory'){setBusy(importMode==='relink'?'正在验证原视频并迁移缓存…':'正在读取原视频目录…');await importSourcePath(chosen.paths[0]);return;}
-   await requireSourceCapabilities(importMode==='supplement');
-   setBusy(`正在读取 ${chosen.paths.length} 段原视频的时长…`);
-   await flush();const context=importMode==='supplement'?captureSupplement():null;
-   if(context)await finishSupplement(await api<SupplementResponse>(`/api/projects/${context.project.id}/videos/files`,json('POST',{paths:chosen.paths,expected_revision:serverRevision.current})),context);
-   else await finishImport(await api<Project>('/api/projects/files',json('POST',{paths:chosen.paths,name:newProjectName.trim()})));
+   await importSourceFiles(chosen.paths);
+  },true);
+ }
+ async function importSourceFiles(paths:string[]){
+  await requireSourceCapabilities(importMode==='supplement');
+  setBusy(`正在读取 ${paths.length} 段原视频的时长…`);
+  await flush();const context=importMode==='supplement'?captureSupplement():null;
+  if(context)await finishSupplement(await api<SupplementResponse>(`/api/projects/${context.project.id}/videos/files`,json('POST',{paths,expected_revision:serverRevision.current})),context);
+  else await finishImport(await api<Project>('/api/projects/files',json('POST',{paths,name:newProjectName.trim()})));
+ }
+ async function browseNas(kind:'files'|'directory', folder?:string, page=0){
+  setNasLoading(true);setImportError('');
+  try{
+   const health=await api<{capabilities?:string[]}>('/api/health',{cache:'no-store'});
+   if(!health.capabilities?.includes('nas-source-browser'))throw new Error(oldBackendMessage);
+   const query=new URLSearchParams({page:String(page)});if(folder)query.set('path',folder);
+   const listing=await api<NasListing>(`/api/sources/browse?${query}`);
+   if(nasPickerKind!==kind||nasListing?.path!==listing.path)setNasSelected([]);
+   setNasPickerKind(kind);setNasListing(listing);
+  }catch(error){setImportError(error instanceof Error?error.message:String(error));}
+  finally{setNasLoading(false);}
+ }
+ async function importNasSelection(){
+  if(!nasListing||!nasPickerKind)return;
+  pausePlayback();
+  await doBusy(nasPickerKind==='directory'?'正在读取 NAS 原视频目录…':'正在读取 NAS 视频文件…',async()=>{
+   await checkNewProjectName();
+   if(nasPickerKind==='directory')await importSourcePath(nasListing.path);
+   else if(nasSelected.length)await importSourceFiles(nasSelected);
   },true);
  }
  async function openPath(){
@@ -549,7 +576,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   <header className="topbar" inert={comparisonOpen||timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen||adminOpen||passwordOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions"><span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><span>{user.display_name}</span>{user.role==='admin'&&<button className="quiet" onClick={()=>setAdminOpen(true)}>账号管理</button>}<button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} title="请先保存或取消当前编辑" onClick={()=>setPasswordOpen(true)}>修改密码</button><button className="quiet" onClick={()=>void onLogout()}>退出登录</button><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>
   {error&&<div className="message error" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={()=>setError('')}><X size={16}/></button></div>}
   {notice&&<div className="message success" role="status"><Check size={16}/><span>{notice}</span><button aria-label="关闭提示" onClick={()=>setNotice('')}><X size={16}/></button></div>}
-  {project?.needs_source_relink&&<div className="source-relink-notice" inert={importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}><FolderOpen size={16}/><span>此项目仍使用平台内的视频副本。关联原目录后，缓存会移到原视频旁，释放重复存储。</span><button className="secondary" disabled={!!busy||project.deletion_pending} onClick={()=>beginImport('relink')}>关联原目录</button></div>}
+  {project?.needs_source_relink&&user.role==='admin'&&<div className="source-relink-notice" inert={importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}><FolderOpen size={16}/><span>此项目仍使用平台内的视频副本。关联原目录后，缓存会移到原视频旁，释放重复存储。</span><button className="secondary" disabled={!!busy||project.deletion_pending} onClick={()=>beginImport('relink')}>关联原目录</button></div>}
   {help&&<div className="help-panel"><Keyboard size={18}/><span>顶部全屏按钮 进入工作台全屏，Esc 退出</span><span>空格 播放／暂停</span><span>Ctrl + 空格 添加锚点</span><span>← → 前后 {seekSettings.arrowMs/1000} 秒</span><span>Shift + ← → 前后 {seekSettings.shiftArrowMs/1000} 秒</span><span>Ctrl + ← → 前后 {seekSettings.ctrlArrowMs/1000} 秒</span><span>Ctrl + Alt + 滚轮 上退下进，每次 {seekSettings.wheelMs/1000} 秒</span><span>Shift + 滚轮 上退下进，每次 {seekSettings.shiftWheelMs/1000} 秒</span><span>右上角设置按钮 可调整移动步长</span><span>调整视频进度会暂停，松开后保持暂停</span><span>Ctrl + 滚轮 缩放时间轴（最细每屏5分钟）</span><span>Ctrl + + / - / 0 已禁用浏览器缩放</span><span>Alt + 滚轮 左右浏览时间轴</span><span>大类 / 习惯轴内滚轮 上下查看重叠层</span><span>拖动蓝色光标定位视频</span><span>Delete 删除选中色块</span><span>Z 动 / X 坐 / C 站 / V 躺：从当前播放位置向后切换姿势</span><span>Ctrl + Z 撤销</span><span>Ctrl + Shift + Z 恢复</span><span>点击轴名或右侧类型切换；点击色块可编辑。左右键和空格固定控制视频。</span></div>}
   <main ref={comparisonRef} tabIndex={comparisonOpen?-1:undefined} role={comparisonOpen?"dialog":undefined} aria-modal={comparisonOpen?true:undefined} aria-label={comparisonOpen?"时间轴对照查看":undefined} className={"editor-grid"+(comparisonOpen?" comparison-view":"")} inert={timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}>
   {comparisonOpen&&comparison&&<header className="comparison-heading"><div><h2>时间轴对照 · {names[comparison.track]}</h2><p title={[comparison.name,comparison.alignment,...comparison.warnings].join(' · ')}>{comparison.name} · {comparison.alignment}{comparison.warnings.length>0?' · '+comparison.warnings.join(' '):''}</p></div><button className="secondary" onClick={()=>{pausePlayback();setTimelineImportOpen(true);}}>更换时间轴</button><button className="icon-button" aria-label="进度快捷键设置" onClick={()=>{pausePlayback();setSettingsOpen(true);}}><Settings size={16}/></button><button className="secondary" onClick={closeComparison}><X size={16}/>关闭查看</button></header>}
@@ -579,19 +606,20 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    </div><div className="annotation-footer"><button className="secondary" disabled={!history.length||!!busy} onClick={undo} title="Ctrl + Z"><RotateCcw size={14}/>撤销</button><button className="secondary" disabled={!redoHistory.length||!!busy} onClick={redo} title="Ctrl + Shift + Z"><RotateCw size={14}/>恢复</button></div>
   </section>}</aside></main>
   {saveFailed&&<div className="save-recovery" role="alert" inert={importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}><span>{saveState}</span><button className="text-button" disabled={!!busy} onClick={retrySave}>重试保存</button><button className="text-button" disabled={!!busy} title="先下载包含本页未保存改动的恢复 JSON，再读取服务器草稿" onClick={recoverAndReload}>保存恢复副本并重新载入</button></div>}
-  {importOpen&&<div className="modal-backdrop" onClick={()=>!busy&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className="import-modal" onClick={e=>e.stopPropagation()}>
+  {importOpen&&<div className="modal-backdrop" onClick={()=>!busy&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className={'import-modal'+(nasPickerKind?' nas-picker-open':'')} onClick={e=>e.stopPropagation()}>
    <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
    <h2 id="import-title">{importMode==='relink'?'关联原视频目录':importMode==='supplement'?'补导入视频':'新建采集项目'}</h2>
    {importMode==='new'&&<div className="project-name-field"><label className="field-label" htmlFor="new-project-name">项目名称</label><input id="new-project-name" className="project-name-input" value={newProjectName} disabled={!!busy} placeholder="留空则按导入时间命名" autoComplete="off" aria-describedby="new-project-name-hint" aria-invalid={!!projectNameError(newProjectName,false)} onChange={e=>setNewProjectName(e.target.value)}/><p id="new-project-name-hint" className={projectNameError(newProjectName,false)?'import-error':'input-hint'}>{projectNameError(newProjectName,false)||'最多 80 个字符'}</p></div>}
    {importMode!=='new'&&<div className="supplement-target"><span>当前项目</span><strong>{project?.name}</strong><small>已有 {project?.videos.length??0} 段视频</small></div>}
    <p>{importMode==='relink'?<>选择最初的原视频目录，验证匹配后迁移已有缓存并清理平台内的视频副本。<br/>标注、撤销记录和当前输入都会保留。</>:importMode==='supplement'?<>漏掉的视频会按录制时间插入当前时间轴。<br/>保留已有标注和预览缓存，同名视频自动跳过。</>:<>识别文件名中的录制时间，自动排序。<br/>保留视频之间的真实录制间隔。</>}</p>
-   <div className="source-storage-note"><strong>原视频保留原目录，不复制</strong><span>预览缓存生成在原目录的 <code>.datamark-cache</code> 子文件夹，并附有 README.md 用途说明。标注草稿保存在平台内。</span><small>使用移动硬盘、SD 卡或共享目录时，请保持该位置可访问。</small></div>
+   <div className="source-storage-note"><strong>原视频保留原目录，不复制</strong><span>预览缓存存放在原目录的 <code>.datamark-cache</code> 子文件夹，并附有 README.md 用途说明。标注草稿保存在平台内。</span><small>{sharedServer?'请保持 Ubuntu 的 NAS 挂载可访问。':'使用移动硬盘、SD 卡或共享目录时，请保持该位置可访问。'}</small></div>
    {importError&&<p className="import-error" role="alert">{importError}</p>}
-   <div className="prepare-import-option"><Check size={17}/><span><strong>先准备全部播放素材，再开始标注</strong><small>原目录保存完整预览，{sharedServer?'服务器':'本机'}仅保存精简播放缓存，复用已有有效素材。</small></span></div>
-   {!sharedServer&&<div className={'source-pickers'+(importMode==='relink'?' single':'')}>
-    {importMode!=='relink'&&<button className="upload-zone" disabled={!!busy} onClick={()=>chooseLocalSources('files')}><Film size={23}/><strong>选择视频文件</strong><span>支持一次多选</span></button>}
-    <button className="upload-zone" disabled={!!busy} onClick={()=>chooseLocalSources('directory')}><FolderOpen size={23}/><strong>选择原视频目录</strong><span>{importMode==='relink'?'匹配已有视频，迁移缓存':'直接读取目录中的视频'}</span></button>
-   </div>}
+   <div className="prepare-import-option"><Check size={17}/><span><strong>先准备全部播放素材，再开始标注</strong><small>复用原目录中已有的有效缓存，{sharedServer?'Ubuntu 服务器':'本机'}保存精简播放素材。</small></span></div>
+   <div className={'source-pickers'+(importMode==='relink'?' single':'')}>
+    {importMode!=='relink'&&<button className="upload-zone" disabled={!!busy||nasLoading} onClick={()=>sharedServer?void browseNas('files'):void chooseLocalSources('files')}><Film size={23}/><strong>选择视频文件</strong><span>{sharedServer?'从 NAS 多选':'支持一次多选'}</span></button>}
+    <button className="upload-zone" disabled={!!busy||nasLoading} onClick={()=>sharedServer?void browseNas('directory'):void chooseLocalSources('directory')}><FolderOpen size={23}/><strong>选择原视频目录</strong><span>{sharedServer?'浏览 Ubuntu 已挂载的 NAS':importMode==='relink'?'匹配已有视频，迁移缓存':'直接读取目录中的视频'}</span></button>
+   </div>
+   {sharedServer&&nasPickerKind&&nasListing&&<div className="nas-browser"><div className="nas-browser-heading"><strong>{nasPickerKind==='files'?'选择 NAS 视频文件':'选择 NAS 原视频目录'}</strong><button className="secondary" disabled={nasLoading||!!busy} onClick={()=>{setNasPickerKind(null);setNasListing(null);setNasSelected([]);}}>关闭</button></div><div className="nas-browser-path" title={nasListing.path}>{nasListing.path}</div><div className="nas-browser-list">{nasListing.parent&&<button disabled={nasLoading||!!busy} onClick={()=>void browseNas(nasPickerKind,nasListing.parent??undefined)}>↑ 上一级</button>}{nasListing.entries.map(entry=><div className="nas-browser-row" key={entry.path}>{entry.kind==='directory'?<button disabled={nasLoading||!!busy} onClick={()=>void browseNas(nasPickerKind,entry.path)}><FolderOpen size={15}/>{entry.name}</button>:nasPickerKind==='files'?<label><input type="checkbox" checked={nasSelected.includes(entry.path)} disabled={nasLoading||!!busy} onChange={event=>setNasSelected(previous=>event.target.checked?[...previous,entry.path]:previous.filter(value=>value!==entry.path))}/>{entry.name}</label>:<span>{entry.name}</span>}</div>)}{!nasListing.entries.length&&<p>此目录没有可选择的视频或子目录。</p>}</div>{nasPickerKind==='files'&&<p className="input-hint">单独选视频可预览和导出 JSON；需要写回 NAS 时请选完整原视频目录。</p>}<div className="nas-browser-actions">{nasListing.page>0&&<button className="secondary" disabled={nasLoading||!!busy} onClick={()=>void browseNas(nasPickerKind,nasListing.path,nasListing.page-1)}>上一页</button>}{nasListing.has_more&&<button className="secondary" disabled={nasLoading||!!busy} onClick={()=>void browseNas(nasPickerKind,nasListing.path,nasListing.page+1)}>下一页</button>}<button className="primary" disabled={nasLoading||!!busy||(nasPickerKind==='files'&&!nasSelected.length)} onClick={()=>void importNasSelection()}>{nasPickerKind==='directory'?'使用此目录':`导入已选 ${nasSelected.length} 个视频`}</button></div></div>}
    {!sharedServer&&<div className="divider"><span>或直接填写本机 / 内网路径</span></div>}
    <label className="field-label" htmlFor="source-path">{importMode==='relink'?'原视频目录路径':'视频文件或目录路径'}</label>
    <input id="source-path" disabled={!!busy} value={path} placeholder={sharedServer?'填写服务器上的 NAS 完整路径，例如 /mnt/nas/homes/…':'粘贴原视频所在目录的完整路径'} onChange={e=>setPath(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')openPath();}}/>
@@ -599,7 +627,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    <button className="primary wide" disabled={!path.trim()||!!busy} onClick={openPath}><FolderOpen size={16}/>{importMode==='relink'?'关联并迁移缓存':importMode==='supplement'?'补入当前项目':'读取并新建项目'}</button>
    <p className="privacy-note"><span className="status-dot"/>直接读取所选路径，不上传或复制原视频</p>
   </section></div>}
-  {prepareOpen&&project&&<PreparePanel projectName={project.name} status={preparation.status} error={preparation.error} busy={preparation.busy} skippedVideos={project.skipped_videos} onSkipFailed={user.role==='admin'?ids=>changeSkippedVideos(ids):undefined} onRestoreSkipped={user.role==='admin'?()=>changeSkippedVideos():undefined} onRetry={()=>void openPreparation()} onEnter={()=>{if(preparation.status?.state==='ready'&&preparation.manifest&&!preparation.error){setSessionEntered(true);setPrepareOpen(false);}}} onClose={()=>{enterAfterSkip.current=null;setPrepareOpen(false);}}/>}
+  {prepareOpen&&project&&<PreparePanel projectName={project.name} status={preparation.status} error={preparation.error} busy={preparation.busy} skippedVideos={project.skipped_videos} onSkipFailed={ids=>changeSkippedVideos(ids)} onRestoreSkipped={()=>changeSkippedVideos()} onRetry={()=>void openPreparation()} onEnter={()=>{if(preparation.status?.state==='ready'&&preparation.manifest&&!preparation.error){setSessionEntered(true);setPrepareOpen(false);}}} onClose={()=>{enterAfterSkip.current=null;setPrepareOpen(false);}}/>}
   {busy&&<div className="busy-overlay" role="status"><LoaderCircle className="spin" size={28}/><strong>{busy}</strong><span>大文件或内网素材可能需要一些时间</span></div>}
  </div>;
 }

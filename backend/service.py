@@ -580,7 +580,7 @@ class ProjectService:
         return removed
 
     @project_locked
-    def open_files(self, paths: list[str], name: str | None = None) -> dict:
+    def open_files(self, paths: list[str], name: str | None = None, *, source_writeback: bool = True) -> dict:
         name = validate_project_name(name, allow_empty=True)
         if not paths or len(paths) > 1000:
             raise HTTPException(422, "请选择 1 到 1000 个原视频。")
@@ -599,7 +599,7 @@ class ProjectService:
         except OSError:
             raise HTTPException(422, "无法读取所选原视频，请检查磁盘或共享目录。")
         parents = {path.parent for path in resolved}
-        source_dir = next(iter(parents)) if len(parents) == 1 else None
+        source_dir = next(iter(parents)) if source_writeback and len(parents) == 1 else None
         project = self.create(resolved, "", source_dir)
         if name is not None:
             project.update(name=name, _custom_name=True)
@@ -1149,7 +1149,7 @@ class ProjectService:
         except (KeyError, ValueError, TypeError):
             raise HTTPException(422, "已有标注文件格式不受支持，或时间基准不正确。")
 
-    def open_path(self, raw_path: str, name: str | None = None) -> dict:
+    def open_path(self, raw_path: str, name: str | None = None, *, allowed_project_ids: set[str] | None = None) -> dict:
         name = validate_project_name(name, allow_empty=True)
         if not raw_path or not raw_path.strip():
             raise HTTPException(422, "请输入服务器可访问的原视频目录或共享目录路径。")
@@ -1174,6 +1174,8 @@ class ProjectService:
             with self.connection() as con:
                 row = con.execute("SELECT document FROM projects WHERE source_key=? ORDER BY updated_at DESC LIMIT 1", (source_key,)).fetchone()
             previous = json.loads(row[0]) if row else None
+            if previous and allowed_project_ids is not None and previous["id"] not in allowed_project_ids:
+                raise HTTPException(403, "该采集目录已有项目，请管理员将项目分配给你。")
             if previous and previous.get("_deleting"):
                 raise HTTPException(409, "项目正在删除，请先完成清理。")
             if previous and previous.get("_supplemented"):

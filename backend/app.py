@@ -21,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 from .service import ProjectService
 from .browser_lifetime import BrowserLifetime
 from .native_picker import choose_local_paths, native_picker_available
+from .source_browser import browse_sources
 from .media_response import CancellableFileResponse
 from .auth import AuthStore
 
@@ -101,9 +102,10 @@ class ChangePasswordRequest(PasswordRequest):
     current_password: str
 
 
-def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = True) -> FastAPI:
+def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = True, source_root: Path | None = None) -> FastAPI:
     root = root or Path(os.getenv("DATAMARK_ROOT", str(Path(__file__).resolve().parents[1])))
     configured_origin = os.getenv("DATAMARK_ORIGIN", "").strip()
+    nas_source_root = source_root or Path(os.getenv("DATAMARK_SOURCE_ROOT", "/mnt/nas/homes/datacollection"))
     allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
     if configured_origin:
         bind_ip = os.getenv("DATAMARK_BIND_IP", "").strip()
@@ -125,6 +127,21 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     service = ProjectService(root)
     auth = AuthStore(root)
     lifetime = BrowserLifetime(on_idle)
+
+    def require_nas_source(value: str) -> None:
+        if not configured_origin:
+            return
+        candidate = Path(value.strip().strip('"')).expanduser()
+        if not candidate.is_absolute() or ".." in candidate.parts:
+            raise HTTPException(422, "请选择 NAS 挂载目录内的素材。")
+        try:
+            base = nas_source_root.resolve(strict=True)
+            target = candidate.resolve(strict=True)
+        except OSError:
+            raise HTTPException(422, "无法访问 NAS 素材，请检查挂载和目录权限。")
+        if not base.is_dir() or not target.is_relative_to(base):
+            raise HTTPException(403, "只能导入 NAS 挂载目录内的素材。")
+
     @asynccontextmanager
     async def lifespan(app):
         if configured_origin and not auth.has_admin():
@@ -159,15 +176,15 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 csrf = request.headers.get("x-csrf-token", "")
                 if not csrf or not hmac.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), csrf_hash) or csrf != request.cookies.get("datamark_csrf"):
                     return JSONResponse(status_code=403, content={"detail": "页面安全令牌已失效，请刷新页面。"})
-            admin_only = path in {"/api/local-files/pick", "/api/projects/open", "/api/projects/files", "/api/projects/upload", "/api/users"}
+            admin_only = path in {"/api/local-files/pick", "/api/projects/upload", "/api/users"}
             admin_only = admin_only or path.startswith("/api/users/")
-            match = re.match(r"^/api/projects/([^/]+)(?:/|$)", path) or re.match(r"^/api/(?:previews|storyboards|media|thumbnails|session-media|session-thumbnails|session-storyboards)/([^/]+)(?:/|$)", path)
+            match = (None if path in {"/api/projects/open", "/api/projects/files", "/api/projects/upload"} else re.match(r"^/api/projects/([^/]+)(?:/|$)", path)) or re.match(r"^/api/(?:previews|storyboards|media|thumbnails|session-media|session-thumbnails|session-storyboards)/([^/]+)(?:/|$)", path)
             if match:
                 project_id = match.group(1)
                 if not auth.allowed(user, project_id):
                     return JSONResponse(status_code=403, content={"detail": "未获分配此项目。"})
                 suffix = path[len("/api/projects/" + project_id):] if path.startswith("/api/projects/") else ""
-                if suffix in {"/name", "/writeback", "/preview-cache/clear", "/assignment", "/session/skip-failed", "/session/restore-skipped"} or suffix.startswith("/videos/") or suffix.startswith("/sources/") or (path.startswith("/api/projects/") and request.method == "DELETE"):
+                if suffix in {"/name", "/preview-cache/clear", "/assignment"} or suffix.startswith("/sources/") or (path.startswith("/api/projects/") and request.method == "DELETE"):
                     admin_only = True
             if admin_only and user["role"] != "admin":
                 return JSONResponse(status_code=403, content={"detail": "此操作仅管理员可执行。"})
@@ -217,6 +234,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "remote-nas-processing", "account-login"]
         if native_picker_available() and not configured_origin:
             capabilities.append("native-file-picker")
+        if configured_origin:
+            capabilities.append("nas-source-browser")
         return {"status": "ok", "application": "datamark", "browser_lifetime": bool(on_idle), "stopping": lifetime.stopping, "ffmpeg": bool(service.tool("ffmpeg")), "ffprobe": bool(service.tool("ffprobe")), "remote_processing": service.remote is not None, "capabilities": capabilities}
 
     @app.post("/api/auth/login")
@@ -316,9 +335,25 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         return result if allowed is None else [project for project in result if project["id"] in allowed]
 
     @app.post("/api/projects/open")
-    def open_project(body: OpenRequest):
+    def open_project(body: OpenRequest, request: Request):
+        require_nas_source(body.path)
         path = Path(body.path.strip().strip('"')).expanduser()
-        return service.open_files([str(path)], name=body.name) if path.is_file() else service.open_path(body.path, name=body.name)
+        user = request.state.user if auth_required else None
+        with service.lock:
+            if path.is_file():
+                project = service.open_files([str(path)], name=body.name, source_writeback=not configured_origin)
+            else:
+                allowed = auth.allowed_project_ids(user) if user and user["role"] == "annotator" else None
+                project = service.open_path(body.path, name=body.name, allowed_project_ids=allowed)
+            if user and user["role"] == "annotator" and auth.assignment(project["id"]) != user["id"]:
+                auth.assign(project["id"], user["id"])
+            return project
+
+    @app.get("/api/sources/browse")
+    def sources_browse(path: str | None = None, page: int = 0):
+        if not configured_origin:
+            raise HTTPException(404, "仅内网服务提供 NAS 目录浏览。")
+        return browse_sources(nas_source_root, path, page)
 
     @app.post("/api/local-files/pick")
     def local_files(body: PickFilesRequest):
@@ -327,8 +362,15 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         return {"paths": choose_local_paths(root, body.kind)}
 
     @app.post("/api/projects/files")
-    def open_files(body: FilesRequest):
-        return service.open_files(body.paths, name=body.name)
+    def open_files(body: FilesRequest, request: Request):
+        for value in body.paths:
+            require_nas_source(value)
+        user = request.state.user if auth_required else None
+        with service.lock:
+            project = service.open_files(body.paths, name=body.name, source_writeback=not configured_origin)
+            if user and user["role"] == "annotator":
+                auth.assign(project["id"], user["id"])
+            return project
 
     @app.post("/api/projects/upload")
     def legacy_upload():
@@ -337,12 +379,14 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/projects/{project_id}/videos/open")
     def supplement_path(project_id: str, body: SupplementRequest):
+        require_nas_source(body.path)
         return service.supplement_path(project_id, body.path, body.expected_revision)
 
     @app.post("/api/projects/{project_id}/videos/files")
     def supplement_files(project_id: str, body: SupplementFilesRequest):
         paths = []
         for value in body.paths:
+            require_nas_source(value)
             if not value.strip():
                 raise HTTPException(422, "请选择有效的视频文件路径。")
             try:
@@ -356,6 +400,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/projects/{project_id}/sources/relink")
     def relink_sources(project_id: str, body: SupplementRequest):
+        require_nas_source(body.path)
         return service.relink_sources(project_id, body.path, body.expected_revision)
 
     @app.post("/api/projects/{project_id}/videos/upload")
