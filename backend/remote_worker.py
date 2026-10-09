@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
-from .service import FILENAMES, VIDEO_EXTENSIONS, ProjectService, document_bytes, validate_annotations, validate_project_name
+from .service import AXES, FILENAMES, VIDEO_EXTENSIONS, ProjectService, document_bytes, filename_for_axis, validate_annotations, validate_custom_tracks, validate_project_name
 from .session_cache import PROFILE
 from .nas_archive import NasArchiveCache, sha256
 
@@ -536,8 +536,10 @@ class Worker:
         hashes = project.get('_external_hashes')
         if not isinstance(hashes, dict) or any(value is not None and not re.fullmatch('[0-9a-f]{64}', str(value)) for value in hashes.values()):
             raise HTTPException(422, 'Invalid writeback conflict hashes.')
+        project['custom_tracks'] = validate_custom_tracks(project.get('custom_tracks', []))
         project['annotations'] = validate_annotations(project.get('annotations'), duration, final=True,
-                                                       videos=videos, require_scene_coverage=False)
+                                                       videos=videos, require_scene_coverage=False,
+                                                       custom_tracks=project['custom_tracks'])
         project.setdefault('gaps', [])
         project.setdefault('warnings', [])
         project.setdefault('updated_at', datetime.now().isoformat())
@@ -547,7 +549,7 @@ class Worker:
             if path.is_symlink() or (path.exists() and not path.is_dir()):
                 raise HTTPException(409, 'Annotation destination must be a real directory.')
         for directory in (source_dir, source_dir / 'timeline'):
-            for name in FILENAMES.values():
+            for name in [*FILENAMES.values(), *(filename_for_axis(item['id']) for item in project['custom_tracks'])]:
                 if (directory / name).is_symlink():
                     raise HTTPException(409, 'Annotation files must not be symbolic links.')
         # Keep the verified Windows precision for fresh-import aliases, while
@@ -578,7 +580,8 @@ class Worker:
                 source_dir = Path(project['source_dir'])
                 if self.writeback_service.current_external_hashes(source_dir) != self.writeback_service.expected_external_hashes(previous):
                     raise HTTPException(409, 'Annotations changed after the previous save; writeback was stopped.')
-                result = {'paths': [str(source_dir / 'timeline' / filename) for filename in FILENAMES.values()],
+                result = {'paths': [str(source_dir / 'timeline' / filename_for_axis(axis)) for axis in
+                                    (*AXES, *(item['id'] for item in project['custom_tracks']))],
                           'save_id': previous['last_writeback']['save_id']}
                 return self._writeback_response(result, previous)
             project['_remote_writeback_request_id'] = request_id

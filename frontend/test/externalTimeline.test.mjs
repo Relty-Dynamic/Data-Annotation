@@ -37,7 +37,16 @@ test('invalid records fail atomically with the row number',()=>{
     assert.throws(()=>parse([segment(),invalid]),/第 2 条/);
   }
   assert.throws(()=>parse([{...segment(),kind:'point'}],'habit'),/起止时间必须相同/);
-  assert.throws(()=>parse([segment(2,2)]),/请选择习惯轴/);
+  assert.throws(()=>parse([segment(2,2)]),/请选择事件轴/);
+});
+test('custom event axes accept points while custom state axes reject them',()=>{
+  const customProject={...project,custom_tracks:[
+    {id:'custom_'+'a'.repeat(32),name:'事件',mode:'event',labels:[]},
+    {id:'custom_'+'b'.repeat(32),name:'环境',mode:'state',labels:['安静']},
+  ]};
+  const point=[{label:'门铃',start_ms:500,kind:'point'}];
+  assert.equal(parseExternalTimeline(JSON.stringify(point),customProject.custom_tracks[0].id,customProject,'x').segments[0].kind,'point');
+  assert.throws(()=>parseExternalTimeline(JSON.stringify(point),customProject.custom_tracks[1].id,customProject,'x'),/请选择事件轴/);
 });
 test('reject invalid JSON, unsupported shapes, units, origins and disjoint files',()=>{
   assert.throws(()=>parseExternalTimeline('not json','scene',project,'x'),/有效的 JSON/);

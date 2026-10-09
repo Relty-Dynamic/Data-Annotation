@@ -502,6 +502,19 @@ html, body, #root { background: var(--bg); }
 .annotation-panel .track-tabs button { color: #a6bac5; border-radius: 5px 5px 0 0; }
 .annotation-panel .track-tabs button:hover:not(:disabled) { background: #263945; color: #e7f2f4; }
 .annotation-panel .track-tabs button.active { color: #e7f5f4; background: #25404b; }
+.annotation-panel .track-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+.annotation-panel .track-tabs button { flex: 0 0 auto; min-width: 55px; padding-inline: 9px; white-space: nowrap; }
+.annotation-panel .track-tabs .add-custom-track { border: 1px dashed #537a7c; border-radius: 5px; color: #a9d4d1; }
+.annotation-panel .track-tabs .custom i { background: #6dbbb9; }
+.state-buttons.custom button { min-width: 0; }
+.custom-track-dialog { width: min(440px, calc(100vw - 32px)); border: 1px solid #3a5861; border-radius: 12px; padding: 20px; background: #192631; color: #e4eff1; box-shadow: 0 20px 70px #0009; }
+.custom-track-dialog::backdrop { background: #050c14bc; }
+.custom-track-dialog form { display: flex; flex-direction: column; gap: 14px; }
+.custom-track-dialog h2 { font-size: 18px; }
+.custom-track-dialog p, .custom-track-dialog small { color: #a7bac5; line-height: 1.5; }
+.custom-track-dialog label { display: flex; flex-direction: column; gap: 7px; }
+.custom-track-dialog textarea { width: 100%; resize: vertical; border: 1px solid #435563; border-radius: 6px; padding: 10px; background: #111a23; color: #e4eff1; font: inherit; }
+.custom-track-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .cursor-card { border-color: #395361; background: linear-gradient(120deg, #1a303b, #15242e); }
 .cursor-card > span { color: #aac1ca; }
 .cursor-card strong { color: #d1f0e9; }

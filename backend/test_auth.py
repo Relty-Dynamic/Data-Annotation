@@ -100,6 +100,24 @@ class AccountAccessTests(unittest.TestCase):
         self.assertEqual(history[0]["actor_id"], self.annotator["id"])
         self.assertEqual(history[0]["before"]["created_by"], self.annotator["id"])
 
+    def test_assigned_annotator_can_add_custom_axis_and_save_it(self):
+        project_id = self.project["id"]
+        self.auth.assign(project_id, self.annotator["id"])
+        csrf = self.login("worker", "another long safe password")
+        path = f"/api/projects/{project_id}/custom-tracks"
+        body = {"name": "环境", "mode": "state", "labels": ["安静", "嘈杂"], "expected_revision": 0}
+        self.assertEqual(self.client.post(path, json=body).status_code, 403)
+        created = self.client.post(path, json=body, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(created.status_code, 200, created.text)
+        axis = created.json()["custom_tracks"][0]["id"]
+        annotations = created.json()["annotations"]
+        annotations[axis] = [{"id": "quiet", "label": "安静", "kind": "interval", "start_ms": 0, "end_ms": 1000}]
+        saved = self.client.put(f"/api/projects/{project_id}/draft",
+                                json={"annotations": annotations, "expected_revision": 1},
+                                headers={"X-CSRF-Token": csrf})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["annotations"][axis][0]["created_by"], self.annotator["id"])
+
     def test_admin_controls_accounts_and_assignments(self):
         csrf = self.login("admin", "correct horse battery staple")
         users = self.client.get("/api/users")

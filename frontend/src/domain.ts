@@ -1,4 +1,6 @@
-export type Track = 'scene' | 'posture' | 'category' | 'habit';
+export type FixedTrack = 'scene' | 'posture' | 'category' | 'habit';
+export type Track = FixedTrack | `custom_${string}`;
+export interface CustomTrack { id: `custom_${string}`; name: string; mode: 'state' | 'event'; labels: string[]; }
 
 export interface Segment {
   id: string;
@@ -60,19 +62,25 @@ export interface Project {
   duration_ms: number;
   videos: Video[];
   skipped_videos?: Array<{id: string; name: string; start_ms: number; end_ms: number; reason: string}>;
-  annotations: Record<Track, Segment[]>;
+  custom_tracks?: CustomTrack[];
+  annotations: Record<string, Segment[]>;
   revision: number;
   updated_at: string;
 }
 
-export const TRACK_LABELS: Record<Track, string> = {
+export const TRACK_LABELS: Record<FixedTrack, string> = {
   scene: '场景',
   posture: '姿势',
   category: '大类',
   habit: '习惯',
 };
 
-export const TRACKS: Track[] = ['scene', 'posture', 'category', 'habit'];
+export const TRACKS: FixedTrack[] = ['scene', 'posture', 'category', 'habit'];
+export function projectTracks(project: Project): Track[] { return [...TRACKS, ...(project.custom_tracks??[]).map(track=>track.id)]; }
+export function customTrack(project: Project, track: Track): CustomTrack | undefined { return project.custom_tracks?.find(item=>item.id===track); }
+export function trackName(project: Project, track: Track): string { return track.startsWith('custom_') ? customTrack(project,track)?.name??'自定义轴' : TRACK_LABELS[track as FixedTrack]; }
+export function isEventTrack(project: Project, track: Track): boolean { return track==='habit'||customTrack(project,track)?.mode==='event'; }
+export function isExclusiveTrack(project: Project, track: Track): boolean { return track==='scene'||track==='posture'||customTrack(project,track)?.mode==='state'; }
 export const SCENE_LABELS = ['室内', '室外'];
 export const POSTURE_LABELS = ['动', '坐', '站', '躺'];
 export const CATEGORY_LABELS = ['专注', '活动', '用餐', '通勤', '社交', '放松', '休息', '其他'];
@@ -216,6 +224,7 @@ export function normalizeStateSeams(
   annotations: Project['annotations'],
   bridges: ContinuityBridge[] = [],
   videos: Video[] = [],
+  customTracks: CustomTrack[] = [],
 ): Project['annotations'] {
   const bridgeAtEnd = new Map(bridges.map((bridge) => [bridge.start_ms, bridge]));
   const videoEnds = new Map(videos.map((video) => [video.id, video.end_ms]));
@@ -239,8 +248,10 @@ export function normalizeStateSeams(
     return result;
   };
   return {
+    ...annotations,
     scene: normalize(annotations.scene ?? []),
     posture: normalize(annotations.posture ?? []),
+    ...Object.fromEntries(customTracks.filter(track => track.mode === 'state').map(track => [track.id, normalize(annotations[track.id] ?? [])])),
     // Category intervals may overlap; normalizing them as states can erase annotations.
     category: annotations.category ?? [],
     habit: annotations.habit ?? [],
@@ -249,7 +260,8 @@ export function normalizeStateSeams(
 
 /** Compare saved annotation meaning, allowing server normalization and tie ordering. */
 export function annotationsEqual(left: Project['annotations'], right: Project['annotations']): boolean {
-  const normalize = (annotations: Project['annotations']) => TRACKS.map((track) => [track, (annotations[track] ?? []).map((segment) => ({
+  const tracks = [...new Set([...TRACKS, ...Object.keys(left), ...Object.keys(right)])].sort();
+  const normalize = (annotations: Project['annotations']) => tracks.map((track) => [track, (annotations[track] ?? []).map((segment) => ({
     id: segment.id,
     label: segment.label.trim(),
     kind: segment.kind ?? 'interval',
@@ -366,6 +378,7 @@ export function applyAnnotationRange(
   spans: VideoGap[],
   track: Track,
   existingId?: string,
+  exclusive = false,
 ): Segment[] {
   const original = orderedCopies(segments);
   if (!label.trim() || !Number.isFinite(start) || !Number.isFinite(end)) return original;
@@ -380,7 +393,7 @@ export function applyAnnotationRange(
   if (!ranges.length) return original;
   const editing = existingId ? original.find(segment => segment.id === existingId) : undefined;
   let remaining = original.filter(segment => segment.id !== existingId);
-  if (track === 'scene' || track === 'posture') {
+  if (track === 'scene' || track === 'posture' || exclusive) {
     remaining = remaining.flatMap(segment => {
       let pieces = [{ ...segment }];
       for (const range of ranges) {
@@ -408,7 +421,7 @@ export function applyAnnotationRange(
     ...(track === 'category' ? { mode: editing ? editing.mode ?? 'state' : 'overlay' } as const : {}),
   }));
   const result = [...remaining, ...added];
-  return track === 'scene' || track === 'posture' ? mergeTouchingStates(result) : orderedCopies(result);
+  return track === 'scene' || track === 'posture' || exclusive ? mergeTouchingStates(result) : orderedCopies(result);
 }
 
 /** Delete a segment and extend only an adjacent predecessor into newly uncovered recorded time. */
@@ -417,10 +430,11 @@ export function deleteAnnotation(
   id: string,
   spans: VideoGap[],
   track: Track,
+  eventTrack = false,
 ): Segment[] {
   const removed = segments.find(segment => segment.id === id);
   const remaining = orderedCopies(segments.filter(segment => segment.id !== id));
-  if (!removed || track === 'habit' || isPointSegment(removed)) return remaining;
+  if (!removed || track === 'habit' || eventTrack || isPointSegment(removed)) return remaining;
   const runs = joinedSpans(spans);
   const holes = uncoveredSpans(remaining, runs).map(hole => ({
     start_ms: Math.max(hole.start_ms, removed.start_ms),
@@ -477,7 +491,7 @@ export function timelineSnapPoints(project: Project, anchors: number[] = []): nu
   const points = [0, project.duration_ms, ...anchors];
   for (const video of project.videos) points.push(video.start_ms, video.end_ms);
   for (const span of project.recording_runs ?? []) points.push(span.start_ms, span.end_ms);
-  for (const track of TRACKS) {
+  for (const track of projectTracks(project)) {
     for (const segment of project.annotations[track] ?? []) {
       points.push(segment.start_ms, segment.end_ms ?? project.duration_ms);
     }

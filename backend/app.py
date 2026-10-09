@@ -54,6 +54,13 @@ class DraftRequest(BaseModel):
     expected_revision: int = Field(ge=0, strict=True)
 
 
+class CustomTrackRequest(BaseModel):
+    name: str = Field(strict=True)
+    mode: Literal["state", "event"]
+    labels: list[str] = Field(default_factory=list)
+    expected_revision: int = Field(ge=0, strict=True)
+
+
 class RenameProjectRequest(BaseModel):
     name: str = Field(strict=True)
     expected_revision: int = Field(ge=0, strict=True)
@@ -458,6 +465,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.put("/api/projects/{project_id}/draft")
     def draft(project_id: str, body: DraftRequest, request: Request):
         return service.update_draft(project_id, body.annotations, body.expected_revision, actor=request.state.user if auth_required else None)
+
+    @app.post("/api/projects/{project_id}/custom-tracks")
+    def add_custom_track(project_id: str, body: CustomTrackRequest):
+        return service.add_custom_track(project_id, body.name, body.mode, body.labels, body.expected_revision)
 
     @app.get("/api/projects/{project_id}/history")
     def edit_history(project_id: str):

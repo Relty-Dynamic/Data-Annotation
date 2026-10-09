@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from backend.remote_worker import MAX_BODY, create_worker
 from backend.remote import RemoteClient
-from backend.service import AXES, FILENAMES, ProjectService
+from backend.service import AXES, FILENAMES, ProjectService, filename_for_axis
 from backend.session_cache import PROFILE, SessionCache
 from backend.testing_annotations import complete_project
 
@@ -305,6 +305,18 @@ class RemoteWorkerTests(unittest.TestCase):
         self.assertEqual(document['segments'], [])
         restored, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
         self.assertEqual(restored['scene'], [])
+
+    def test_writeback_includes_custom_track_file(self):
+        project = self.project()
+        axis = 'custom_' + 'b' * 32
+        project['custom_tracks'] = [{'id': axis, 'name': '观察', 'mode': 'event', 'labels': []}]
+        project['annotations'][axis] = [{'id': 'event', 'label': '敲门', 'kind': 'point',
+                                         'start_ms': 500, 'end_ms': 500}]
+        response = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue((self.nas / 'timeline' / filename_for_axis(axis)).is_file())
+        reopened, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
+        self.assertEqual(reopened[axis][0]['label'], '敲门')
 
     def test_writeback_replays_committed_save_after_lost_response_and_restart(self):
         project = self.project()

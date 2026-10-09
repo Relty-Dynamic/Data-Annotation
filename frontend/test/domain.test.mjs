@@ -1,9 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { annotationsEqual, arrangeLanes, formatTime, isPointSegment, locateVideo, normalizeStateSeams, parseTime, switchState } from '../src/domain.ts';
+import { annotationsEqual, applyAnnotationRange, arrangeLanes, formatTime, isPointSegment, locateVideo, normalizeStateSeams, parseTime, projectTracks, switchState, trackName } from '../src/domain.ts';
 
 const segment = (id, label, start_ms, end_ms) => ({ id, label, start_ms, end_ms });
 const compact = (segments) => segments.map(({ label, start_ms, end_ms }) => [label, start_ms, end_ms]);
+
+test('project custom axes appear by name and take part in draft comparison',()=>{
+  const axis='custom_'+'a'.repeat(32);
+  const project={custom_tracks:[{id:axis,name:'环境',mode:'state',labels:['安静']}]};
+  assert.deepEqual(projectTracks(project),['scene','posture','category','habit',axis]);
+  assert.equal(trackName(project,axis),'环境');
+  const first={scene:[],posture:[],category:[],habit:[],[axis]:[]};
+  const second={...first,[axis]:[segment('one','安静',0,1000)]};
+  assert.equal(annotationsEqual(first,second),false);
+  const replaced=applyAnnotationRange([segment('old','安静',0,1000)],250,750,'嘈杂',[{start_ms:0,end_ms:1000}],axis,undefined,true);
+  assert.deepEqual(compact(replaced),[['安静',0,250],['嘈杂',250,750],['安静',750,1000]]);
+});
 
 test('state switch splits the current interval and preserves later state changes', () => {
   const original = [segment('a', '室内', 0, 20000), segment('b', '室外', 20000, 40000), segment('c', '室内', 40000, 60000)];
@@ -153,6 +165,18 @@ const stateBridges = [
   { start_ms: 10000, end_ms: 10234, previous_video_id: 'v1', next_video_id: 'v2', raw_boundary_error_ms: 234, reason: 'adjacent_camera_second_precision' },
   { start_ms: 20000, end_ms: 20267, previous_video_id: 'v2', next_video_id: 'v3', raw_boundary_error_ms: 267, reason: 'adjacent_camera_second_precision' },
 ];
+
+test('custom state seam repair matches server normalization without changing event rows', () => {
+  const stateId = 'custom_' + 'a'.repeat(32), eventId = 'custom_' + 'b'.repeat(32);
+  const input = { scene: [], posture: [], category: [], habit: [],
+    [stateId]: [segment('first', '安静', 0, 10000), segment('second', '安静', 10234, 15000)],
+    [eventId]: [segment('first', '响铃', 0, 10000), segment('second', '响铃', 10234, 15000)] };
+  const tracks = [{ id: stateId, name: '环境', mode: 'state', labels: ['安静'] },
+    { id: eventId, name: '干扰', mode: 'event', labels: [] }];
+  const result = normalizeStateSeams(input, stateBridges, seamVideos, tracks);
+  assert.deepEqual(result[stateId], [segment('first', '安静', 0, 15000)]);
+  assert.deepEqual(result[eventId], input[eventId]);
+});
 
 test('state seam repair retains the first ID and leaves overlapping behavior events untouched', () => {
   const input = {

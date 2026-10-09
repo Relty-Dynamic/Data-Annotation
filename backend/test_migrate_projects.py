@@ -1,6 +1,7 @@
 """The offline Ubuntu move keeps identities and refuses changed originals."""
 
 import json
+import sqlite3
 import shutil
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 
 from backend.auth import AuthStore
 from backend.service import ProjectService, empty_annotations, now
-from deploy.migrate_projects import apply_bundle, current_source_fingerprint, export_bundle, load_mappings, map_source
+from deploy.migrate_projects import apply_bundle, current_source_fingerprint, export_bundle, load_mappings, map_source, sha256_file
 
 
 class ProjectMigrationTests(unittest.TestCase):
@@ -74,6 +75,35 @@ class ProjectMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "视频"):
             apply_bundle(self.bundle, target, self.mapping)
         self.assertFalse(target.exists())
+
+    def test_custom_axis_and_its_written_file_survive_move(self):
+        axis = "custom_" + "c" * 32
+        service = ProjectService(self.service_root, enable_remote=False)
+        project = service.load(self.project_id)
+        project["custom_tracks"] = [{"id": axis, "name": "环境", "mode": "state", "labels": ["安静"]}]
+        project["annotations"][axis] = []
+        old_timeline = self.old / "timeline"
+        new_timeline = self.new / "timeline"
+        old_timeline.mkdir()
+        new_timeline.mkdir()
+        for fixed_axis in ("scene", "posture", "category", "habit"):
+            fixed_name = f"{fixed_axis}.timeline.json"
+            (old_timeline / fixed_name).write_text('{"sample":"fixed-axis"}', encoding="utf-8")
+            project["_external_hashes"][fixed_axis] = sha256_file(old_timeline / fixed_name)
+        filename = f"{axis}.timeline.json"
+        (old_timeline / filename).write_text('{"sample":"custom-axis"}', encoding="utf-8")
+        project["_external_hashes"][axis] = sha256_file(old_timeline / filename)
+        service.save(project)
+        export_bundle(self.service_root / ".local", self.bundle)
+        shutil.copy2(self.video, self.new / self.video.name)
+        for original in old_timeline.iterdir():
+            shutil.copy2(original, new_timeline / original.name)
+        target = self.root / "ubuntu-custom-state"
+        apply_bundle(self.bundle, target, self.mapping)
+        with sqlite3.connect(target / "annotations.sqlite3") as con:
+            moved = json.loads(con.execute("SELECT document FROM projects WHERE id=?", (self.project_id,)).fetchone()[0])
+        self.assertEqual(moved["custom_tracks"], project["custom_tracks"])
+        self.assertEqual(moved["_external_hashes"][axis], project["_external_hashes"][axis])
 
     def test_legacy_install_without_accounts_moves_drafts_and_requires_admin_setup(self):
         (self.service_root / ".local" / "auth.sqlite3").unlink()

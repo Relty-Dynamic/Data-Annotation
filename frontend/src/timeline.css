@@ -14,7 +14,7 @@
 .tl-scroll { overflow-x: scroll; overflow-y: hidden; scrollbar-color: #647d94 #111a24; scrollbar-width: auto; overscroll-behavior-x: contain; }
 .tl-content { min-width: 100%; position: relative; }
 .tl-fixed-tracks { position: relative; }
-.tl-tracks-viewport { position: sticky; left: 0; overflow: hidden; }
+.tl-tracks-viewport { position: sticky; left: 0; max-height: clamp(140px, 35vh, 400px); overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #647d94 #111a24; }
 .tl-tracks-content { position: relative; }
 /* All dimensions stay visible; only overlapping layers scroll within their own row. */
 .tl-overlap-viewport { min-width: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-width: none; }
@@ -53,6 +53,7 @@
 .tl-dot-posture { background: #71ad99; }
 .tl-dot-category { background: #ad91d0; }
 .tl-dot-habit { background: #c8a66d; }
+.tl-dot-custom { background: #6dbbb9; }
 .tl-empty-track { display: block; position: absolute; top: 50%; left: 12px; transform: translateY(-50%); color: #566b83; font-size: 11px; white-space: nowrap; pointer-events: none; }
 .tl-segment { position: absolute; display: flex; gap: 5px; align-items: center; justify-content: flex-start; height: 22px; min-width: 3px; border: 1px solid; border-radius: 4px; padding: 3px 0; overflow: hidden; cursor: pointer; text-align: left; font: inherit; font-size: 11px; transition: filter .12s; box-sizing: border-box; }
 .tl-segment:hover { filter: brightness(1.2); z-index: 2; }
@@ -61,6 +62,7 @@
 .tl-segment-posture { border-color: #447665; color: #c2e6d8; background: #294f43; }
 .tl-segment-category { border-color: #786196; color: #e0d2f2; background: #4e3d66; }
 .tl-segment-habit { border-color: #8f754c; color: #f0d8b5; background: #57472f; }
+.tl-segment-custom { border-color: #397e82; color: #c9f0ed; background: #255558; }
 .tl-segment-selected { outline: 2px solid #c1e7ef; outline-offset: -2px; z-index: 3; }
 .tl-segment-open { border-right-style: dashed; background-image: repeating-linear-gradient(120deg, #ffffff05 0, #ffffff05 5px, transparent 5px, transparent 10px); }
 .tl-segment-point { z-index: 5; min-width: 18px; max-width: 18px; padding: 0; transform: translateX(-50%); border: 0; background: transparent; overflow: visible; }

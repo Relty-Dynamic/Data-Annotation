@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
-from backend.service import AXES, LEGACY_AXES, FILENAMES, FIXED_LABELS, ProjectService, digest, empty_annotations, validate_annotations
+from backend.service import AXES, LEGACY_AXES, FILENAMES, FIXED_LABELS, ProjectService, digest, empty_annotations, filename_for_axis, validate_annotations
 from backend import test_service
 from backend.testing_annotations import complete_annotations
 
@@ -128,6 +128,78 @@ class FourAxisPersistenceTests(unittest.TestCase):
     setUp = test_service.PersistenceTests.setUp
     tearDown = test_service.PersistenceTests.tearDown
     annotated_project = test_service.PersistenceTests.annotated_project
+
+    def test_custom_track_api_adds_to_project_and_rejects_stale_revision(self):
+        project = self.annotated_project()
+        with TestClient(create_app(self.root, auth_required=False), base_url="http://127.0.0.1") as client:
+            path = f"/api/projects/{project['id']}/custom-tracks"
+            body = {"name": "环境", "mode": "state", "labels": ["安静", "嘈杂"],
+                    "expected_revision": project["revision"]}
+            response = client.post(path, json=body)
+            self.assertEqual(response.status_code, 200, response.text)
+            added = response.json()
+            axis = added["custom_tracks"][0]["id"]
+            self.assertEqual(added["annotations"][axis], [])
+            self.assertEqual(client.get(f"/api/projects/{project['id']}").json()["custom_tracks"], added["custom_tracks"])
+            self.assertEqual(client.post(path, json=body).status_code, 409)
+
+    def test_project_custom_state_and_event_tracks_export_writeback_and_reopen(self):
+        project = self.annotated_project()
+        state = self.service.add_custom_track(project["id"], "环境", "state", ["安静", "嘈杂"], project["revision"])
+        event = self.service.add_custom_track(project["id"], "干扰事件", "event", [], state["revision"])
+        state_id, event_id = (track["id"] for track in event["custom_tracks"])
+        annotations = copy.deepcopy(event["annotations"])
+        annotations[state_id] = [interval("quiet", "安静", 500, 1800)]
+        annotations[event_id] = [interval("noise", "噪声", 600, 900),
+                                 interval("alarm", "闹钟", 750, 750, kind="point")]
+        saved = self.service.update_draft(project["id"], annotations, event["revision"])
+        with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+            self.assertEqual(set(archive.namelist()), set(FILENAMES.values()) |
+                             {filename_for_axis(state_id), filename_for_axis(event_id)})
+            for track in saved["custom_tracks"]:
+                document = json.loads(archive.read(filename_for_axis(track["id"])))
+                self.assertEqual(document["axis_name"], track["name"])
+                self.assertEqual(document["axis_mode"], track["mode"])
+        self.service.writeback(project["id"])
+        fresh = ProjectService(self.root / "custom-fresh")
+        try:
+            reopened = fresh.open_path(str(self.source))
+            self.assertEqual(reopened["custom_tracks"], saved["custom_tracks"])
+            self.assertEqual(reopened["annotations"][state_id], saved["annotations"][state_id])
+            self.assertEqual(reopened["annotations"][event_id], saved["annotations"][event_id])
+        finally:
+            fresh.previews.close()
+
+    def test_custom_state_rejects_unknown_or_overlapping_labels(self):
+        project = self.annotated_project()
+        project = self.service.add_custom_track(project["id"], "环境", "state", ["安静"], project["revision"])
+        axis = project["custom_tracks"][0]["id"]
+        for segments in ([interval("bad", "嘈杂", 0, 500)],
+                         [interval("a", "安静", 0, 500), interval("b", "安静", 400, 700)]):
+            annotations = copy.deepcopy(project["annotations"])
+            annotations[axis] = segments
+            with self.assertRaises(HTTPException) as error:
+                self.service.update_draft(project["id"], annotations, project["revision"])
+            self.assertEqual(error.exception.status_code, 422)
+
+    def test_supplement_remaps_custom_state_and_event_to_original_videos(self):
+        state_id, event_id = "custom_" + "a" * 32, "custom_" + "b" * 32
+        old = {"duration_ms": 2000, "videos": [
+            {"id": "a", "name": "a.mp4", "start_ms": 0, "end_ms": 1000},
+            {"id": "b", "name": "b.mp4", "start_ms": 1000, "end_ms": 2000}],
+            "custom_tracks": [{"id": state_id, "name": "环境", "mode": "state", "labels": ["安静"]},
+                              {"id": event_id, "name": "干扰", "mode": "event", "labels": []}],
+            "annotations": {**empty_annotations(),
+                            state_id: [interval("quiet", "安静", 0, 2000)],
+                            event_id: [interval("alarm", "响铃", 1500, 1500, kind="point")]}}
+        videos = [{"id": "a", "name": "a.mp4", "start_ms": 0, "end_ms": 1000},
+                  {"id": "added", "name": "added.mp4", "start_ms": 1000, "end_ms": 2000},
+                  {"id": "b", "name": "b.mp4", "start_ms": 2000, "end_ms": 3000}]
+        result, warnings = ProjectService.remap_annotations(old, videos, 3000)
+        self.assertEqual(warnings, [])
+        self.assertEqual([(item["start_ms"], item["end_ms"]) for item in result[state_id]],
+                         [(0, 1000), (2000, 3000)])
+        self.assertEqual(result[event_id][0]["start_ms"], 2500)
 
     def legacy_files(self, project):
         stored = self.service.load(project["id"])

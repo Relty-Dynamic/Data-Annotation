@@ -148,8 +148,15 @@ def map_source(raw: str, mappings: list[tuple[object, Path]]) -> Path:
 def external_hashes(source: Path) -> dict:
     timeline = source / "timeline"
     folder = timeline if any((timeline / f"{axis}.timeline.json").exists() for axis in AXES) else source
-    return {axis: sha256_file(folder / f"{axis}.timeline.json") if (folder / f"{axis}.timeline.json").exists() else None
-            for axis in AXES}
+    hashes = {axis: sha256_file(folder / f"{axis}.timeline.json") if (folder / f"{axis}.timeline.json").exists() else None
+              for axis in AXES}
+    for path in folder.glob("custom_*.timeline.json"):
+        axis = path.name.removesuffix(".timeline.json")
+        if re.fullmatch(r"custom_[0-9a-f]{32}", axis):
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("自定义时间轴文件必须是普通文件。")
+            hashes[axis] = sha256_file(path)
+    return hashes
 
 
 def current_source_fingerprint(project: dict) -> str:
@@ -216,7 +223,10 @@ def apply_bundle(bundle: Path, state: Path, mappings_file: Path) -> dict:
                         migrated += 1
                     if project.get("source_dir"):
                         source_dir = map_source(project["source_dir"], mappings)
-                        if not source_dir.is_dir() or external_hashes(source_dir) != {axis: project.get("_external_hashes", {}).get(axis) for axis in AXES}:
+                        expected_hashes = {axis: project.get("_external_hashes", {}).get(axis) for axis in AXES}
+                        expected_hashes.update({axis: value for axis, value in project.get("_external_hashes", {}).items()
+                                                if re.fullmatch(r"custom_[0-9a-f]{32}", axis) and value is not None})
+                        if not source_dir.is_dir() or external_hashes(source_dir) != expected_hashes:
                             raise ValueError("原目录 timeline 文件与旧项目记录不一致；未迁移。")
                         project["source_dir"] = str(source_dir)
                         project["_source_key"] = os.path.normcase(str(source_dir))

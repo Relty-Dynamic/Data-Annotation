@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { TRACK_LABELS, TRACKS, type Project, type Track } from './domain';
+import { projectTracks, trackName, type Project, type Track } from './domain';
 import { parseExternalTimeline, type ExternalTimeline } from './externalTimeline';
 
 export default function TimelineImportDialog({project, initialTrack, onCancel, onOpen}: {
@@ -21,7 +21,7 @@ export default function TimelineImportDialog({project, initialTrack, onCancel, o
     <form onSubmit={event => {event.preventDefault();if (result?.value && !reading) onOpen(result.value);}}>
       <h2 id="timeline-import-title">打开外部时间轴</h2>
       <p>与「{project.name}」的视频及已有标注对照查看。</p>
-      <label>轴的类型<select aria-label="轴的类型" value={track} onChange={event => setTrack(event.target.value as Track)}>{TRACKS.map(value => <option key={value} value={value}>{TRACK_LABELS[value]}</option>)}</select></label>
+      <label>轴的类型<select aria-label="轴的类型" value={track} onChange={event => setTrack(event.target.value as Track)}>{projectTracks(project).map(value => <option key={value} value={value}>{trackName(project,value)}</option>)}</select></label>
       <label>时间轴 JSON 文件<input aria-label="时间轴 JSON 文件" type="file" accept=".json,application/json" onChange={async event => {
         const file = event.target.files?.[0], request = ++generation.current;
         setSource(null);setError('');setReading(false);
@@ -32,10 +32,10 @@ export default function TimelineImportDialog({project, initialTrack, onCancel, o
         catch {if (generation.current === request) setError('文件读取失败，请重新选择。');}
         finally {if (generation.current === request) setReading(false);}
       }}/></label>
-      <p className="muted-text">支持看台导出的 timeline.json，或 label / start_ms / end_ms 数组。有录制起点时按录制时间对齐，否则按当前项目起点对齐。</p>
+      <p className="muted-text">支持平台导出的 timeline.json，或 label / start_ms / end_ms 数组。有录制起点时按录制时间对齐，否则按当前项目起点对齐。</p>
       {reading && <p role="status">正在读取文件…</p>}
       {(error || result?.error) && <p role="alert" className="timeline-import-error">{error || result?.error}</p>}
-      {result?.value && <div className="timeline-import-summary" role="status"><strong>{TRACK_LABELS[track]} · {result.value.segments.length} 条</strong><p>{result.value.alignment}</p>{result.value.warnings.map(warning => <p key={warning}>{warning}</p>)}</div>}
+      {result?.value && <div className="timeline-import-summary" role="status"><strong>{trackName(project,track)} · {result.value.segments.length} 条</strong><p>{result.value.alignment}</p>{result.value.warnings.map(warning => <p key={warning}>{warning}</p>)}</div>}
       <div className="timeline-import-actions"><button type="button" className="secondary" onClick={onCancel}>取消</button><button className="primary" type="submit" disabled={!result?.value || reading}>打开对照窗口</button></div>
     </form>
   </dialog>;

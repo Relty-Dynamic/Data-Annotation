@@ -38,6 +38,12 @@ AXES = ("scene", "posture", "category", "habit")
 COVERAGE_AXES = ("scene", "posture")
 AXIS_NAMES = {"scene": "场景", "posture": "姿势", "category": "大类", "habit": "习惯"}
 FILENAMES = {axis: f"{axis}.timeline.json" for axis in AXES}
+
+
+def filename_for_axis(axis: str) -> str:
+    if axis in FILENAMES or re.fullmatch(r"custom_[0-9a-f]{32}", axis):
+        return f"{axis}.timeline.json"
+    raise ValueError("Invalid timeline axis")
 FIXED_LABELS = {
     "scene": {"室内": "indoor", "室外": "outdoor", "车内": "in_vehicle", "其他": "other"},
     "posture": {"动": "moving", "坐": "sitting", "站": "standing", "躺": "lying"},
@@ -72,6 +78,34 @@ def validate_project_name(value: Any, *, allow_empty: bool = False) -> str | Non
     if len(name) > 80:
         raise HTTPException(422, "项目名称不能超过 80 个字符。")
     return name
+
+
+def validate_custom_tracks(value: Any) -> list[dict]:
+    if not isinstance(value, list) or len(value) > 16:
+        raise HTTPException(422, "自定义时间轴最多 16 条。")
+    result, ids = [], set()
+    for track in value:
+        if not isinstance(track, dict) or set(track) != {"id", "name", "mode", "labels"}:
+            raise HTTPException(422, "自定义时间轴格式不正确。")
+        ident = track["id"]
+        if not isinstance(ident, str) or not re.fullmatch(r"custom_[0-9a-f]{32}", ident) or ident in ids:
+            raise HTTPException(422, "自定义时间轴 ID 不正确或重复。")
+        ids.add(ident)
+        name = validate_project_name(track["name"])
+        mode = track["mode"]
+        if mode not in ("state", "event"):
+            raise HTTPException(422, "自定义时间轴类型不正确。")
+        labels = track["labels"]
+        if not isinstance(labels, list) or len(labels) > 32 or (mode == "state" and not labels) or (mode == "event" and labels):
+            raise HTTPException(422, "状态轴需要标签，事件轴不设置固定标签。")
+        cleaned = []
+        for label in labels:
+            label = validate_project_name(label)
+            if label in cleaned:
+                raise HTTPException(422, "同一时间轴不能有重复标签。")
+            cleaned.append(label)
+        result.append({"id": ident, "name": name, "mode": mode, "labels": cleaned})
+    return result
 
 
 def natural_key(value: str) -> list[tuple[int, Any]]:
@@ -191,14 +225,19 @@ def document_bytes(value: Any) -> bytes:
 
 
 def validate_annotations(value: Any, duration_ms: int, final: bool = False, videos: list | None = None,
-                         *, require_coverage: bool = True, require_scene_coverage: bool = True) -> dict:
-    if not isinstance(value, dict) or set(value) not in (set(AXES), set(LEGACY_AXES)):
-        raise HTTPException(422, "标注必须包含场景、姿势、大类和习惯四个时间轴。")
+                         *, require_coverage: bool = True, require_scene_coverage: bool = True,
+                         custom_tracks: list[dict] | None = None) -> dict:
+    tracks = validate_custom_tracks(custom_tracks or [])
+    custom = {track["id"]: track for track in tracks}
+    expected = set(AXES) | set(custom)
+    if not isinstance(value, dict) or set(value) != expected and not (not custom and set(value) == set(LEGACY_AXES)):
+        raise HTTPException(422, "标注必须包含项目的全部时间轴。")
     # Legacy drafts can be opened without mutating stored annotations/revisions.
-    value = {**value, "category": value.get("category", [])}
+    value = {**value, "category": value.get("category", []),
+             **{ident: value.get(ident, []) for ident in custom}}
     cleaned = {}
     coverage, bridges, _ = recording_layout(videos) if videos is not None else ([], [], [])
-    for axis in AXES:
+    for axis in (*AXES, *custom):
         if not isinstance(value[axis], list):
             raise HTTPException(422, "时间轴必须为数组。")
         if len(value[axis]) > 100000:
@@ -210,8 +249,9 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
             ident, label = record.get("id"), record.get("label")
             start, end = record.get("start_ms"), record.get("end_ms")
             kind = record.get("kind", "interval")
-            if kind not in ("point", "interval") or (axis != "habit" and kind != "interval"):
-                raise HTTPException(422, "仅习惯轴支持时点标注，标注类型须为 point 或 interval。")
+            event_axis = axis == "habit" or (axis in custom and custom[axis]["mode"] == "event")
+            if kind not in ("point", "interval") or (not event_axis and kind != "interval"):
+                raise HTTPException(422, "仅事件轴支持时点标注，标注类型须为 point 或 interval。")
             if not isinstance(ident, str) or not ident or len(ident) > 100 or ident in seen:
                 raise HTTPException(422, "标注 ID 为空、重复或过长。")
             seen.add(ident)
@@ -220,6 +260,8 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
             label = label.strip()
             if axis in FIXED_LABELS and label not in FIXED_LABELS[axis]:
                 raise HTTPException(422, "场景、姿势或大类标签不在允许范围内。")
+            if axis in custom and custom[axis]["mode"] == "state" and label not in custom[axis]["labels"]:
+                raise HTTPException(422, "自定义状态标签不在该时间轴的选项中。")
             if type(start) is not int or not 0 <= start <= duration_ms:
                 raise HTTPException(422, "开始时间须为视频范围内的整数毫秒。")
             if kind == "point":
@@ -229,8 +271,8 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
                 if start == duration_ms:
                     raise HTTPException(422, "持续标注必须在视频结束前开始。")
                 if end is None:
-                    if axis != "habit" or final:
-                        raise HTTPException(422, "请先结束所有正在记录的习惯，再导出或写回。")
+                    if not event_axis or final:
+                        raise HTTPException(422, "请先结束所有正在记录的事件，再导出或写回。")
                 elif type(end) is not int or not start < end <= duration_ms:
                     raise HTTPException(422, "持续标注的结束时间必须晚于开始时间，且不能超出视频总时长。")
             if videos is not None:
@@ -258,11 +300,11 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
                 cleaned_record["mode"] = mode
             records.append(cleaned_record)
         records.sort(key=lambda item: (item["start_ms"], item["id"]))
-        if axis in ("scene", "posture"):
+        if axis in ("scene", "posture") or (axis in custom and custom[axis]["mode"] == "state"):
             for left, right in zip(records, records[1:]):
                 if left["end_ms"] > right["start_ms"]:
-                    raise HTTPException(422, "场景和姿势的同一时间不能存在两条标注。")
-        cleaned[axis] = normalize_state_seams(records, videos or [], bridges) if axis in ("scene", "posture") else records
+                    raise HTTPException(422, "互斥状态轴的同一时间不能存在两条标注。")
+        cleaned[axis] = normalize_state_seams(records, videos or [], bridges) if axis in ("scene", "posture") or (axis in custom and custom[axis]["mode"] == "state") else records
     if final and require_coverage:
         runs = coverage if videos is not None else [{"start_ms": 0, "end_ms": duration_ms}]
         for axis in COVERAGE_AXES:
@@ -366,7 +408,9 @@ class ProjectService:
         result["recording_runs"], result["continuity_bridges"], result["gaps"] = selected_recording_layout(project)
         # Presentation and export share the same normalization. Reading a legacy
         # draft never rewrites its database record or changes its revision.
-        result["annotations"] = validate_annotations(project["annotations"], project["duration_ms"], videos=result["videos"])
+        result["custom_tracks"] = validate_custom_tracks(project.get("custom_tracks", []))
+        result["annotations"] = validate_annotations(project["annotations"], project["duration_ms"], videos=result["videos"],
+                                                      custom_tracks=result["custom_tracks"])
         return result
 
     @project_locked
@@ -379,7 +423,8 @@ class ProjectService:
         reasons.update({item['name']: item.get('detail') or '素材准备失败' for item in failed})
         candidate = {**project, '_skipped_video_names': reasons}
         try:
-            validate_annotations(project['annotations'], project['duration_ms'], videos=active_videos(candidate))
+            validate_annotations(project['annotations'], project['duration_ms'], videos=active_videos(candidate),
+                                 custom_tracks=project.get('custom_tracks', []))
         except HTTPException:
             raise HTTPException(409, '失败区间或其相邻间隙已有标注，不能直接跳过；已有草稿已保留。请先处理相关标注。')
         self.sessions.invalidate(ident)
@@ -952,8 +997,10 @@ class ProjectService:
 
         result = empty_annotations()
         closed_pending = 0
-        old_annotations = validate_annotations(project["annotations"], project["duration_ms"], videos=old_videos)
-        for axis in AXES:
+        old_annotations = validate_annotations(project["annotations"], project["duration_ms"], videos=old_videos,
+                                               custom_tracks=project.get("custom_tracks", []))
+        for axis in old_annotations:
+            result.setdefault(axis, [])
             for record in old_annotations[axis]:
                 if record["kind"] == "point":
                     mapped = point(record["start_ms"])
@@ -984,8 +1031,9 @@ class ProjectService:
                 for index, (start, end) in enumerate(spans):
                     result[axis].append({**record, "id": record["id"] if index == 0 else uuid.uuid4().hex,
                                          "start_ms": start, "end_ms": end})
-        warnings = [f"为使新增视频保持未标注，已将 {closed_pending} 条进行中习惯结束在原视频末尾，请按需要继续记录。"] if closed_pending else []
-        return validate_annotations(result, duration_ms, videos=videos), warnings
+        warnings = [f"为使新增视频保持未标注，已将 {closed_pending} 条进行中事件结束在原视频末尾，请按需要继续记录。"] if closed_pending else []
+        return validate_annotations(result, duration_ms, videos=videos,
+                                    custom_tracks=project.get("custom_tracks", [])), warnings
 
     def supplement(self, ident: str, paths: list[Path], expected_revision: int, skipped_names: list[str] | None = None) -> dict:
         """Atomically extend one project; only incoming sources are probed/read."""
@@ -1069,8 +1117,9 @@ class ProjectService:
             if project.get("draft_dirty"):
                 warnings.append("原目录 JSON 已被修改。本机草稿已保留；写回将阻止覆盖外部更改。")
             else:
-                imported, hashes = self.read_external(project)
+                imported, hashes, imported_tracks = self.read_external(project, include_tracks=True)
                 project["annotations"] = imported or empty_annotations()
+                project["custom_tracks"] = imported_tracks
                 project["_external_hashes"] = hashes
                 project["revision"] += 1
                 project["updated_at"] = now()
@@ -1078,11 +1127,11 @@ class ProjectService:
         self.save(project)
         return self.public(project)
 
-    def read_external(self, project: dict) -> tuple[dict | None, dict]:
+    def read_external(self, project: dict, *, include_tracks: bool = False) -> tuple:
         source = project.get("source_dir")
         hashes = {axis: None for axis in AXES}
         if not source:
-            return None, hashes
+            return (None, hashes, []) if include_tracks else (None, hashes)
         documents = {}
         directory = self.external_directory(Path(source))
         for axis in AXES:
@@ -1097,11 +1146,32 @@ class ProjectService:
             except (OSError, ValueError):
                 raise HTTPException(422, f"无法读取已有标注文件 {FILENAMES[axis]}。")
         if not documents:
-            return None, hashes
+            return (None, hashes, []) if include_tracks else (None, hashes)
         if set(documents) not in (set(LEGACY_AXES), set(AXES)):
             raise HTTPException(409, "原目录标注文件不齐全。请恢复同一保存批次的完整文件后重新打开。")
+        tracks = validate_custom_tracks(documents["scene"].get("timebase", {}).get("custom_tracks", []))
+        if any(document.get("timebase", {}).get("custom_tracks", []) != tracks for document in documents.values()):
+            raise HTTPException(409, "标注文件中的自定义时间轴清单不一致。")
+        expected_custom = {track["id"] for track in tracks}
+        actual_custom = {path.name.removesuffix(".timeline.json") for path in directory.glob("custom_*.timeline.json")
+                         if re.fullmatch(r"custom_[0-9a-f]{32}\.timeline\.json", path.name)}
+        if actual_custom != expected_custom:
+            raise HTTPException(409, "自定义时间轴文件不齐全或包含其他保存批次。")
+        for axis in expected_custom:
+            path = directory / filename_for_axis(axis)
+            try:
+                if path.is_symlink() or not path.is_file():
+                    raise HTTPException(409, "自定义时间轴文件不是普通文件。")
+                raw = path.read_bytes()
+                if len(raw) > 30 * 1024 * 1024:
+                    raise HTTPException(422, "已有自定义时间轴 JSON 过大，无法加载。")
+                hashes[axis] = digest(raw)
+                documents[axis] = json.loads(raw.decode("utf-8-sig"))
+            except (OSError, ValueError):
+                raise HTTPException(422, f"无法读取已有标注文件 {path.name}。")
         batch_ids, versions = set(), set()
         annotations = empty_annotations()
+        annotations.update({axis: [] for axis in expected_custom})
         try:
             selections = [document.get('timebase', {}).get('skipped_videos', []) for document in documents.values()]
             if any(selection != selections[0] for selection in selections):
@@ -1133,6 +1203,12 @@ class ProjectService:
                     raise HTTPException(409, "原目录标注对应的素材与当前视频不一致；已停止加载，避免时间轴错配。")
                 if document["timebase"]["unit"] != "ms" or document["timebase"]["origin"] != "recording_datetime" or document["timebase"]["recording_start"] != project["recording_start"] or document["timebase"]["duration_ms"] != project["duration_ms"]:
                     raise ValueError()
+                if document["timebase"].get("custom_tracks", []) != tracks:
+                    raise HTTPException(409, "标注文件中的自定义时间轴清单不一致。")
+                if axis in expected_custom:
+                    track = next(item for item in tracks if item["id"] == axis)
+                    if document.get("axis_name") != track["name"] or document.get("axis_mode") != track["mode"]:
+                        raise HTTPException(409, "自定义时间轴定义与文件内容不一致。")
                 batch_ids.add(document["save_id"])
                 lookup = {item["id"]: item["name"] for item in document["labels"]}
                 annotations[axis] = [{"id": item["id"], "label": lookup[item["label_id"]], "kind": item.get("kind", "interval"), "start_ms": item["start_ms"], "end_ms": item["end_ms"], **({"mode": item.get("mode", "state")} if axis == "category" else {}), **({key: item[key] for key in ("created_by", "created_by_name", "created_at", "updated_by", "updated_by_name", "updated_at") if key in item} if version == 3 else {})} for item in document["segments"]]
@@ -1140,15 +1216,16 @@ class ProjectService:
                 raise HTTPException(409, "标注 JSON 不属于同一保存批次或格式版本。请恢复一致的文件后再打开。")
             version = next(iter(versions))
             expected_axes = LEGACY_AXES if version == 1 else AXES
-            if set(documents) != set(expected_axes):
+            if set(documents) != set(expected_axes) | expected_custom:
                 raise HTTPException(409, "原目录标注文件不齐全或格式版本不一致。旧版须有三个文件，新版须有四个文件。")
             # Previously exported partial annotations remain readable for manual
             # completion. Current files require posture coverage; scene and
             # category may contain unannotated intervals after writeback.
             cleaned = validate_annotations(annotations, project["duration_ms"], final=True, videos=active_videos(selected),
-                                           require_coverage=version >= 2, require_scene_coverage=False)
+                                           require_coverage=version >= 2, require_scene_coverage=False,
+                                           custom_tracks=tracks)
             project['_skipped_video_names'] = names
-            return cleaned, hashes
+            return (cleaned, hashes, tracks) if include_tracks else (cleaned, hashes)
         except (KeyError, ValueError, TypeError):
             raise HTTPException(422, "已有标注文件格式不受支持，或时间基准不正确。")
 
@@ -1186,7 +1263,7 @@ class ProjectService:
             fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None)
             if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
                 raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
-            imported, hashes = self.read_external(previous or fresh)
+            imported, hashes, imported_tracks = self.read_external(previous or fresh, include_tracks=True)
             if previous:
                 preserved_alignment_warnings = alignment_warnings(previous["videos"])
                 previous["warnings"] = preserved_alignment_warnings
@@ -1195,6 +1272,7 @@ class ProjectService:
                         previous["warnings"] = preserved_alignment_warnings + ["原目录 JSON 已被修改。本机草稿已保留；写回将阻止覆盖外部更改。"]
                     else:
                         previous["annotations"] = imported or empty_annotations()
+                        previous["custom_tracks"] = imported_tracks
                         previous['_skipped_video_names'] = fresh.get('_skipped_video_names', {})
                         previous["_external_hashes"] = hashes
                         previous["revision"] += 1
@@ -1205,6 +1283,7 @@ class ProjectService:
             if name is not None:
                 fresh.update(name=name, _custom_name=True)
             fresh["annotations"] = imported or empty_annotations()
+            fresh["custom_tracks"] = imported_tracks
             fresh["_external_hashes"] = hashes
             self.attach_source_caches(fresh)
             self.save(fresh)
@@ -1227,14 +1306,15 @@ class ProjectService:
             project = self.load(ident)
             if project["revision"] != expected_revision:
                 raise HTTPException(409, "草稿已在其他窗口更新。请重新打开项目后继续，避免覆盖最新标注。")
-            if isinstance(annotations, dict) and set(annotations) == set(LEGACY_AXES):
-                # An already open legacy client must never erase the new axis.
-                annotations = {**annotations, "category": project["annotations"].get("category", [])}
-            cleaned = validate_annotations(annotations, project["duration_ms"], videos=active_videos(project))
+            if isinstance(annotations, dict) and set(annotations) in (set(LEGACY_AXES), set(AXES)):
+                # An already open client must never erase newer axes.
+                annotations = {**project["annotations"], **annotations}
+            cleaned = validate_annotations(annotations, project["duration_ms"], videos=active_videos(project),
+                                           custom_tracks=project.get("custom_tracks", []))
             events = []
             if actor is not None:
                 recorded_at = now()
-                for axis in AXES:
+                for axis in cleaned:
                     old = {item["id"]: item for item in project["annotations"].get(axis, [])}
                     new = {item["id"]: item for item in cleaned[axis]}
                     for item_id in old.keys() | new.keys():
@@ -1269,6 +1349,21 @@ class ProjectService:
                     con.executemany("INSERT INTO edit_events VALUES (?,?,?,?,?,?,?,?,?,?,?)", events)
             return self.public(project)
 
+    def add_custom_track(self, ident: str, name: str, mode: str, labels: list[str], expected_revision: int) -> dict:
+        with self.lock:
+            project = self.load(ident)
+            if project["revision"] != expected_revision:
+                raise HTTPException(409, "项目已在其他窗口更新，请重新打开后添加时间轴。")
+            track = {"id": "custom_" + uuid.uuid4().hex, "name": name, "mode": mode, "labels": labels}
+            tracks = validate_custom_tracks([*project.get("custom_tracks", []), track])
+            project["custom_tracks"] = tracks
+            project["annotations"][track["id"]] = []
+            project["revision"] += 1
+            project["updated_at"] = now()
+            project["draft_dirty"] = True
+            self.save(project)
+            return self.public(project)
+
     def edit_history(self, ident: str, *, limit: int = 200) -> list[dict]:
         self.load(ident)
         with self.connection() as con:
@@ -1293,7 +1388,8 @@ class ProjectService:
 
     def export_documents(self, project: dict, *, for_writeback: bool = False) -> tuple[str, dict[str, bytes]]:
         annotations = validate_annotations(project["annotations"], project["duration_ms"], final=True,
-                                           videos=active_videos(project), require_scene_coverage=not for_writeback)
+                                           videos=active_videos(project), require_scene_coverage=not for_writeback,
+                                           custom_tracks=project.get("custom_tracks", []))
         save_id = uuid.uuid4().hex
         recording_start = datetime.fromisoformat(project["recording_start"]).astimezone(timezone(timedelta(hours=8)))
         timebase = {"unit": "ms", "origin": "recording_datetime", "real_time_format": "HHMMSS", "recording_start": project["recording_start"], "timezone": "Asia/Shanghai", "gaps": project["gaps"], "interval": "[start,end)", "point_semantics": "instant; start_ms=end_ms", "duration_ms": project["duration_ms"], "source_fingerprint": project["source_fingerprint"], "videos": [{key: video[key] for key in ("id", "relative_path", "recording_start", "original_media_start_ms", "duration_ms", "start_ms", "end_ms")} for video in project["videos"]]}
@@ -1340,13 +1436,20 @@ class ProjectService:
                 "maximum_applied_offset_ms": max(video["alignment_offset_ms"] for video in aligned_videos),
                 "note": "recording_start is an effective playback coordinate; filename_recording_start preserves the original second-resolution timestamp, not measured subsecond timing.",
             }
+        custom_tracks = validate_custom_tracks(project.get("custom_tracks", []))
+        if custom_tracks:
+            timebase["custom_tracks"] = custom_tracks
+        custom = {track["id"]: track for track in custom_tracks}
         result = {}
-        for axis in AXES:
+        for axis in annotations:
             used_labels = {item["label"] for item in annotations[axis]}
             # Retired scene options remain valid only as legacy data in exports;
             # keep their established label IDs when those annotations are used.
             labels = {label: ident for label, ident in FIXED_LABELS.get(axis, {}).items()
                       if axis != "scene" or label in ("室内", "室外") or label in used_labels}
+            if axis in custom and custom[axis]["mode"] == "state":
+                labels = {label: "custom_label_" + digest(label.encode("utf-8"))[:16]
+                          for label in custom[axis]["labels"]}
             records = []
             for item in annotations[axis]:
                 label = item["label"]
@@ -1363,6 +1466,9 @@ class ProjectService:
                     "end_date": end_at.date().isoformat(),
                 })
             document = {"schema_version": 3, "save_id": save_id, "saved_at": now(), "collection_id": project["id"], "collection_name": project["name"], "axis": axis, "timebase": timebase, "labels": [{"id": value, "name": label} for label, value in labels.items()], "segments": records}
+            if axis in custom:
+                document["axis_name"] = custom[axis]["name"]
+                document["axis_mode"] = custom[axis]["mode"]
             result[axis] = document_bytes(document)
         return save_id, result
 
@@ -1371,14 +1477,15 @@ class ProjectService:
         _, documents = self.export_documents(project)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            for axis in AXES:
-                archive.writestr(FILENAMES[axis], documents[axis])
+            for axis, payload in documents.items():
+                archive.writestr(filename_for_axis(axis), payload)
         return buffer.getvalue()
 
     @staticmethod
     def expected_external_hashes(project: dict) -> dict:
         previous = project.get("_external_hashes", {})
-        return {axis: previous.get(axis) for axis in AXES}
+        return {**{axis: previous.get(axis) for axis in AXES},
+                **{axis: value for axis, value in previous.items() if axis.startswith("custom_") and value is not None}}
 
     @staticmethod
     def external_directory(source: Path) -> Path:
@@ -1394,7 +1501,14 @@ class ProjectService:
     def current_external_hashes(self, source: Path) -> dict:
         try:
             directory = self.external_directory(source)
-            return {axis: digest((directory / FILENAMES[axis]).read_bytes()) if (directory / FILENAMES[axis]).exists() else None for axis in AXES}
+            hashes = {axis: digest((directory / FILENAMES[axis]).read_bytes()) if (directory / FILENAMES[axis]).exists() else None for axis in AXES}
+            for path in directory.glob("custom_*.timeline.json"):
+                axis = path.name.removesuffix(".timeline.json")
+                if re.fullmatch(r"custom_[0-9a-f]{32}", axis):
+                    if path.is_symlink() or not path.is_file():
+                        raise HTTPException(409, "自定义时间轴文件不是普通文件，已停止写回。")
+                    hashes[axis] = digest(path.read_bytes())
+            return hashes
         except OSError:
             raise HTTPException(409, "无法检查原目录已有 JSON，未进行写回。请检查共享网络和权限。")
 
@@ -1407,16 +1521,16 @@ class ProjectService:
         with self.lock:
             project = self.load(ident)
             if not project["source_dir"]:
-                raise HTTPException(400, "项目尚未关联统一的原采集目录，请导出四个 JSON 后自行保存。")
+                raise HTTPException(400, "项目尚未关联统一的原采集目录，请导出时间轴 JSON 后自行保存。")
             if self.remote and self.remote.map_path(project['source_dir']) is not None:
                 # Local validation is preserved; the server performs source/conflict checks and commits.
-                self.export_documents(project, for_writeback=True)
+                _, documents = self.export_documents(project, for_writeback=True)
                 response = self.remote.writeback(project)
                 for field in ('_external_hashes', 'draft_dirty', 'warnings', 'last_writeback', 'updated_at'):
                     project[field] = response['project'][field]
                 self.save(project)
                 result = dict(response['result'])
-                result['paths'] = [str(Path(project['source_dir']) / 'timeline' / FILENAMES[axis]) for axis in AXES]
+                result['paths'] = [str(Path(project['source_dir']) / 'timeline' / filename_for_axis(axis)) for axis in documents]
                 return result
             save_id, documents = self.export_documents(project, for_writeback=True)
             self.verify_sources(project)
@@ -1425,20 +1539,21 @@ class ProjectService:
             if self.current_external_hashes(source) != expected:
                 raise HTTPException(409, "原目录 JSON 已被其他程序修改。为保护外部结果，本次没有写回；本机草稿保留，可下载 JSON。")
             destination = source / "timeline"
-            target_expected = expected if self.external_directory(source) == destination else {axis: None for axis in AXES}
+            target_expected = expected if self.external_directory(source) == destination else {axis: None for axis in documents}
             temporary, backups, replaced = {}, {}, []
             backup_dir = source / ".annotation-backups" / save_id
             try:
                 destination.mkdir(exist_ok=True)
                 if any(value is not None for value in target_expected.values()):
                     backup_dir.mkdir(parents=True, exist_ok=False)
-                for axis in AXES:
-                    target = destination / FILENAMES[axis]
+                for axis in documents:
+                    filename = filename_for_axis(axis)
+                    target = destination / filename
                     if target.exists():
-                        backup = backup_dir / FILENAMES[axis]
+                        backup = backup_dir / filename
                         shutil.copy2(target, backup)
                         backups[axis] = backup
-                    temp = destination / ("." + FILENAMES[axis] + "." + save_id + ".tmp")
+                    temp = destination / ("." + filename + "." + save_id + ".tmp")
                     temporary[axis] = temp
                     with temp.open("xb") as handle:
                         handle.write(documents[axis])
@@ -1446,34 +1561,35 @@ class ProjectService:
                         os.fsync(handle.fileno())
                 if self.current_external_hashes(source) != expected:
                     raise HTTPException(409, "准备写回时发现原目录 JSON 有变化，已停止写回。")
-                for axis in AXES:
+                for axis in documents:
                     # Check each target immediately before replacing. A network share
-                    # cannot provide a transaction across four independent files.
-                    target = destination / FILENAMES[axis]
+                    # cannot provide a transaction across independent files.
+                    target = destination / filename_for_axis(axis)
                     current = digest(target.read_bytes()) if target.exists() else None
-                    if current != target_expected[axis]:
+                    if current != target_expected.get(axis):
                         raise OSError("target changed during writeback")
                     os.replace(temporary[axis], target)
                     replaced.append(axis)
-                if self.current_external_hashes(source) != {axis: digest(documents[axis]) for axis in AXES}:
+                if self.current_external_hashes(source) != {axis: digest(payload) for axis, payload in documents.items()}:
                     raise OSError("writeback read verification failed")
             except (OSError, HTTPException) as exc:
                 rollback_failed = []
                 for axis in reversed(replaced):
-                    target = destination / FILENAMES[axis]
+                    filename = filename_for_axis(axis)
+                    target = destination / filename
                     try:
                         # Do not overwrite a concurrent external update while rolling back.
                         if digest(target.read_bytes()) != digest(documents[axis]):
-                            rollback_failed.append(FILENAMES[axis])
+                            rollback_failed.append(filename)
                             continue
                         if axis in backups:
-                            rollback = destination / ("." + FILENAMES[axis] + ".rollback." + save_id)
+                            rollback = destination / ("." + filename + ".rollback." + save_id)
                             shutil.copy2(backups[axis], rollback)
                             os.replace(rollback, target)
                         else:
                             target.unlink()
                     except OSError:
-                        rollback_failed.append(FILENAMES[axis])
+                        rollback_failed.append(filename)
                 if rollback_failed:
                     project["warnings"] = ["写回中断且部分文件未能恢复：" + "、".join(rollback_failed) + "。本机草稿保留；请检查原目录和 .annotation-backups。"]
                     self.save(project)
@@ -1487,13 +1603,13 @@ class ProjectService:
                         temp.unlink(missing_ok=True)
                     except OSError:
                         pass
-            project["_external_hashes"] = {axis: digest(documents[axis]) for axis in AXES}
+            project["_external_hashes"] = {axis: digest(payload) for axis, payload in documents.items()}
             project["draft_dirty"] = False
             project["warnings"] = alignment_warnings(project["videos"])
             project["last_writeback"] = {"save_id": save_id, "saved_at": now()}
             project["updated_at"] = now()
             self.save(project)
-            return {"paths": [str(destination / FILENAMES[axis]) for axis in AXES], "save_id": save_id}
+            return {"paths": [str(destination / filename_for_axis(axis)) for axis in documents], "save_id": save_id}
 
     def media_source(self, project: dict, video_id: str) -> tuple[Path, dict]:
         source = project["_sources"].get(video_id)

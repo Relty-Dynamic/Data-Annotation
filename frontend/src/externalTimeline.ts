@@ -20,7 +20,7 @@ function origin(value: unknown): number | null {
 }
 
 /** Read-only import. Preserve labels and overlaps; never normalize into GT. */
-export function parseExternalTimeline(text: string, track: Track, project: Pick<Project, 'duration_ms' | 'recording_start'>, name: string): ExternalTimeline {
+export function parseExternalTimeline(text: string, track: Track, project: Pick<Project, 'duration_ms' | 'recording_start' | 'custom_tracks'>, name: string): ExternalTimeline {
   let data: unknown;
   try { data = JSON.parse(text.replace(/^\uFEFF/, '')); } catch { throw new Error('文件不是有效的 JSON，请检查后重新选择。'); }
   const root = object(data);
@@ -50,7 +50,7 @@ export function parseExternalTimeline(text: string, track: Track, project: Pick<
     const end = item.end_ms === undefined && item.kind === 'point' ? start : item.end_ms;
     if (end !== null && (typeof end !== 'number' || !Number.isSafeInteger(end) || end < start)) fail('end_ms 必须不早于 start_ms，未结束区间可用 null。');
     if (isPoint && end !== start) fail('瞬时事件的起止时间必须相同。');
-    if (isPoint && track !== 'habit') fail('瞬时事件请选择习惯轴。');
+    if (isPoint && track !== 'habit' && project.custom_tracks?.find(item=>item.id===track)?.mode !== 'event') fail('瞬时事件请选择事件轴。');
     if (!isPoint && end === start) fail('区间时长必须大于零。');
     const alignedStart = start + offset;
     const alignedEnd = end === null ? project.duration_ms : (end as number) + offset;
