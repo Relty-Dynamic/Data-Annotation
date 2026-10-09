@@ -142,6 +142,10 @@ class FourAxisPersistenceTests(unittest.TestCase):
             self.assertEqual(added["annotations"][axis], [])
             self.assertEqual(client.get(f"/api/projects/{project['id']}").json()["custom_tracks"], added["custom_tracks"])
             self.assertEqual(client.post(path, json=body).status_code, 409)
+            removed = client.request("DELETE", f"{path}/{axis}", json={"confirmed": True, "expected_revision": added["revision"]})
+            self.assertEqual(removed.status_code, 200, removed.text)
+            self.assertEqual(removed.json()["custom_tracks"], [])
+            self.assertEqual(client.request("DELETE", f"{path}/{axis}", json={"confirmed": True, "expected_revision": removed.json()["revision"]}).status_code, 404)
 
     def test_project_custom_state_and_event_tracks_export_writeback_and_reopen(self):
         project = self.annotated_project()
@@ -169,6 +173,71 @@ class FourAxisPersistenceTests(unittest.TestCase):
             self.assertEqual(reopened["annotations"][event_id], saved["annotations"][event_id])
         finally:
             fresh.previews.close()
+
+    def test_delete_custom_track_removes_its_json_on_next_writeback(self):
+        project = self.annotated_project()
+        added = self.service.add_custom_track(project["id"], "环境", "state", ["安静"], project["revision"])
+        axis = added["custom_tracks"][0]["id"]
+        annotations = copy.deepcopy(added["annotations"])
+        annotations[axis] = [interval("quiet", "安静", 0, 1000)]
+        saved = self.service.update_draft(project["id"], annotations, added["revision"])
+        self.service.writeback(project["id"])
+        path = self.source / "timeline" / filename_for_axis(axis)
+        original = path.read_bytes()
+        deleted = self.service.delete_custom_track(project["id"], axis, saved["revision"])
+        self.assertEqual(deleted["custom_tracks"], [])
+        self.assertNotIn(axis, deleted["annotations"])
+        self.assertEqual(path.read_bytes(), original, "the external file remains until writeback")
+        self.assertEqual(self.service.open_path(str(self.source))["custom_tracks"], [],
+                         "reopening before writeback must keep the deleted local draft")
+        with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+            self.assertEqual(set(archive.namelist()), set(FILENAMES.values()))
+        result = self.service.writeback(project["id"])
+        self.assertFalse(path.exists())
+        self.assertNotIn(str(path), result["paths"])
+        self.assertEqual((self.source / ".annotation-backups" / result["save_id"] / path.name).read_bytes(), original)
+        fresh = ProjectService(self.root / "deleted-custom-fresh")
+        try:
+            self.assertEqual(fresh.open_path(str(self.source))["custom_tracks"], [])
+        finally:
+            fresh.previews.close()
+
+    def test_delete_custom_track_stops_if_external_file_changed(self):
+        project = self.annotated_project()
+        added = self.service.add_custom_track(project["id"], "环境", "event", [], project["revision"])
+        axis = added["custom_tracks"][0]["id"]
+        self.service.writeback(project["id"])
+        deleted = self.service.delete_custom_track(project["id"], axis, added["revision"])
+        path = self.source / "timeline" / filename_for_axis(axis)
+        path.write_bytes(path.read_bytes() + b"\n")
+        with self.assertRaises(HTTPException) as error:
+            self.service.writeback(project["id"])
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertTrue(path.exists())
+        self.assertEqual(deleted["custom_tracks"], [])
+
+    def test_failed_writeback_restores_removed_custom_file(self):
+        project = self.annotated_project()
+        added = self.service.add_custom_track(project["id"], "环境", "event", [], project["revision"])
+        axis = added["custom_tracks"][0]["id"]
+        self.service.writeback(project["id"])
+        path = self.source / "timeline" / filename_for_axis(axis)
+        original = path.read_bytes()
+        fixed_before = {name: (self.source / "timeline" / name).read_bytes() for name in FILENAMES.values()}
+        self.service.delete_custom_track(project["id"], axis, added["revision"])
+        original_hashes = self.service.current_external_hashes
+        calls = 0
+        def fail_verification(source):
+            nonlocal calls
+            calls += 1
+            hashes = original_hashes(source)
+            return {**hashes, "unexpected": "changed"} if calls == 3 else hashes
+        with patch.object(self.service, "current_external_hashes", side_effect=fail_verification):
+            with self.assertRaises(HTTPException) as error:
+                self.service.writeback(project["id"])
+        self.assertEqual(error.exception.status_code, 500)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual({name: (self.source / "timeline" / name).read_bytes() for name in FILENAMES.values()}, fixed_before)
 
     def test_custom_state_rejects_unknown_or_overlapping_labels(self):
         project = self.annotated_project()

@@ -27,8 +27,9 @@ import { readProjectPreference, readRestorableProjectPreference, writeProjectPre
 import { advanceVideoTime, playbackProfile, seekMediaTime, sourceTime } from './playback';
 import { formatTime, parseTime, switchCoveredState, applyAnnotationRange, deleteAnnotation, uncoveredSpans, SCENE_LABELS, POSTURE_LABELS, CATEGORY_LABELS, TRACKS, projectTracks, customTrack, trackName, isEventTrack, isExclusiveTrack, locateVideo, annotationsEqual, normalizeStateSeams, anchorVideoTime, restoreVideoTime, isSegmentDraftDirty } from './domain';
 import { POSTURE_SHORTCUTS, postureShortcutLabel } from './postureShortcuts';
-import type { Project, Segment, Track, VideoTimeAnchor } from './domain';
+import type { CustomTrack, Project, Segment, Track, VideoTimeAnchor } from './domain';
 import CustomTrackDialog from './CustomTrackDialog';
+import DeleteCustomTrackDialog from './DeleteCustomTrackDialog';
 type ImportMode = 'new' | 'supplement' | 'relink';
 type ComposerDraft = {label:string; start:string; end:string; kind:'point'|'interval'};
 type SupplementResponse = {project:Project; added_count:number; skipped_names:string[]};
@@ -63,6 +64,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const [auditOpen,setAuditOpen]=useState(false);
  const [projects,setProjects]=useState<Project[]>([]),[activeTrack,setActiveTrack]=useState<Track>('scene');
  const [customTrackOpen,setCustomTrackOpen]=useState(false);
+ const [deleteCustomTrack,setDeleteCustomTrack]=useState<CustomTrack|null>(null),[deletingCustomTrack,setDeletingCustomTrack]=useState(false),[deleteCustomError,setDeleteCustomError]=useState('');
  const [trackRevealVersion,setTrackRevealVersion]=useState(0);
  const [time,setTime]=useState(0),timeRef=useRef(0),[videoId,setVideoId]=useState('');
  const [playing,setPlaying]=useState(false),wantsPlay=useRef(false),[rate,setRate]=useState(1),[muted,setMuted]=useState(true);
@@ -473,6 +475,21 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   setProject(projectRef.current);setActiveTrack(updated.custom_tracks!.at(-1)!.id);setTrackRevealVersion(value=>value+1);resetEditorFields();setSelectedRange(null);updateHistory([],[]);
   setCustomTrackOpen(false);setNotice(`已添加「${name}」时间轴`);
  }
+ async function confirmDeleteCustomTrack(){
+  const current=projectRef.current,track=deleteCustomTrack;
+  if(!current||!track||deletingCustomTrack)return;
+  setDeletingCustomTrack(true);setDeleteCustomError('');
+  try{
+   await flush();
+   const updated=await api<Project>(`/api/projects/${current.id}/custom-tracks/${track.id}`,json('DELETE',{confirmed:true,expected_revision:serverRevision.current}));
+   serverRevision.current=updated.revision;
+   projectRef.current={...(projectRef.current??current),custom_tracks:updated.custom_tracks,annotations:updated.annotations,revision:updated.revision,updated_at:updated.updated_at};
+   setProject(projectRef.current);setActiveTrack('scene');setTrackRevealVersion(value=>value+1);resetEditorFields();setSelectedRange(null);updateHistory([],[]);
+   if(comparison?.track===track.id){setComparison(null);setComparisonOpen(false);}
+   setDeleteCustomTrack(null);setNotice(`已删除「${track.name}」时间轴；下次写回将清理其 NAS JSON`);
+  }catch(reason){setDeleteCustomError(reason instanceof Error?reason.message:'删除时间轴失败，请重试。');}
+  finally{setDeletingCustomTrack(false);}
+ }
  function selectSegment(track:Track,s:Segment,seekTime=s.start_ms){
   if(hasPendingEdit){if(track===activeTrack&&s.id===selectedId){seek(seekTime);return;}setError('请先保存或取消正在编辑的标注，再选择其他记录；当前输入已保留。');return;}
   setActiveTrack(track);setSelectedRange(null);setSelectedId(s.id);setLabel(s.label);setBehaviorKind(s.kind??'interval');setStartText(formatTime(s.start_ms));setEndText(s.end_ms===null?'':formatTime(s.end_ms));setManual(true);seek(seekTime);
@@ -538,7 +555,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  async function writeback(){if(!project)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再写回原目录；当前输入尚未写入结果。');return;}await doBusy('正在写回 timeline 文件夹…',async()=>{await flush();await api(`/api/projects/${project.id}/writeback`,{method:'POST'});setNotice(`${projectTracks(project).length} 个 JSON 已写回原采集目录的 timeline 文件夹`);});}
  useEffect(()=>{
   const key=(e:KeyboardEvent)=>{
-   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||renameProject||settingsOpen||timelineImportOpen||e.isComposing||e.keyCode===229)return;
+   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||deleteCustomTrack||renameProject||settingsOpen||timelineImportOpen||e.isComposing||e.keyCode===229)return;
    const target=e.target instanceof Element?e.target:null;
    if(comparisonOpen&&['Home','End'].includes(e.code)){e.preventDefault();e.stopImmediatePropagation();seek(e.code==='Home'?0:projectRef.current.duration_ms);return;}
    const posture=!comparisonOpen&&postureShortcutLabel(e,!!target?.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]'));
@@ -568,7 +585,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    const delta=wheelSeekDelta(e,seekSettings);if(delta===null)return;
    // Capture before timeline zoom, horizontal browsing or native Shift scrolling.
    e.preventDefault();e.stopImmediatePropagation();
-   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||renameProject||settingsOpen||timelineImportOpen||scrubbingRef.current)return;
+   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||deleteCustomTrack||renameProject||settingsOpen||timelineImportOpen||scrubbingRef.current)return;
    if(delta!==0)moveCursor(delta);
   };
   const release=(e:KeyboardEvent)=>{if(transportKeys.current.delete(e.code)){e.preventDefault();e.stopImmediatePropagation();}};
@@ -594,6 +611,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   {passwordOpen&&<PasswordDialog onClose={()=>setPasswordOpen(false)} onChanged={logoutNow}/>}
   {auditOpen&&project&&<HistoryPanel projectId={project.id} onClose={()=>setAuditOpen(false)}/>}
   {customTrackOpen&&project&&<CustomTrackDialog onCancel={()=>setCustomTrackOpen(false)} onCreate={addCustomTrack}/>}
+  {deleteCustomTrack&&project&&<DeleteCustomTrackDialog track={deleteCustomTrack} count={project.annotations[deleteCustomTrack.id]?.length??0} deleting={deletingCustomTrack} error={deleteCustomError} onCancel={()=>{setDeleteCustomTrack(null);setDeleteCustomError('');}} onConfirm={confirmDeleteCustomTrack}/>}
   {timelineImportOpen&&project&&<TimelineImportDialog project={project} initialTrack={comparison?.track??activeTrack} onCancel={()=>{setTimelineImportOpen(false);if(!comparisonOpen)queueMicrotask(()=>comparisonTrigger.current?.focus());}} onOpen={value=>{setComparison(value);setTimelineImportOpen(false);setComparisonOpen(true);}}/>}
   {comparisonOpen&&<div className="comparison-backdrop"/>}
   {settingsOpen&&<SeekSettingsDialog value={seekSettings} onCancel={()=>setSettingsOpen(false)} onSave={saveSeekSettings}/>}
@@ -603,7 +621,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   {error&&<div className="message error" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={()=>setError('')}><X size={16}/></button></div>}
   {notice&&<div className="message success" role="status"><Check size={16}/><span>{notice}</span><button aria-label="关闭提示" onClick={()=>setNotice('')}><X size={16}/></button></div>}
   {project?.needs_source_relink&&user.role==='admin'&&<div className="source-relink-notice" inert={importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}><FolderOpen size={16}/><span>此项目仍使用平台内的视频副本。关联原目录后，缓存会移到原视频旁，释放重复存储。</span><button className="secondary" disabled={!!busy||project.deletion_pending} onClick={()=>beginImport('relink')}>关联原目录</button></div>}
-  {help&&<div className="help-panel"><Keyboard size={18}/><span>顶部全屏按钮 进入工作台全屏，Esc 退出</span><span>空格 播放／暂停</span><span>Ctrl + 空格 添加锚点</span><span>← → 前后 {seekSettings.arrowMs/1000} 秒</span><span>Shift + ← → 前后 {seekSettings.shiftArrowMs/1000} 秒</span><span>Ctrl + ← → 前后 {seekSettings.ctrlArrowMs/1000} 秒</span><span>Ctrl + Alt + 滚轮 上退下进，每次 {seekSettings.wheelMs/1000} 秒</span><span>Shift + 滚轮 上退下进，每次 {seekSettings.shiftWheelMs/1000} 秒</span><span>右上角设置按钮 可调整移动步长</span><span>调整视频进度会暂停，松开后保持暂停</span><span>Ctrl + 滚轮 缩放时间轴（最细每屏5分钟）</span><span>Ctrl + + / - / 0 已禁用浏览器缩放</span><span>Alt + 滚轮 左右浏览时间轴</span><span>大类 / 习惯轴内滚轮 上下查看重叠层</span><span>拖动蓝色光标定位视频</span><span>Delete 删除选中色块</span><span>Z 动 / X 坐 / C 站 / V 躺：从当前播放位置向后切换姿势</span><span>Ctrl + Z 撤销</span><span>Ctrl + Shift + Z 恢复</span><span>点击轴名或右侧类型切换；点击色块可编辑。左右键和空格固定控制视频。</span></div>}
+  {help&&<div className="help-panel"><Keyboard size={18}/><span>顶部全屏按钮 进入工作台全屏，Esc 退出</span><span>空格 播放／暂停</span><span>Ctrl + 空格 添加锚点</span><span>← → 前后 {seekSettings.arrowMs/1000} 秒</span><span>Shift + ← → 前后 {seekSettings.shiftArrowMs/1000} 秒</span><span>Ctrl + ← → 前后 {seekSettings.ctrlArrowMs/1000} 秒</span><span>Ctrl + Alt + 滚轮 上退下进，每次 {seekSettings.wheelMs/1000} 秒</span><span>Shift + 滚轮 上退下进，每次 {seekSettings.shiftWheelMs/1000} 秒</span><span>右上角设置按钮 可调整移动步长</span><span>调整视频进度会暂停，松开后保持暂停</span><span>Ctrl + 滚轮 缩放时间轴（最细每屏5分钟）</span><span>Ctrl + + / - / 0 已禁用浏览器缩放</span><span>轴的条带上滚轮 左右浏览时间轴</span><span>重叠轴内 Alt + 滚轮 查看其它层</span><span>拖动蓝色光标定位视频</span><span>Delete 删除选中色块</span><span>Z 动 / X 坐 / C 站 / V 躺：从当前播放位置向后切换姿势</span><span>Ctrl + Z 撤销</span><span>Ctrl + Shift + Z 恢复</span><span>点击轴名或右侧类型切换；点击色块可编辑。左右键和空格固定控制视频。</span></div>}
   <main ref={comparisonRef} tabIndex={comparisonOpen?-1:undefined} role={comparisonOpen?"dialog":undefined} aria-modal={comparisonOpen?true:undefined} aria-label={comparisonOpen?"时间轴对照查看":undefined} className={"editor-grid"+(comparisonOpen?" comparison-view":"")} inert={timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||prepareOpen||settingsOpen}>
   {comparisonOpen&&comparison&&project&&<header className="comparison-heading"><div><h2>时间轴对照 · {trackName(project,comparison.track)}</h2><p title={[comparison.name,comparison.alignment,...comparison.warnings].join(' · ')}>{comparison.name} · {comparison.alignment}{comparison.warnings.length>0?' · '+comparison.warnings.join(' '):''}</p></div><button className="secondary" onClick={()=>{pausePlayback();setTimelineImportOpen(true);}}>更换时间轴</button><button className="icon-button" aria-label="进度快捷键设置" onClick={()=>{pausePlayback();setSettingsOpen(true);}}><Settings size={16}/></button><button className="secondary" onClick={closeComparison}><X size={16}/>关闭查看</button></header>}
   {project&&!sessionEntered?<section className="session-start-screen"><Film size={34}/><h2>{clearedPreviewId===project.id?'本机预览已清理':restoreOnReady.current===project.id?'正在载入项目':'预览尚未就绪'}</h2><p>{clearedPreviewId===project.id?'项目和标注草稿仍在。需要继续这个项目时，再主动准备预览；也可以从右侧新建项目选择新素材。':restoreOnReady.current===project.id?(preparation.status?.detail||'正在检查已有播放素材。'):'需要先准备视频、封面和悬停图片，才能进入标注工作台。'}</p><button className="primary" onClick={openPreparation}>{clearedPreviewId===project.id?'重新准备此项目预览':'查看素材准备'}<ArrowRight size={16}/></button></section>:<section className="left-column"><div className="preview-panel"><div className="panel-heading"><div><Film size={16}/><h2>视频预览</h2></div><span className="muted-text">{activeVideo?`${project!.videos.findIndex(v=>v.id===videoId)+1} / ${project!.videos.length} · ${activeVideo.name}`:'等待选择素材'}</span></div>
@@ -612,7 +630,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   </div>
   {project?<Timeline comparison={comparisonOpen?comparison:null} project={playbackProject!} currentTime={time} activeTrack={activeTrack} trackRevealVersion={trackRevealVersion} selectedId={selectedId} anchors={comparisonOpen?[]:anchors} selectedRange={comparisonOpen?null:selectedRange} anchorControls={comparisonOpen?undefined:anchorControls} onRangeDismiss={dismissTimelineRange} onSeek={seek} onScrubStart={beginScrub} onScrubEnd={endScrub} onTrackSelect={selectTrack} onSegmentSelect={selectSegment}/>:<div className="empty-timeline"><div className="panel-heading"><div><Layers3 size={16}/><h2>标注时间线</h2></div><span>导入视频后开始标注</span></div>{TRACKS.map((t,i)=><div className={'placeholder-track '+t} key={t}><span><i/>{names[t]}</span><div><span>{['室内 / 室外','动 / 坐 / 站 / 躺','单点切换 / 区间叠加','瞬时 / 持续 · 支持重叠'][i]}</span></div></div>)}</div>}
   </section>}
-  <aside className="workspace-sidebar" inert={comparisonOpen}>{workspaceTools}{sessionEntered&&project&&<section className="annotation-panel"><div className="panel-heading"><div><span className="heading-mark"/><h2>标注面板</h2></div><div className="panel-heading-actions"><span className="small-badge">{count} 条</span><button className="icon-button" aria-label="查看标注编辑历史" title="查看标注编辑历史" onClick={()=>setAuditOpen(true)}><History size={15}/></button></div></div><div className="track-tabs" role="tablist" aria-label="标注轨道">{projectTracks(project).map(t=><button key={t} role="tab" aria-selected={activeTrack===t} className={activeTrack===t?'active '+(t.startsWith('custom_')?'custom':t):''} onClick={()=>selectTrack(t)}><i/>{trackName(project,t)}</button>)}<button className="add-custom-track" aria-label="添加自定义时间轴" title="添加自定义时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setCustomTrackOpen(true);}}><Plus size={14}/>添加</button></div>
+  <aside className="workspace-sidebar" inert={comparisonOpen}>{workspaceTools}{sessionEntered&&project&&<section className="annotation-panel"><div className="panel-heading"><div><span className="heading-mark"/><h2>标注面板</h2></div><div className="panel-heading-actions"><span className="small-badge">{count} 条</span>{customTrack(project,activeTrack)&&<button className="icon-button delete-custom-track-button" aria-label="删除当前自定义时间轴" title="删除当前自定义时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setDeleteCustomError('');setDeleteCustomTrack(customTrack(project,activeTrack)??null);}}><Trash2 size={15}/></button>}<button className="icon-button" aria-label="查看标注编辑历史" title="查看标注编辑历史" onClick={()=>setAuditOpen(true)}><History size={15}/></button></div></div><div className="track-tabs" role="tablist" aria-label="标注轨道">{projectTracks(project).map(t=><button key={t} role="tab" aria-selected={activeTrack===t} className={activeTrack===t?'active '+(t.startsWith('custom_')?'custom':t):''} onClick={()=>selectTrack(t)}><i/>{trackName(project,t)}</button>)}<button className="add-custom-track" aria-label="添加自定义时间轴" title="添加自定义时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setCustomTrackOpen(true);}}><Plus size={14}/>添加</button></div>
    <div className="annotation-content"><div className="section-caption"><span>{trackName(project,activeTrack)}标注</span><span className="accent-text">{eventTrack?'可重叠事件':activeTrack==='category'?'可留空 · 可重叠':activeTrack.startsWith('custom_')?'可留空 · 互斥状态':'全覆盖 · 互斥状态'}</span></div><div className="cursor-card"><span>当前时间</span><strong>{formatTime(time)}</strong>{project&&<div className="cursor-progress"><i style={{width:`${100*time/project.duration_ms}%`}}/></div>}</div>
     {selectedRange&&<div className="selected-range-card"><span>选中区间</span><strong>{formatTime(selectedRange.start_ms)} → {formatTime(selectedRange.end_ms)}</strong><button className="text-button" onClick={cancelRange}>取消选区</button></div>}
     {!eventTrack?<>

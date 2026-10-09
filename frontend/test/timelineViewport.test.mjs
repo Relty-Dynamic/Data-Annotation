@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_WINDOW_MS, MIN_WINDOW_MS, timelineWindow, scaleTimelineWindow, visibleTimelineTicks } from '../src/timelineViewport.ts';
+import { DEFAULT_WINDOW_MS, MIN_WINDOW_MS, timelineWheelAction, timelineWindow, scaleTimelineWindow, visibleTimelineTicks } from '../src/timelineViewport.ts';
 
 const HOUR = DEFAULT_WINDOW_MS;
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-6, `${actual} != ${expected}`);
+
+test('wheel over an annotation strip browses time while Alt reaches overlapping layers', () => {
+  assert.equal(timelineWheelAction(false, false, true, false), 'pan');
+  assert.equal(timelineWheelAction(false, false, true, true), 'pan');
+  assert.equal(timelineWheelAction(false, true, true, true), 'layers');
+  assert.equal(timelineWheelAction(false, true, true, false), 'pan');
+  assert.equal(timelineWheelAction(false, false, false, false), 'native');
+  assert.equal(timelineWheelAction(true, false, true, true), 'zoom');
+});
 
 test('initial scale is one hour or the entire short project; zoom has a five-minute floor', () => {
   assert.equal(timelineWindow(8 * HOUR), HOUR);

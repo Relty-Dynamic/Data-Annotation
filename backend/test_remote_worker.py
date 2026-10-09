@@ -318,6 +318,23 @@ class RemoteWorkerTests(unittest.TestCase):
         reopened, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
         self.assertEqual(reopened[axis][0]['label'], '敲门')
 
+    def test_writeback_removes_retired_custom_track_file(self):
+        project = self.project()
+        axis = 'custom_' + 'c' * 32
+        project['custom_tracks'] = [{'id': axis, 'name': '观察', 'mode': 'event', 'labels': []}]
+        project['annotations'][axis] = []
+        first = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(first.status_code, 200, first.text)
+        path = self.nas / 'timeline' / filename_for_axis(axis)
+        original = path.read_bytes()
+        project['_external_hashes'] = first.json()['project']['_external_hashes']
+        project['custom_tracks'] = []
+        project['annotations'].pop(axis)
+        second = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertFalse(path.exists())
+        self.assertEqual((self.nas / '.annotation-backups' / second.json()['result']['save_id'] / path.name).read_bytes(), original)
+
     def test_writeback_replays_committed_save_after_lost_response_and_restart(self):
         project = self.project()
         with patch.object(self.worker, '_writeback_response', side_effect=ConnectionResetError('response lost')):

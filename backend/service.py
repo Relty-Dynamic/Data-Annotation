@@ -1364,6 +1364,24 @@ class ProjectService:
             self.save(project)
             return self.public(project)
 
+    def delete_custom_track(self, ident: str, track_id: str, expected_revision: int) -> dict:
+        with self.lock:
+            project = self.load(ident)
+            if project["revision"] != expected_revision:
+                raise HTTPException(409, "项目已在其他窗口更新，请重新打开后删除时间轴。")
+            tracks = validate_custom_tracks(project.get("custom_tracks", []))
+            if track_id not in {track["id"] for track in tracks}:
+                raise HTTPException(404, "找不到这条自定义时间轴。")
+            project["custom_tracks"] = [track for track in tracks if track["id"] != track_id]
+            project["annotations"].pop(track_id, None)
+            # Retain the last external hash until writeback verifies and removes
+            # the old JSON. This protects a concurrent NAS edit from deletion.
+            project["revision"] += 1
+            project["updated_at"] = now()
+            project["draft_dirty"] = True
+            self.save(project)
+            return self.public(project)
+
     def edit_history(self, ident: str, *, limit: int = 200) -> list[dict]:
         self.load(ident)
         with self.connection() as con:
@@ -1540,7 +1558,9 @@ class ProjectService:
                 raise HTTPException(409, "原目录 JSON 已被其他程序修改。为保护外部结果，本次没有写回；本机草稿保留，可下载 JSON。")
             destination = source / "timeline"
             target_expected = expected if self.external_directory(source) == destination else {axis: None for axis in documents}
-            temporary, backups, replaced = {}, {}, []
+            retired = [axis for axis, value in target_expected.items()
+                       if axis.startswith("custom_") and axis not in documents and value is not None]
+            temporary, backups, replaced, removed = {}, {}, [], []
             backup_dir = source / ".annotation-backups" / save_id
             try:
                 destination.mkdir(exist_ok=True)
@@ -1559,6 +1579,11 @@ class ProjectService:
                         handle.write(documents[axis])
                         handle.flush()
                         os.fsync(handle.fileno())
+                for axis in retired:
+                    filename = filename_for_axis(axis)
+                    backup = backup_dir / filename
+                    shutil.copy2(destination / filename, backup)
+                    backups[axis] = backup
                 if self.current_external_hashes(source) != expected:
                     raise HTTPException(409, "准备写回时发现原目录 JSON 有变化，已停止写回。")
                 for axis in documents:
@@ -1570,10 +1595,26 @@ class ProjectService:
                         raise OSError("target changed during writeback")
                     os.replace(temporary[axis], target)
                     replaced.append(axis)
+                for axis in retired:
+                    target = destination / filename_for_axis(axis)
+                    if digest(target.read_bytes()) != target_expected[axis]:
+                        raise OSError("retired axis changed during writeback")
+                    target.unlink()
+                    removed.append(axis)
                 if self.current_external_hashes(source) != {axis: digest(payload) for axis, payload in documents.items()}:
                     raise OSError("writeback read verification failed")
             except (OSError, HTTPException) as exc:
                 rollback_failed = []
+                for axis in reversed(removed):
+                    filename = filename_for_axis(axis)
+                    target = destination / filename
+                    try:
+                        if target.exists():
+                            rollback_failed.append(filename)
+                            continue
+                        shutil.copy2(backups[axis], target)
+                    except OSError:
+                        rollback_failed.append(filename)
                 for axis in reversed(replaced):
                     filename = filename_for_axis(axis)
                     target = destination / filename

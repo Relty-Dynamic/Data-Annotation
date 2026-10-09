@@ -220,7 +220,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 if not auth.allowed(user, project_id):
                     return JSONResponse(status_code=403, content={"detail": "未获分配此项目。"})
                 suffix = path[len("/api/projects/" + project_id):] if path.startswith("/api/projects/") else ""
-                if suffix in {"/name", "/preview-cache/clear", "/assignment"} or suffix.startswith("/sources/") or (path.startswith("/api/projects/") and request.method == "DELETE"):
+                if suffix in {"/name", "/preview-cache/clear", "/assignment"} or suffix.startswith("/sources/") or (suffix == "" and path.startswith("/api/projects/") and request.method == "DELETE"):
                     admin_only = True
             if admin_only and user["role"] != "admin":
                 return JSONResponse(status_code=403, content={"detail": "此操作仅管理员可执行。"})
@@ -469,6 +469,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.post("/api/projects/{project_id}/custom-tracks")
     def add_custom_track(project_id: str, body: CustomTrackRequest):
         return service.add_custom_track(project_id, body.name, body.mode, body.labels, body.expected_revision)
+
+    @app.delete("/api/projects/{project_id}/custom-tracks/{track_id}")
+    def delete_custom_track(project_id: str, track_id: str, body: DeleteProjectRequest):
+        return service.delete_custom_track(project_id, track_id, body.expected_revision)
 
     @app.get("/api/projects/{project_id}/history")
     def edit_history(project_id: str):

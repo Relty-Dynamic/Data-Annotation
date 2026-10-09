@@ -117,6 +117,11 @@ class AccountAccessTests(unittest.TestCase):
                                 headers={"X-CSRF-Token": csrf})
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertEqual(saved.json()["annotations"][axis][0]["created_by"], self.annotator["id"])
+        removed = self.client.request("DELETE", f"{path}/{axis}",
+                                      json={"confirmed": True, "expected_revision": saved.json()["revision"]},
+                                      headers={"X-CSRF-Token": csrf})
+        self.assertEqual(removed.status_code, 200, removed.text)
+        self.assertNotIn(axis, removed.json()["annotations"])
 
     def test_admin_controls_accounts_and_assignments(self):
         csrf = self.login("admin", "correct horse battery staple")

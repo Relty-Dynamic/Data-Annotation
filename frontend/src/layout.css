@@ -506,6 +506,8 @@ html, body, #root { background: var(--bg); }
 .annotation-panel .track-tabs button { flex: 0 0 auto; min-width: 55px; padding-inline: 9px; white-space: nowrap; }
 .annotation-panel .track-tabs .add-custom-track { border: 1px dashed #537a7c; border-radius: 5px; color: #a9d4d1; }
 .annotation-panel .track-tabs .custom i { background: #6dbbb9; }
+.annotation-panel .delete-custom-track-button { color: #d6a09a; }
+.annotation-panel .delete-custom-track-button:hover:not(:disabled) { color: #ffd1c9; background: #4b2b31; }
 .state-buttons.custom button { min-width: 0; }
 .custom-track-dialog { width: min(440px, calc(100vw - 32px)); border: 1px solid #3a5861; border-radius: 12px; padding: 20px; background: #192631; color: #e4eff1; box-shadow: 0 20px 70px #0009; }
 .custom-track-dialog::backdrop { background: #050c14bc; }
@@ -515,6 +517,9 @@ html, body, #root { background: var(--bg); }
 .custom-track-dialog label { display: flex; flex-direction: column; gap: 7px; }
 .custom-track-dialog textarea { width: 100%; resize: vertical; border: 1px solid #435563; border-radius: 6px; padding: 10px; background: #111a23; color: #e4eff1; font: inherit; }
 .custom-track-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.delete-custom-track-dialog[open] { display: flex; flex-direction: column; gap: 15px; }
+.delete-custom-track-dialog .import-error { padding: 9px 11px; border: 1px solid #825251; border-radius: 6px; background: #39272a; color: #f0bcb4; }
+.delete-custom-track-confirm { padding: 8px 14px; border: 1px solid #bd6e68; border-radius: 6px; background: #a54b4b; color: #fff5f1; }
 .cursor-card { border-color: #395361; background: linear-gradient(120deg, #1a303b, #15242e); }
 .cursor-card > span { color: #aac1ca; }
 .cursor-card strong { color: #d1f0e9; }
