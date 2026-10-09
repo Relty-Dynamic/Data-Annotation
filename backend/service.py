@@ -646,6 +646,9 @@ class ProjectService:
                 resolved.append(path)
         except OSError:
             raise HTTPException(422, "无法读取所选原视频，请检查磁盘或共享目录。")
+        if not source_writeback:
+            if self.source_overlap(resolved):
+                raise HTTPException(409, "所选 NAS 视频已在平台项目中，请打开已有项目；无法重复创建独立草稿。")
         parents = {path.parent for path in resolved}
         source_dir = next(iter(parents)) if source_writeback and len(parents) == 1 else None
         project = self.create(resolved, "", source_dir)
@@ -658,6 +661,14 @@ class ProjectService:
         self.attach_source_caches(project)
         self.save(project)
         return self.public(project)
+
+    def source_overlap(self, paths: list[Path], except_id: str | None = None) -> bool:
+        selected = {os.path.normcase(str(path)) for path in paths}
+        with self.connection() as con:
+            existing = [json.loads(row[0]) for row in con.execute("SELECT document FROM projects")]
+        return any(project["id"] != except_id and selected.intersection(
+            os.path.normcase(source["path"]) for source in project.get("_sources", {}).values())
+            for project in existing)
 
     def relink_sources(self, ident: str, raw_path: str, expected_revision: int) -> dict:
         self.sessions.invalidate(ident, preserve_ready=True)
@@ -688,6 +699,8 @@ class ProjectService:
                 previous = self.load(ident)
                 if previous["revision"] != expected_revision:
                     raise HTTPException(409, "项目已在其他窗口更新，请重新打开后关联原目录。")
+                if self.source_overlap(list(found.values()), except_id=ident):
+                    raise HTTPException(409, "原目录视频已属于其他项目，不能重复关联。")
                 project = copy.deepcopy(previous)
                 cleanups = list(project.get("_relink_cleanup", []))
                 relinked = 0
@@ -795,6 +808,14 @@ class ProjectService:
             with self.sessions._condition:
                 self._clearing_playback.discard(ident)
         return {"cleared": ident, "playback_generation": self._playback_generations[ident]}
+
+    def clear_submitted_server_cache(self, ident: str, expected_revision: int, save_id: str) -> dict:
+        with self.lock:
+            project = self.load(ident)
+            if (project["revision"] != expected_revision or project.get("draft_dirty")
+                    or (project.get("last_writeback") or {}).get("save_id") != save_id):
+                raise HTTPException(409, "项目在提交后已有变化，未清理 Ubuntu 播放缓存。")
+            return self.clear_local_previews(ident, expected_revision)
 
     def tool(self, name: str) -> Path | None:
         explicit = os.getenv(name.upper() + "_PATH")
@@ -1058,6 +1079,8 @@ class ProjectService:
                 additions.append(path)
             if not additions:
                 return {"project": self.public(previous), "added_count": 0, "skipped_names": skipped}
+            if self.source_overlap(additions, except_id=ident):
+                raise HTTPException(409, "补导入的视频已属于其他项目，不能由两个标注员同时编辑。")
             if len(previous["videos"]) + len(additions) > 1000:
                 raise HTTPException(422, "补导入后单个项目不能超过 1000 个视频。")
             all_paths = [Path(previous["_sources"][video["id"]]["path"]) for video in previous["videos"]] + additions
@@ -1255,7 +1278,9 @@ class ProjectService:
                 row = con.execute("SELECT document FROM projects WHERE source_key=? ORDER BY updated_at DESC LIMIT 1", (source_key,)).fetchone()
             previous = json.loads(row[0]) if row else None
             if previous and allowed_project_ids is not None and previous["id"] not in allowed_project_ids:
-                raise HTTPException(403, "该采集目录已有项目，请管理员将项目分配给你。")
+                raise HTTPException(403, "该采集目录已由其他标注员领取。")
+            if self.source_overlap(paths, previous["id"] if previous else None):
+                raise HTTPException(409, "目录内的视频已有其他平台项目，未创建重复标注项目。")
             if previous and previous.get("_deleting"):
                 raise HTTPException(409, "项目正在删除，请先完成清理。")
             if previous and previous.get("_supplemented"):
@@ -1280,8 +1305,9 @@ class ProjectService:
                         previous["warnings"] = preserved_alignment_warnings
                 self.save(previous)
                 return self.public(previous)
-            if name is not None:
-                fresh.update(name=name, _custom_name=True)
+            # For directory imports, the selected folder is the default project name.
+            # Keep the marker so a later storage migration does not replace it with a date.
+            fresh.update(name=name if name is not None else validate_project_name(path.name), _custom_name=True)
             fresh["annotations"] = imported or empty_annotations()
             fresh["custom_tracks"] = imported_tracks
             fresh["_external_hashes"] = hashes
@@ -1535,9 +1561,11 @@ class ProjectService:
             if self.source_stamp(Path(value["path"])) != value["stamp"]:
                 raise HTTPException(409, "原视频已更改，停止写回以避免错误时间基准。")
 
-    def writeback(self, ident: str) -> dict:
+    def writeback(self, ident: str, *, expected_revision: int | None = None) -> dict:
         with self.lock:
             project = self.load(ident)
+            if expected_revision is not None and project["revision"] != expected_revision:
+                raise HTTPException(409, "项目已在其他窗口更新，请重新打开并核对后再提交。")
             if not project["source_dir"]:
                 raise HTTPException(400, "项目尚未关联统一的原采集目录，请导出时间轴 JSON 后自行保存。")
             if self.remote and self.remote.map_path(project['source_dir']) is not None:

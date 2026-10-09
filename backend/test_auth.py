@@ -133,6 +133,17 @@ class AccountAccessTests(unittest.TestCase):
         self.assertEqual(assigned.status_code, 200, assigned.text)
         self.assertEqual(self.auth.assignment(project_id), self.annotator["id"])
 
+    def test_editing_presence_names_other_user_and_expires(self):
+        other = self.auth.create_user("second", "第二位", "correct horse battery staple")
+        project_id = self.project["id"]
+        self.assertTrue(self.auth.claim(project_id, self.annotator["id"]))
+        self.assertFalse(self.auth.claim(project_id, other["id"]))
+        self.assertEqual(self.auth.enter_editing(project_id, self.annotator["id"], "a" * 36), [])
+        others = self.auth.enter_editing(project_id, self.admin["id"], "b" * 36)
+        self.assertEqual([item["display_name"] for item in others], ["张标注"])
+        self.auth.leave_editing(project_id, self.annotator["id"], "a" * 36)
+        self.assertEqual(self.auth.enter_editing(project_id, self.admin["id"], "b" * 36), [])
+
     def test_password_change_revokes_session_and_lockout_persists(self):
         csrf = self.login("worker", "another long safe password")
         changed = self.client.post("/api/auth/password", json={"current_password": "another long safe password", "password": "replacement safe password"}, headers={"X-CSRF-Token": csrf})

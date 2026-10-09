@@ -56,6 +56,9 @@ function mountPreparation(responses, complete = false) {
       onProgress(1, 1);
     }};
     if (name === './preparationErrors') return {preparationFailureMessage: (_, detail) => detail};
+    if (name === './browserVideoCache') return {forgetBrowserVideoUrls() {}, prepareBrowserVideos() {
+      throw new Error('This polling test does not request a browser video download');
+    }};
     throw new Error('Unexpected hook import: ' + name);
   }, module, module.exports);
   const render = () => {

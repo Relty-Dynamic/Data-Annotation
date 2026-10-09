@@ -60,6 +60,10 @@ class AuthStore:
                 CREATE TABLE IF NOT EXISTS assignments (
                     project_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id)
                 );
+                CREATE TABLE IF NOT EXISTS editing_sessions (
+                    project_id TEXT NOT NULL, tab_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                    touched_at INTEGER NOT NULL, PRIMARY KEY(project_id, tab_id)
+                );
             """)
         if os.name != "nt":
             os.chmod(self.path, 0o600)
@@ -187,6 +191,16 @@ class AuthStore:
                 raise HTTPException(422, "请选择有效的标注账号。")
             con.execute("INSERT INTO assignments VALUES (?,?) ON CONFLICT(project_id) DO UPDATE SET user_id=excluded.user_id", (project_id, user_id))
 
+    def claim(self, project_id: str, user_id: str) -> bool:
+        """Give an unclaimed project to its first annotator without replacing an owner."""
+        with self.connection() as con:
+            row = con.execute("SELECT role,active FROM users WHERE id=?", (user_id,)).fetchone()
+            if not row or row["role"] != "annotator" or not row["active"]:
+                raise HTTPException(422, "请选择有效的标注账号。")
+            con.execute("INSERT INTO assignments VALUES (?,?) ON CONFLICT(project_id) DO NOTHING", (project_id, user_id))
+            owner = con.execute("SELECT user_id FROM assignments WHERE project_id=?", (project_id,)).fetchone()
+            return owner is not None and owner[0] == user_id
+
     def assignment(self, project_id: str) -> str | None:
         with self.connection() as con:
             row = con.execute("SELECT user_id FROM assignments WHERE project_id=?", (project_id,)).fetchone()
@@ -200,6 +214,20 @@ class AuthStore:
             return None
         with self.connection() as con:
             return {row[0] for row in con.execute("SELECT project_id FROM assignments WHERE user_id=?", (user["id"],))}
+
+    def enter_editing(self, project_id: str, user_id: str, tab_id: str) -> list[dict]:
+        current = int(time.time())
+        with self.connection() as con:
+            con.execute("DELETE FROM editing_sessions WHERE touched_at<?", (current - 45,))
+            con.execute("INSERT INTO editing_sessions VALUES (?,?,?,?) ON CONFLICT(project_id,tab_id) DO UPDATE SET user_id=excluded.user_id,touched_at=excluded.touched_at",
+                        (project_id, tab_id, user_id, current))
+            rows = con.execute("SELECT DISTINCT u.id,u.display_name,u.role FROM editing_sessions e JOIN users u ON u.id=e.user_id WHERE e.project_id=? AND e.user_id!=? AND u.active=1",
+                               (project_id, user_id)).fetchall()
+            return [{"id": row[0], "display_name": row[1], "role": row[2]} for row in rows]
+
+    def leave_editing(self, project_id: str, user_id: str, tab_id: str) -> None:
+        with self.connection() as con:
+            con.execute("DELETE FROM editing_sessions WHERE project_id=? AND tab_id=? AND user_id=?", (project_id, tab_id, user_id))
 
 
 def main():

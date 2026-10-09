@@ -107,5 +107,63 @@ class SourceBrowserTests(unittest.TestCase):
                 self.assertEqual(client.get(f'/api/projects/{project["id"]}').status_code, 403)
                 self.assertEqual(client.post("/api/projects/open", json={"path": str(source)}, headers=other_csrf).status_code, 403)
                 selected = client.post("/api/projects/files", json={"paths": [str(video)]}, headers=other_csrf)
-                self.assertEqual(selected.status_code, 200, selected.text)
-                self.assertIsNone(selected.json()["source_dir"])
+                self.assertEqual(selected.status_code, 422, selected.text)
+
+    def test_unassigned_existing_directory_can_be_claimed_by_first_annotator(self):
+        source = self.nas / "采集"
+        source.mkdir()
+        (source / "A09999_20260917120000_0000.avi").write_bytes(b"fixture video")
+        auth = AuthStore(self.root)
+        auth.create_user("admin", "管理员", "correct horse battery staple", "admin")
+        first = auth.create_user("first", "第一位", "correct horse battery staple", "annotator")
+        auth.create_user("second", "第二位", "correct horse battery staple", "annotator")
+        with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40"}), patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
+            app = create_app(self.root, source_root=self.nas)
+            with TestClient(app, base_url="https://10.20.30.40") as client:
+                admin = client.post("/api/auth/login", json={"username": "admin", "password": "correct horse battery staple"})
+                opened = client.post("/api/projects/open", json={"path": str(source)}, headers={"X-CSRF-Token": admin.json()["csrf"]})
+                self.assertEqual(opened.status_code, 200, opened.text)
+                project_id = opened.json()["id"]
+                self.assertIsNone(auth.assignment(project_id))
+                worker = client.post("/api/auth/login", json={"username": "first", "password": "correct horse battery staple"})
+                claimed = client.post("/api/projects/open", json={"path": str(source)}, headers={"X-CSRF-Token": worker.json()["csrf"]})
+                self.assertEqual(claimed.status_code, 200, claimed.text)
+                self.assertEqual(claimed.json()["id"], project_id)
+                self.assertEqual(auth.assignment(project_id), first["id"])
+                other = client.post("/api/auth/login", json={"username": "second", "password": "correct horse battery staple"})
+                self.assertEqual(client.post("/api/projects/open", json={"path": str(source)}, headers={"X-CSRF-Token": other.json()["csrf"]}).status_code, 403)
+
+    def test_claimed_video_cannot_be_imported_again_through_directory(self):
+        source = self.nas / "采集"
+        source.mkdir()
+        video = source / "A09999_20260917120000_0000.avi"
+        video.write_bytes(b"fixture video")
+        auth = AuthStore(self.root)
+        auth.create_user("admin", "管理员", "correct horse battery staple", "admin")
+        first = auth.create_user("first", "第一位", "correct horse battery staple", "annotator")
+        auth.create_user("second", "第二位", "correct horse battery staple", "annotator")
+        with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40"}), patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
+            legacy = ProjectService(self.root).open_files([str(video)], source_writeback=False)
+            auth.claim(legacy["id"], first["id"])
+            app = create_app(self.root, source_root=self.nas)
+            with TestClient(app, base_url="https://10.20.30.40") as client:
+                second = client.post("/api/auth/login", json={"username": "second", "password": "correct horse battery staple"})
+                opened = client.post("/api/projects/open", json={"path": str(source)}, headers={"X-CSRF-Token": second.json()["csrf"]})
+                self.assertEqual(opened.status_code, 409, opened.text)
+
+    def test_supplement_cannot_take_video_from_another_project(self):
+        first = self.nas / "采集甲"
+        second = self.nas / "采集乙"
+        first.mkdir()
+        second.mkdir()
+        (first / "A09999_20260917120000_0000.avi").write_bytes(b"first")
+        other_video = second / "A09999_20260917130000_0000.avi"
+        other_video.write_bytes(b"second")
+        with patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
+            service = ProjectService(self.root)
+            owned = service.open_path(str(first))
+            service.open_path(str(second))
+            with self.assertRaises(HTTPException) as conflict:
+                service.supplement(owned["id"], [other_video], owned["revision"])
+            self.assertEqual(conflict.exception.status_code, 409)
+            self.assertEqual(len(service.load(owned["id"])["videos"]), 1)

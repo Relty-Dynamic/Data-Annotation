@@ -89,6 +89,49 @@ previous_image="$(docker inspect datamark-intranet-web-1 --format '{{.Config.Ima
 [[ "$previous_image" == datamark-web:* ]] || die 'running web image is unexpected'
 previous_tag="${previous_image#datamark-web:}"
 
+# Keep the persistent Compose image tag in step with the tested release. A
+# later manual restart otherwise reads the old tag from intranet.env and can
+# silently bring back an older web image.
+persist_image_tag() {
+    python3 - "$env_file" "$1" <<'PY'
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tag = sys.argv[2]
+original = path.read_text(encoding="utf-8")
+updated = []
+found = False
+for line in original.splitlines(keepends=True):
+    if line.startswith("DATAMARK_WEB_IMAGE_TAG="):
+        if not found:
+            updated.append(f"DATAMARK_WEB_IMAGE_TAG={tag}\n")
+            found = True
+    else:
+        updated.append(line)
+if not found:
+    if updated and not updated[-1].endswith("\n"):
+        updated.append("\n")
+    updated.append(f"DATAMARK_WEB_IMAGE_TAG={tag}\n")
+fd, temporary = tempfile.mkstemp(prefix=".intranet.env.", dir=path.parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.writelines(updated)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
 release="$deploy_home/releases/$commit"
 if [[ -e "$release" ]]; then
     [[ -d "$release" && -f "$release/.release-commit" ]] || die 'release path is incomplete'
@@ -127,11 +170,16 @@ for name in ("annotations.sqlite3", "auth.sqlite3"):
 PY
 
 needs_rollback=0
+env_tag_updated=0
 on_exit() {
     status=$?
     trap - EXIT
     if ((status != 0 && needs_rollback)); then
         printf 'DataMark deployment failed; restoring prior containers from %s\n' "$previous" >&2
+        if ((env_tag_updated)); then
+            persist_image_tag "$previous_tag" ||
+                printf 'DataMark rollback could not restore the persistent image tag\n' >&2
+        fi
         if ! DATAMARK_WEB_IMAGE_TAG="$previous_tag" docker compose \
             --env-file "$env_file" "${previous_compose_files[@]}" \
             up -d --no-build --wait --wait-timeout 180; then
@@ -166,6 +214,8 @@ if [[ -n "$public_api_origin" ]]; then
     ((public_ok)) || die 'public HTTPS gateway did not pass its health check'
 fi
 
+persist_image_tag "$commit"
+env_tag_updated=1
 next_link="$deploy_home/.current-$commit-$$"
 ln -s -- "$release" "$next_link"
 mv -Tf -- "$next_link" "$current"

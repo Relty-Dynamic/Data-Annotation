@@ -687,7 +687,7 @@ class SourceCacheTests(unittest.TestCase):
         self.assertEqual(self.service.preview_spec(after, 'v0001').key, old.key)
         self.assert_reusable(self.service, after)
 
-    def test_relink_keeps_uploaded_copy_while_another_saved_project_still_references_it(self):
+    def test_relink_keeps_uploaded_copy_and_rejects_second_project_using_same_original(self):
         source = self.video()
         before, copy_path, old = self.legacy_project(source, uploaded=True)
         other = self.service.create([copy_path], 'shared-legacy-source', None)
@@ -699,10 +699,12 @@ class SourceCacheTests(unittest.TestCase):
         self.assertTrue(old.target.exists())
         other_path, _ = self.service.media_source(self.service.load(other['id']), 'v0001')
         self.assertEqual(other_path.read_bytes(), source.read_bytes())
-        self.service.relink_sources(other['id'], str(source.parent), other['revision'])
+        with self.assertRaises(HTTPException) as duplicate:
+            self.service.relink_sources(other['id'], str(source.parent), other['revision'])
+        self.assertEqual(duplicate.exception.status_code, 409)
         retried = self.service.relink_sources(before['id'], str(source.parent), before['revision'])
-        self.assertEqual(retried['removed_copies'], 1)
-        self.assertFalse(copy_path.exists())
+        self.assertEqual(retried['removed_copies'], 0)
+        self.assertTrue(copy_path.exists())
         self.assert_reusable(self.service, self.service.load(before['id']))
 
     def test_relinked_fpv_exports_restore_fresh_import_with_new_mtimes_and_reordered_video_ids(self):

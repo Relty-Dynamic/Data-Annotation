@@ -375,6 +375,12 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 @media (max-height: 620px) { .workspace-tools .project-rename-button { height: 27px; } }
 
 .rename-project-dialog .project-name-error { color: #f1b0a6; font-size: 12px; line-height: 1.6; }
+.submit-project-dialog { width: min(480px, calc(100vw - 32px)); padding: 24px; border: 1px solid #485a63; border-radius: 12px; background: #1b252c; color: #e0edee; box-shadow: 0 24px 80px #0008; }
+.submit-project-dialog h2 { margin: 0 0 12px; font-size: 19px; }
+.submit-project-dialog p { color: #b8cbd5; line-height: 1.7; }
+.submit-project-dialog label { display: flex; align-items: center; gap: 9px; margin: 14px 0; }
+.submit-project-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.editing-presence-warning { padding: 8px 16px; color: #ffe3a1; background: #4b3719; border-bottom: 1px solid #886729; font-size: 12px; }
 
 /* Keep the empty workspace actionable and show all four placeholder tracks. */
 .empty-timeline { height: 148px; max-height: 148px; overflow: hidden; }

@@ -66,6 +66,8 @@ export interface Project {
   annotations: Record<string, Segment[]>;
   revision: number;
   updated_at: string;
+  draft_dirty?: boolean;
+  last_writeback?: {save_id: string; saved_at: string} | null;
 }
 
 export const TRACK_LABELS: Record<FixedTrack, string> = {

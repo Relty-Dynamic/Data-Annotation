@@ -25,6 +25,8 @@ from .native_picker import choose_local_paths, native_picker_available
 from .source_browser import browse_sources
 from .media_response import CancellableFileResponse
 from .auth import AuthStore
+from .local_reports import LocalReportStore
+from .cloud_mirror import CloudMirror
 
 
 class OpenRequest(BaseModel):
@@ -52,6 +54,27 @@ class PickFilesRequest(BaseModel):
 class DraftRequest(BaseModel):
     annotations: dict
     expected_revision: int = Field(ge=0, strict=True)
+
+
+class WritebackRequest(BaseModel):
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class SubmittedCacheRequest(WritebackRequest):
+    save_id: str = Field(min_length=1, max_length=128)
+
+
+class EditingSessionRequest(BaseModel):
+    tab_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+
+
+class LocalReportRequest(BaseModel):
+    snapshot: dict
+    documents: dict[str, str] | None = None
+
+
+class CloudSyncRequest(BaseModel):
+    final: bool = False
 
 
 class CustomTrackRequest(BaseModel):
@@ -110,7 +133,8 @@ class ChangePasswordRequest(PasswordRequest):
     current_password: str
 
 
-def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = True, source_root: Path | None = None) -> FastAPI:
+def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = True,
+               source_root: Path | None = None) -> FastAPI:
     root = root or Path(os.getenv("DATAMARK_ROOT", str(Path(__file__).resolve().parents[1])))
     configured_origin = os.getenv("DATAMARK_ORIGIN", "").strip()
     public_origin = os.getenv("DATAMARK_PUBLIC_ORIGIN", "").strip()
@@ -161,6 +185,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         allowed_origins.add(public_origin)
     service = ProjectService(root)
     auth = AuthStore(root)
+    local_reports = LocalReportStore(auth, nas_source_root if configured_origin else None)
+    cloud_mirror = CloudMirror() if not configured_origin else None
     lifetime = BrowserLifetime(on_idle)
 
     def require_nas_source(value: str) -> None:
@@ -195,6 +221,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     app = FastAPI(title="日常行为视频标注台", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.service = service
     app.state.auth = auth
+    app.state.local_reports = local_reports
+    app.state.cloud_mirror = cloud_mirror
     app.state.browser_lifetime = lifetime
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
@@ -268,6 +296,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.get("/api/health")
     def health():
         capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "remote-nas-processing", "account-login"]
+        if cloud_mirror and cloud_mirror.origin:
+            capabilities.append("cloud-local-sync")
         if native_picker_available() and not configured_origin:
             capabilities.append("native-file-picker")
         if configured_origin:
@@ -294,10 +324,33 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.post("/api/auth/logout")
     def logout(request: Request):
         auth.logout(request.cookies.get("datamark_session"))
+        if cloud_mirror and auth_required:
+            cloud_mirror.disconnect(request.state.user["id"])
         response = JSONResponse({"ok": True})
         response.delete_cookie("datamark_session", path="/")
         response.delete_cookie("datamark_csrf", path="/")
         return response
+
+    @app.get("/api/cloud/status")
+    def cloud_status(request: Request):
+        if not cloud_mirror:
+            raise HTTPException(404, "Ubuntu 服务不需要连接公网账号。")
+        return cloud_mirror.status(request.state.user["id"])
+
+    @app.post("/api/cloud/connect")
+    def cloud_connect(body: LoginRequest, request: Request):
+        if not cloud_mirror:
+            raise HTTPException(404, "Ubuntu 服务不需要连接公网账号。")
+        return cloud_mirror.connect(request.state.user["id"], body.username, body.password)
+
+    @app.post("/api/cloud/projects/{project_id}/sync")
+    def cloud_sync(project_id: str, body: CloudSyncRequest, request: Request):
+        if not cloud_mirror:
+            raise HTTPException(404, "Ubuntu 服务不需要同步本机项目。")
+        project = service.load(project_id)
+        if not auth.allowed(request.state.user, project_id):
+            raise HTTPException(403, "未获分配此本机项目。")
+        return cloud_mirror.sync(request.state.user["id"], project, service, final=body.final)
 
     @app.post("/api/auth/password")
     def change_password(body: ChangePasswordRequest, request: Request):
@@ -336,6 +389,17 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         auth.assign(project_id, body.user_id)
         return {"user_id": body.user_id}
 
+    @app.post("/api/projects/{project_id}/editing")
+    def enter_editing(project_id: str, body: EditingSessionRequest, request: Request):
+        service.load(project_id)
+        return {"others": auth.enter_editing(project_id, request.state.user["id"], body.tab_id) if auth_required else []}
+
+    @app.delete("/api/projects/{project_id}/editing")
+    def leave_editing(project_id: str, body: EditingSessionRequest, request: Request):
+        if auth_required:
+            auth.leave_editing(project_id, request.state.user["id"], body.tab_id)
+        return {"ok": True}
+
     @app.post("/api/browser/reserve")
     def reserve_browser():
         if not lifetime.reserve():
@@ -373,6 +437,19 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         allowed = auth.allowed_project_ids(request.state.user)
         return result if allowed is None else [project for project in result if project["id"] in allowed]
 
+    @app.put("/api/local-reports")
+    def put_local_report(body: LocalReportRequest, request: Request):
+        return local_reports.put(request.state.user, body.snapshot, body.documents)
+
+    @app.get("/api/local-reports")
+    def list_local_reports(request: Request):
+        return local_reports.list(request.state.user)
+
+    @app.get("/api/local-reports/{project_id}/export")
+    def export_local_report(project_id: str, request: Request):
+        return Response(local_reports.documents(request.state.user, project_id), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{project_id}-timelines.zip"'})
+
     @app.post("/api/projects/open")
     def open_project(body: OpenRequest, request: Request):
         require_nas_source(body.path)
@@ -380,12 +457,16 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         user = request.state.user if auth_required else None
         with service.lock:
             if path.is_file():
+                if configured_origin:
+                    raise HTTPException(422, "NAS 标注请领取完整采集目录，保证统一写回 timeline 文件夹。")
                 project = service.open_files([str(path)], name=body.name, source_writeback=not configured_origin)
             else:
                 allowed = auth.allowed_project_ids(user) if user and user["role"] == "annotator" else None
+                if allowed is not None:
+                    allowed.update(item["id"] for item in service.projects() if auth.assignment(item["id"]) is None)
                 project = service.open_path(body.path, name=body.name, allowed_project_ids=allowed)
-            if user and user["role"] == "annotator" and auth.assignment(project["id"]) != user["id"]:
-                auth.assign(project["id"], user["id"])
+            if user and user["role"] == "annotator" and not auth.claim(project["id"], user["id"]):
+                raise HTTPException(403, "该素材已由其他标注员领取。")
             return project
 
     @app.get("/api/sources/browse")
@@ -402,13 +483,15 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/projects/files")
     def open_files(body: FilesRequest, request: Request):
+        if configured_origin:
+            raise HTTPException(422, "NAS 标注请领取完整采集目录，保证统一写回 timeline 文件夹。")
         for value in body.paths:
             require_nas_source(value)
         user = request.state.user if auth_required else None
         with service.lock:
             project = service.open_files(body.paths, name=body.name, source_writeback=not configured_origin)
-            if user and user["role"] == "annotator":
-                auth.assign(project["id"], user["id"])
+            if user and user["role"] == "annotator" and not auth.claim(project["id"], user["id"]):
+                raise HTTPException(403, "该素材已由其他标注员领取。")
             return project
 
     @app.post("/api/projects/upload")
@@ -483,8 +566,14 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         return Response(service.export_zip(project_id), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="timelines-{project_id[:32]}.zip"'})
 
     @app.post("/api/projects/{project_id}/writeback")
-    def writeback(project_id: str):
-        return service.writeback(project_id)
+    def writeback(project_id: str, body: WritebackRequest | None = None):
+        if body is None:
+            return service.writeback(project_id)
+        return service.writeback(project_id, expected_revision=body.expected_revision)
+
+    @app.post("/api/projects/{project_id}/submitted-cache/clear")
+    def clear_submitted_cache(project_id: str, body: SubmittedCacheRequest):
+        return service.clear_submitted_server_cache(project_id, body.expected_revision, body.save_id)
 
     @app.get("/api/projects/{project_id}/prepare")
     def preparation_status(project_id: str):

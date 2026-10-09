@@ -10,7 +10,7 @@ export function usePreloadNext(nextUrl: string | undefined) {
     const timer = setTimeout(() => {
       video = document.createElement('video');
       video.preload = 'metadata';
-      if (separateApiOrigin) video.crossOrigin = 'use-credentials';
+      if (separateApiOrigin && !nextUrl.startsWith('blob:')) video.crossOrigin = 'use-credentials';
       video.muted = true;
       video.playsInline = true;
       video.disableRemotePlayback = true;

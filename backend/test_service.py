@@ -611,6 +611,23 @@ class PersistenceTests(unittest.TestCase):
             self.service.writeback(project["id"])
         self.assertEqual(context.exception.status_code, 409)
 
+    def test_submission_checks_revision_before_writeback_and_save_before_cache_cleanup(self):
+        project = self.annotated_project()
+        with self.assertRaises(HTTPException) as stale:
+            self.service.writeback(project["id"], expected_revision=project["revision"] - 1)
+        self.assertEqual(stale.exception.status_code, 409)
+        self.assertFalse((self.source / "timeline").exists())
+        with self.assertRaises(HTTPException) as premature:
+            self.service.clear_submitted_server_cache(project["id"], project["revision"], "not-saved")
+        self.assertEqual(premature.exception.status_code, 409)
+        saved = self.service.writeback(project["id"], expected_revision=project["revision"])
+        with self.assertRaises(HTTPException) as wrong:
+            self.service.clear_submitted_server_cache(project["id"], project["revision"], "wrong-save")
+        self.assertEqual(wrong.exception.status_code, 409)
+        result = self.service.clear_submitted_server_cache(project["id"], project["revision"], saved["save_id"])
+        self.assertEqual(result["cleared"], project["id"])
+        self.assertTrue((self.source / "timeline" / FILENAMES["scene"]).is_file())
+
     def test_point_and_interval_export_roundtrip(self):
         project = self.annotated_project()
         annotations = project["annotations"]

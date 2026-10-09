@@ -4,8 +4,9 @@ import type { PreparationStatus } from './PreparePanel';
 import { forgetSessionAssets, isSessionManifest, prepareSessionAssets } from './sessionAssets';
 import type { SessionManifest } from './sessionAssets';
 import { preparationFailureMessage } from './preparationErrors';
+import {forgetBrowserVideoUrls, prepareBrowserVideos} from './browserVideoCache';
 
-export function usePreparation(projectId: string | undefined, cacheGeneration = 0) {
+export function usePreparation(projectId: string | undefined, cacheGeneration = 0, downloadVideos = false) {
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
   const retryFailed = useRef(false);
@@ -26,6 +27,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
       if (!stopped) setResult({id, status, manifest, error: ''});
     };
     const read = async (start: boolean): Promise<void> => {
+      let localCacheFailed = false;
       try {
         if (start) setStartingId(id);
         const response = await authFetch('/api/projects/' + id + (start ? '/session/prepare' : '/session'), {
@@ -64,6 +66,14 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
             publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
               detail: '正在载入预览图片 ' + ready + ' / ' + total});
           });
+          if (downloadVideos) {
+            try {
+              await prepareBrowserVideos(id, manifest, abort.signal, (ready, total) => {
+                publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
+                  detail: '正在下载精简视频到此电脑 ' + ready + ' / ' + total});
+              });
+            } catch (error) { localCacheFailed = true; throw error; }
+          }
           if (!stopped) publish({...status, state: 'ready', checking: false, stage: 'ready', progress: 100}, manifest);
           return;
         }
@@ -73,7 +83,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
       } catch (error) {
         if (stopped) return;
         setResult(previous => ({id, status: previous.id === id ? previous.status : null, manifest: null, error: (error as Error).message}));
-        timer = setTimeout(() => void read(start), retryDelay);
+        if (!localCacheFailed) timer = setTimeout(() => void read(start), retryDelay);
         retryDelay = Math.min(retryDelay * 2, 30000);
       } finally {
         if (start && !stopped) setStartingId(previous => previous === id ? '' : previous);
@@ -87,8 +97,9 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
       clearTimeout(timer);
       abort.abort();
       forgetSessionAssets(id);
+      forgetBrowserVideoUrls(id);
     };
-  }, [projectId, cacheGeneration, epoch]);
+  }, [projectId, cacheGeneration, epoch, downloadVideos]);
 
   const refresh = useCallback(() => {
     retryFailed.current = false;

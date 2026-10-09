@@ -46,6 +46,22 @@ class ProjectNamingTests(unittest.TestCase):
         self.assertEqual(project["name"], "0914-20-32")
         self.assertNotIn("_custom_name", project)
 
+    def test_directory_default_uses_selected_folder_and_survives_migration(self):
+        project = self.service.open_path(str(self.source), name="　 ")
+        self.assertEqual(project["name"], self.source.name)
+        self.assertTrue(self.service.load(project["id"])["_custom_name"])
+        stored = self.service.load(project["id"])
+        stored["_storage_version"] = 0
+        self.service.save(stored)
+        with patch.object(self.service, "attach_source_caches"), patch.object(self.service, "cleanup_relinked_sources"):
+            self.service.migrate_legacy_projects()
+        self.assertEqual(self.service.load(project["id"])["name"], self.source.name)
+
+    def test_fpv_directory_default_uses_selected_fpv_folder(self):
+        project = self.service.open_path(str(self.fpv))
+        self.assertEqual(project["name"], "FPV")
+        self.assertEqual(self.service.open_path(str(self.source))["name"], "FPV")
+
     def test_directory_and_files_import_trim_explicit_names_and_default_blank(self):
         directory = self.service.open_path(str(self.source), name="  命名目录项目  ")
         self.assertEqual(directory["name"], "命名目录项目")
