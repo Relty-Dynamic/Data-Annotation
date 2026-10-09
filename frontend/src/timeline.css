@@ -22,6 +22,7 @@
 .tl-overlap-viewport:focus-visible { outline: 2px solid #9bd8e7; outline-offset: -2px; }
 .tl-state-viewport { min-width: 0; overflow: hidden; }
 .tl-overlays { position: absolute; top: 0; bottom: 0; overflow: hidden; pointer-events: none; z-index: 9; }
+.tl-overlays-content { position: absolute; inset: 0; }
 .tl-row { display: grid; grid-template-columns: var(--tl-gutter) minmax(0, 1fr); }
 .tl-gutter { position: sticky; left: 0; z-index: 8; display: flex; align-items: center; gap: 7px; padding: 0 10px; background: #182330; border: 0; border-right: 1px solid var(--tl-border); color: #a8b7c9; font: inherit; font-size: 12px; text-align: left; white-space: nowrap; }
 .tl-count { margin-left: auto; font-size: 10px; font-family: Consolas, monospace; color: #71849a; }

@@ -98,6 +98,8 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   const [windowMs, setWindowMs] = useState(DEFAULT_WINDOW_MS);
   const rootRef = useRef<HTMLElement>(null);
   const tracksViewportRef = useRef<HTMLDivElement>(null);
+  const overlaysRef = useRef<HTMLDivElement>(null);
+  const overlayContentRef = useRef<HTMLDivElement>(null);
   const overlapViewportRefs = useRef<Partial<Record<Track, HTMLDivElement | null>>>({});
   const pendingViewRef = useRef<{ projectId: string; windowMs: number; scrollLeft: number } | null>(null);
   const wheelHandlerRef = useRef<(event: WheelEvent) => void>(() => {});
@@ -295,6 +297,9 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   function syncHorizontalScroll(left: number) {
     const viewport = tracksViewportRef.current;
     if (viewport && Math.abs(viewport.scrollLeft - left) > 0.5) viewport.scrollLeft = left;
+    // Move and clip overlays together before React paints the new scroll state.
+    if (overlaysRef.current) overlaysRef.current.style.left = `${GUTTER + left}px`;
+    if (overlayContentRef.current) overlayContentRef.current.style.transform = `translateX(${-left}px)`;
     setScrollX(left);
     setHoverTime(null);
   }
@@ -538,7 +543,13 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
               if (value !== undefined) { event.preventDefault(); event.stopPropagation(); onSeek(Math.max(0, Math.min(value, project.duration_ms))); }
             }}>
               {renderGaps('ruler')}
-              {ticks.map((tick) => <span key={tick} className={`tl-tick${tick === 0 ? ' tl-tick-first' : ''}`} style={{ left: `${tick / duration * 100}%` }}><span>{tickStep < 1000 ? formatTime(tick).slice(6) : rulerTime(tick)}</span></span>)}
+              {ticks.map((tick) => {
+                const screenX = tick / duration * axisWidth - scrollX;
+                const labelVisible = tick === 0 ? scrollX < 1 : screenX >= 30 && screenX <= visibleAxisWidth - 30;
+                return <span key={tick} className={`tl-tick${tick === 0 ? ' tl-tick-first' : ''}`} style={{ left: `${tick / duration * 100}%` }}>
+                  {labelVisible && <span>{tickStep < 1000 ? formatTime(tick).slice(6) : rulerTime(tick)}</span>}
+                </span>;
+              })}
             </div>
           </div>
           <div className="tl-row tl-video-row">
@@ -546,8 +557,8 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
             <div className="tl-video-strip tl-seek-surface" onPointerDown={(event) => beginScrub(event)} {...scrubPointerHandlers}>
               {project.videos.map((video, index) => <div key={video.id} className={`tl-video-clip${joinsNext(index - 1) ? ' tl-video-joined-left' : ''}${joinsNext(index) ? ' tl-video-joined-right' : ''}`} style={positionStyle(video.start_ms, joinsNext(index) ? project.videos[index + 1].start_ms : video.end_ms, duration)}>
                 {video.thumbnail_url && <div className="tl-video-image" style={{ backgroundImage: `url(${JSON.stringify(sessionAssetUrl(project.id, video.thumbnail_url))})` }} />}
-                <span className="tl-video-index">{String(index + 1).padStart(2, '0')}</span>
-                <span className="tl-video-name">{video.name}</span>
+                <span className="tl-video-index" style={{ left: Math.max(6, scrollX - video.start_ms / duration * axisWidth + 6) }}>{String(index + 1).padStart(2, '0')}</span>
+                <span className="tl-video-name" style={{ left: Math.max(7, scrollX - video.start_ms / duration * axisWidth + 7) }}>{video.name}</span>
               </div>)}
               {renderGaps('video')}
               {!project.videos.length && <span className="tl-empty-track">导入视频后显示连续预览轴</span>}
@@ -602,20 +613,22 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
               })}
             </div>
           </div>
-          <div className="tl-overlays" style={{ left: GUTTER + scrollX, width: visibleAxisWidth }}>
+          <div className="tl-overlays" ref={overlaysRef} style={{ left: GUTTER + scrollX, width: visibleAxisWidth }}>
+          <div className="tl-overlays-content" ref={overlayContentRef} style={{ transform: `translateX(${-scrollX}px)` }}>
           {rangeEnd > rangeStart && <div className="tl-range-overlay" aria-label={`锚点选区 ${formatTime(rangeStart)} 到 ${formatTime(rangeEnd)}`} style={{
-            left: rangeStart / duration * axisWidth - scrollX,
+            left: rangeStart / duration * axisWidth,
             width: (rangeEnd - rangeStart) / duration * axisWidth,
           }} />}
-          {visibleAnchors.map((time, index) => <div key={`${index}-${time}`} className="tl-anchor" style={{ left: time / duration * axisWidth - scrollX }} aria-label={`锚点 ${index + 1}，${formatTime(time)}`}>
+          {visibleAnchors.map((time, index) => <div key={`${index}-${time}`} className="tl-anchor" style={{ left: time / duration * axisWidth }} aria-label={`锚点 ${index + 1}，${formatTime(time)}`}>
             <span className={`tl-anchor-label${time / duration * axisWidth - scrollX > visibleAxisWidth - 30 ? ' tl-anchor-label-left' : ''}`}>{index + 1}</span>
           </div>)}
-          {hoverTime && <div className={`tl-hover-line${hoverTime.snapped ? ' tl-hover-line-snapped' : ''}`} style={{ left: hoverTime.time / duration * axisWidth - scrollX }} aria-hidden="true" />}
-          <div className="tl-playhead" style={{ left: progress * axisWidth - scrollX }}>
+          {hoverTime && <div className={`tl-hover-line${hoverTime.snapped ? ' tl-hover-line-snapped' : ''}`} style={{ left: hoverTime.time / duration * axisWidth }} aria-hidden="true" />}
+          <div className="tl-playhead" style={{ left: progress * axisWidth }}>
             <div className="tl-playhead-handle" role="slider" tabIndex={0} aria-label="拖动播放光标" aria-valuemin={0} aria-valuemax={project.duration_ms} aria-valuenow={Math.round(displayedTime)} aria-valuetext={formatTime(displayedTime)} onPointerDown={(event) => beginScrub(event, true)} {...scrubPointerHandlers} onKeyDown={(event) => {
               const target = event.key === 'Home' ? 0 : event.key === 'End' ? project.duration_ms : null;
               if (target !== null) { event.preventDefault(); event.stopPropagation(); if (!scrubRef.current) onSeek(target); }
             }} />
+          </div>
           </div>
           </div>
         </div>
