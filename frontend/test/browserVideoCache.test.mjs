@@ -55,6 +55,11 @@ test('downloads both complete previews, reuses them, then clears only the chosen
     assert.equal(requests, 2);
     assert.deepEqual(progress.at(-1), [2, 2]);
     assert.match(browserVideoUrl('project_1', manifest.videos[0].url), /^blob:/);
+    const refreshed = {version: manifest.version, videos: [{...manifest.videos[0],
+      url: manifest.videos[0].url + '?expires=next', fast_url: manifest.videos[0].fast_url + '?expires=next'}]};
+    await prepareBrowserVideos('project_1', refreshed, new AbortController().signal, () => {});
+    assert.equal(requests, 2, 'renewing object links must reuse the same downloaded video');
+    assert.match(browserVideoUrl('project_1', refreshed.videos[0].url), /^blob:/);
     forgetBrowserVideoUrls('project_1');
     await prepareBrowserVideos('project_1', manifest, new AbortController().signal, () => {});
     assert.equal(requests, 2, 'persistent files should be reused without another network read');

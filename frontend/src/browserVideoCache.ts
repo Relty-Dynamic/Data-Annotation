@@ -1,11 +1,11 @@
-import {authFetch} from './auth.ts';
 import {apiUrl} from './apiOrigin.ts';
 import type {SessionManifest} from './sessionAssets.ts';
+import {fetchAsset} from './objectAsset.ts';
 
 // Origin-private files live on the annotator's computer. Only disposable
 // compact MP4 previews are stored here; annotations remain on the platform.
 const ROOT = 'datamark-playback-v1';
-const live = new Map<string, {version: string; urls: Map<string, string>}>();
+const live = new Map<string, {version: string; urls: Map<string, string>; objects: Map<string, string>}>();
 
 function validPart(value: string): boolean {
   return /^[a-zA-Z0-9_-]{1,80}$/.test(value);
@@ -57,7 +57,10 @@ export async function prepareBrowserVideos(
     {name: `${video.id}-fast.mp4`, url: video.fast_url},
   ]);
   const previous = live.get(projectId);
-  if (previous?.version === manifest.version && previous.urls.size === files.length) {
+  if (previous?.version === manifest.version && previous.objects.size === files.length) {
+    live.set(projectId, {version: manifest.version,
+      objects: previous.objects,
+      urls: new Map(files.map(item => [item.url, previous.objects.get(item.name)!]))});
     onProgress(files.length, files.length);
     return;
   }
@@ -77,7 +80,7 @@ export async function prepareBrowserVideos(
         if (!(error instanceof DOMException && error.name === 'NotFoundError')) throw error;
       }
       if (!file) {
-        const response = await authFetch(item.url, {cache: 'no-store', signal});
+        const response = await fetchAsset(item.url, {cache: 'no-store', signal});
         if (!response.ok || !response.body || !response.headers.get('content-type')?.startsWith('video/mp4')) {
           throw new Error('精简视频下载失败，请检查网络后重试。');
         }
@@ -106,7 +109,8 @@ export async function prepareBrowserVideos(
     }
     signal.throwIfAborted();
     forgetBrowserVideoUrls(projectId);
-    live.set(projectId, {version: manifest.version, urls});
+    live.set(projectId, {version: manifest.version, urls,
+      objects: new Map(files.map(item => [item.name, urls.get(item.url)!]))});
   } catch (error) {
     for (const url of urls.values()) URL.revokeObjectURL(url);
     throw error;

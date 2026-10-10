@@ -46,7 +46,10 @@ def reuse_running(args):
     current = health()
     if not current or current.get("application") != "datamark" or current.get("stopping") or "account-login" not in current.get("capabilities", []):
         return False
-    if sys.platform == "darwin" and "native-file-picker" not in current.get("capabilities", []):
+    mock_mode = os.getenv("DATAMARK_S3_MOCK", "").strip() == "1"
+    if ("s3-mock" in current.get("capabilities", [])) != mock_mode:
+        return False
+    if sys.platform == "darwin" and not mock_mode and "native-file-picker" not in current.get("capabilities", []):
         return False
     if not args.no_browser and current.get("browser_lifetime") and not reserve_browser():
         return False
@@ -85,19 +88,24 @@ def main():
         "PYTHONNOUSERSITE": "1", "PIP_REQUIRE_VIRTUALENV": "1",
         "PIP_CACHE_DIR": str(ROOT / ".cache" / "pip"),
         "NPM_CONFIG_CACHE": str(ROOT / ".cache" / "npm"),
-        "TEMP": str(ROOT / ".tmp"), "TMP": str(ROOT / ".tmp"),
+        "TEMP": str(ROOT / ".tmp"), "TMP": str(ROOT / ".tmp"), "TMPDIR": str(ROOT / ".tmp"),
     }
     for folder in (".tmp", ".cache/pip", ".cache/npm", ".local/logs"):
         (ROOT / folder).mkdir(parents=True, exist_ok=True)
     os.environ.update(settings)
     os.chdir(ROOT)
     from backend.auth import AuthStore
-    if not AuthStore(ROOT).has_admin():
-        raise RuntimeError("尚未创建管理员账号。请先在项目虚拟环境运行 python -m backend.auth，然后重启平台。")
+    mock_mode = os.getenv("DATAMARK_S3_MOCK", "").strip() == "1"
+    auth_root = ROOT / ".local" / "s3-mock-app" if mock_mode else ROOT
+    if not AuthStore(auth_root).has_admin():
+        command = "python -m backend.auth --root .local/s3-mock-app" if mock_mode else "python -m backend.auth"
+        raise RuntimeError(f"尚未创建管理员账号。请先在项目虚拟环境运行 {command}，然后重启平台。")
     current = health()
     if current and current.get("application") == "datamark" and "account-login" not in current.get("capabilities", []):
         raise RuntimeError("端口 8765 仍由旧版无登录服务占用。请先关闭旧平台的所有网页，等待服务退出后重新启动。")
-    if sys.platform == "darwin" and current and current.get("application") == "datamark" and "native-file-picker" not in current.get("capabilities", []):
+    if current and current.get("application") == "datamark" and ("s3-mock" in current.get("capabilities", [])) != mock_mode:
+        raise RuntimeError("端口 8765 正在运行另一种模式。请先关闭旧平台的所有网页并等待服务退出。")
+    if sys.platform == "darwin" and not mock_mode and current and current.get("application") == "datamark" and "native-file-picker" not in current.get("capabilities", []):
         raise RuntimeError("端口 8765 仍由不支持 macOS 文件选择的旧服务占用。请先关闭旧平台的所有网页，等待服务退出后重新启动新版。")
     for name in ("stdout", "stderr"):
         if getattr(sys, name) is None:

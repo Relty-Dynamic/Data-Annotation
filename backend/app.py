@@ -27,6 +27,7 @@ from .media_response import CancellableFileResponse
 from .auth import AuthStore
 from .local_reports import LocalReportStore
 from .cloud_mirror import CloudMirror
+from .mock_s3 import MockProjectService, MockS3Catalog, MockS3Store
 
 
 class OpenRequest(BaseModel):
@@ -149,6 +150,12 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     configured_origin = os.getenv("DATAMARK_ORIGIN", "").strip()
     public_origin = os.getenv("DATAMARK_PUBLIC_ORIGIN", "").strip()
     public_api_origin = os.getenv("DATAMARK_PUBLIC_API_ORIGIN", "").strip()
+    mock_mode = os.getenv("DATAMARK_S3_MOCK", "").strip() == "1"
+    data_root = root / ".local" / "s3-mock-app" if mock_mode else root
+    mock_source = os.getenv("DATAMARK_S3_MOCK_SOURCE_DIR", "").strip()
+    mock_catalog = (MockS3Catalog(Path(mock_source).expanduser(),
+                                  os.getenv("DATAMARK_S3_MOCK_SOURCE_KEY", "").strip() or f"daily/{Path(mock_source).name}")
+                    if mock_mode and mock_source else None)
     nas_source_root = source_root or Path(os.getenv("DATAMARK_SOURCE_ROOT", "/mnt/nas/homes/datacollection"))
     allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
     allowed_origins: set[str] = set()
@@ -195,13 +202,16 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             raise ValueError("public frontend and API must use separate hostnames")
         allowed_hosts.append(api_host)
         allowed_origins.add(public_origin)
-    service = ProjectService(root)
-    auth = AuthStore(root)
-    local_reports = LocalReportStore(auth, nas_source_root if configured_origin else None)
-    cloud_mirror = CloudMirror() if not configured_origin else None
+    mock_s3 = MockS3Store(data_root) if mock_mode else None
+    service = MockProjectService(data_root, mock_s3) if mock_s3 else ProjectService(root)
+    auth = AuthStore(data_root)
+    local_reports = LocalReportStore(auth, nas_source_root if configured_origin and not mock_mode else None)
+    cloud_mirror = CloudMirror() if not configured_origin and not mock_mode else None
     lifetime = BrowserLifetime(on_idle)
 
     def require_nas_source(value: str) -> None:
+        if mock_mode:
+            raise HTTPException(404, "S3 mock 项目只接受测试视频上传。")
         if not configured_origin:
             return
         candidate = Path(value.strip().strip('"')).expanduser()
@@ -235,6 +245,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     app.state.auth = auth
     app.state.local_reports = local_reports
     app.state.cloud_mirror = cloud_mirror
+    app.state.mock_s3 = mock_s3
+    app.state.mock_catalog = mock_catalog
     app.state.browser_lifetime = lifetime
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
@@ -307,12 +319,18 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.get("/api/health")
     def health():
-        capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "remote-nas-processing", "account-login"]
+        capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "account-login"]
+        if mock_mode:
+            capabilities.append("s3-mock")
+            if mock_catalog:
+                capabilities.append("s3-mock-catalog")
+        else:
+            capabilities.append("remote-nas-processing")
         if cloud_mirror and cloud_mirror.origin:
             capabilities.append("cloud-local-sync")
-        if native_picker_available() and not configured_origin:
+        if native_picker_available() and not configured_origin and not mock_mode:
             capabilities.append("native-file-picker")
-        if configured_origin:
+        if configured_origin and not mock_mode:
             capabilities.append("nas-source-browser")
         return {"status": "ok", "application": "datamark", "browser_lifetime": bool(on_idle), "stopping": lifetime.stopping, "ffmpeg": bool(service.tool("ffmpeg")), "ffprobe": bool(service.tool("ffprobe")), "remote_processing": service.remote is not None, "capabilities": capabilities}
 
@@ -451,14 +469,20 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.put("/api/local-reports")
     def put_local_report(body: LocalReportRequest, request: Request):
+        if mock_mode:
+            raise HTTPException(404, "S3 mock 不连接 NAS 项目同步。")
         return local_reports.put(request.state.user, body.snapshot, body.documents)
 
     @app.get("/api/local-reports")
     def list_local_reports(request: Request):
+        if mock_mode:
+            raise HTTPException(404, "S3 mock 不连接 NAS 项目同步。")
         return local_reports.list(request.state.user)
 
     @app.get("/api/local-reports/{project_id}/export")
     def export_local_report(project_id: str, request: Request):
+        if mock_mode:
+            raise HTTPException(404, "S3 mock 不连接 NAS 项目同步。")
         return Response(local_reports.documents(request.state.user, project_id), media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{project_id}-timelines.zip"'})
 
@@ -483,18 +507,24 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.get("/api/sources/browse")
     def sources_browse(path: str | None = None, page: int = 0):
+        if mock_mode:
+            raise HTTPException(404, "S3 mock 不浏览 NAS。")
         if not configured_origin:
             raise HTTPException(404, "仅内网服务提供 NAS 目录浏览。")
         return browse_sources(nas_source_root, path, page)
 
     @app.post("/api/local-files/pick")
     def local_files(body: PickFilesRequest):
+        if mock_mode:
+            raise HTTPException(404, "S3 mock 不读取本机视频路径。")
         if configured_origin:
             raise HTTPException(503, "服务器模式不支持本机选择窗口，请填写服务器可访问的素材路径。")
         return {"paths": choose_local_paths(root, body.kind)}
 
     @app.post("/api/projects/files")
     def open_files(body: FilesRequest, request: Request):
+        if mock_mode:
+            raise HTTPException(404, "S3 mock 项目只接受测试视频上传。")
         if configured_origin:
             raise HTTPException(422, "NAS 标注请领取完整采集目录，保证统一写回 timeline 文件夹。")
         for value in body.paths:
@@ -505,6 +535,34 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             if user and user["role"] == "annotator" and not auth.claim(project["id"], user["id"]):
                 raise HTTPException(403, "该素材已由其他标注员领取。")
             return project
+
+    def open_mock_folder(folder: Path, name: str, request: Request, key: str | None = None) -> dict:
+        with service.lock:
+            user = getattr(request.state, "user", None)
+            allowed = auth.allowed_project_ids(user) if user and user["role"] == "annotator" else None
+            if allowed is not None:
+                allowed.update(item["id"] for item in service.projects() if auth.assignment(item["id"]) is None)
+            project = service.open_path(str(folder), name=name or None, allowed_project_ids=allowed)
+            stored = service.load(project["id"])
+            stored["_mock_s3"] = True
+            if key:
+                stored["_mock_s3_key"] = key
+            service.save(stored)
+            if user and user["role"] == "annotator" and not auth.claim(stored["id"], user["id"]):
+                raise HTTPException(403, "该项目已由其他标注员领取。")
+            return service.public(stored)
+
+    @app.get("/api/mock-s3/sources")
+    def browse_mock_sources(prefix: str = ""):
+        if not mock_catalog:
+            raise HTTPException(404, "未配置模拟项目文件夹。")
+        return mock_catalog.browse(prefix)
+
+    @app.post("/api/mock-s3/projects/open")
+    def open_mock_project(body: OpenRequest, request: Request):
+        if not mock_catalog:
+            raise HTTPException(404, "未配置模拟项目文件夹。")
+        return open_mock_folder(mock_catalog.project_directory(body.path), body.name or "", request, mock_catalog.prefix)
 
     @app.post("/api/projects/upload")
     def legacy_upload():
@@ -622,10 +680,25 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         return service.restore_skipped_videos(project_id, body.expected_revision)
 
     @app.get("/api/projects/{project_id}/session/manifest")
-    def session_manifest(project_id: str):
-        return service.sessions.manifest(project_id)
+    def session_manifest(project_id: str, request: Request):
+        manifest = service.sessions.manifest(project_id)
+        if mock_s3:
+            origin = f"{request.url.scheme}://{request.headers['host']}"
+            return mock_s3.media_manifest(service, manifest, origin)
+        return manifest
+
+    @app.api_route("/mock-objects/{key:path}", methods=["GET", "HEAD"])
+    def mock_object(key: str, expires: int, signature: str):
+        if not mock_s3:
+            raise HTTPException(404, "对象不存在。")
+        path = mock_s3.authorized_path(key, expires, signature)
+        media_type = "video/mp4" if path.suffix == ".mp4" else "image/jpeg" if path.suffix == ".jpg" else "application/json"
+        return CancellableFileResponse(path, media_type=media_type,
+                                       headers={"Cache-Control": "private, max-age=60", "Referrer-Policy": "no-referrer"})
 
     def session_file(project_id: str, version: str, video_id: str, kind: str, index: int | None = None):
+        if mock_s3:
+            raise HTTPException(404, "mock 播放素材只通过签名对象地址提供。")
         path = service.sessions.asset(project_id, kind, video_id, index, version=version)
         if path is None:
             raise HTTPException(409, "本机播放缓存尚未就绪，请重新打开素材准备面板。")
@@ -662,11 +735,15 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.api_route("/api/storyboards/{project_id}/{video_id}/sheets/{index}", methods=["GET", "HEAD"])
     def storyboard_sheet(project_id: str, video_id: str, index: int):
+        if mock_s3:
+            raise HTTPException(404, "mock 图片只通过签名对象地址提供。")
         return FileResponse(service.storyboard_sheet(project_id, video_id, index), media_type="image/jpeg",
                             headers={"Cache-Control": "private, max-age=3600"})
 
     @app.api_route("/api/media/{project_id}/{video_id}", methods=["GET", "HEAD"])
     def media(project_id: str, video_id: str, fast: bool = False):
+        if mock_s3:
+            raise HTTPException(404, "mock 播放素材只通过签名对象地址提供。")
         try:
             # Completed cache reads validate the source and ownership once.
             # Repeating a status lookup first adds another network round trip.
@@ -682,6 +759,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.api_route("/api/thumbnails/{project_id}/{video_id}", methods=["GET", "HEAD"])
     def thumbnail(project_id: str, video_id: str):
+        if mock_s3:
+            raise HTTPException(404, "mock 图片只通过签名对象地址提供。")
         return FileResponse(service.media(project_id, video_id, thumbnail=True), media_type="image/jpeg")
 
     @app.api_route("/api/{unknown_path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])

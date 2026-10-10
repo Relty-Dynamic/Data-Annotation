@@ -1,6 +1,6 @@
 import { isStoryboardManifest } from './storyboard.ts';
-import {authFetch} from './auth.ts';
 import {apiUrl} from './apiOrigin.ts';
+import {fetchAsset, validAssetUrl} from './objectAsset.ts';
 import type { StoryboardManifest } from './storyboard.ts';
 
 export interface SessionVideo {
@@ -11,7 +11,7 @@ export interface SessionVideo {
   storyboard: StoryboardManifest;
 }
 export interface SessionManifest { version: string; videos: SessionVideo[] }
-type AssetCache = {version: string; urls: Map<string, string>; manifests: Map<string, StoryboardManifest>; decoded: Map<string, HTMLImageElement>};
+type AssetCache = {version: string; urls: Map<string, string>; objects: string[]; manifests: Map<string, StoryboardManifest>; decoded: Map<string, HTMLImageElement>};
 const caches = new Map<string, AssetCache>();
 
 export function isSessionManifest(value: unknown): value is SessionManifest {
@@ -20,8 +20,8 @@ export function isSessionManifest(value: unknown): value is SessionManifest {
   if (typeof manifest.version !== 'string' || !manifest.version || !Array.isArray(manifest.videos) || !manifest.videos.length) return false;
   return new Set(manifest.videos.map(video => video?.id)).size === manifest.videos.length &&
     manifest.videos.every(video => video && typeof video.id === 'string' && video.id &&
-      [video.url, video.fast_url, video.thumbnail_url].every(url => typeof url === 'string' && url.startsWith('/api/session-')) &&
-      isStoryboardManifest(video.storyboard) && video.storyboard.sheets.every(url => url.startsWith('/api/session-')));
+      [video.url, video.fast_url, video.thumbnail_url].every(url => typeof url === 'string' && validAssetUrl(url)) &&
+      isStoryboardManifest(video.storyboard) && video.storyboard.sheets.every(url => validAssetUrl(url)));
 }
 
 export function forgetSessionAssets(projectId: string) {
@@ -53,7 +53,12 @@ export async function prepareSessionAssets(
 ): Promise<void> {
   const assets = [...new Set(manifest.videos.flatMap(video => [video.thumbnail_url, ...video.storyboard.sheets]))];
   const existing = caches.get(projectId);
-  if (existing?.version === manifest.version) {
+  if (existing?.version === manifest.version && existing.objects.length === assets.length) {
+    const urls = new Map(assets.map((url, index) => [url, existing.objects[index]]));
+    const manifests = new Map(manifest.videos.map(video => [video.id, {
+      ...video.storyboard, sheets: video.storyboard.sheets.map(url => urls.get(url)!),
+    }]));
+    caches.set(projectId, {...existing, urls, manifests});
     onProgress(assets.length, assets.length);
     return;
   }
@@ -66,7 +71,7 @@ export async function prepareSessionAssets(
     while (cursor < assets.length) {
       combined.throwIfAborted();
       const url = assets[cursor++];
-      const response = await authFetch(url, {cache: 'no-store', signal: AbortSignal.any([combined, AbortSignal.timeout(30000)])});
+      const response = await fetchAsset(url, {cache: 'no-store', signal: AbortSignal.any([combined, AbortSignal.timeout(30000)])});
       if (!response.ok) throw new Error('预览图片读取失败，请重试准备素材。');
       const blob = await response.blob();
       if (!blob.size || !blob.type.startsWith('image/')) throw new Error('预览图片数据不完整，请重试准备素材。');
@@ -86,7 +91,7 @@ export async function prepareSessionAssets(
       ...video.storyboard, sheets: video.storyboard.sheets.map(url => urls.get(url)!),
     }]));
     forgetSessionAssets(projectId);
-    caches.set(projectId, {version: manifest.version, urls, manifests, decoded: new Map()});
+    caches.set(projectId, {version: manifest.version, urls, objects: assets.map(url => urls.get(url)!), manifests, decoded: new Map()});
   } catch (error) {
     controller.abort();
     for (const url of urls.values()) URL.revokeObjectURL(url);

@@ -13,7 +13,7 @@ function coveredPercent(report:LocalReport, axis:string):number {
   return Math.min(100,Math.round(covered/duration*100));
 }
 
-export default function AdminPanel({projects,onClose}:{projects:Project[];onClose:()=>void}) {
+export default function AdminPanel({projects,mockMode=false,onClose}:{projects:Project[];mockMode?:boolean;onClose:()=>void}) {
   const [users,setUsers]=useState<ManagedUser[]>([]);
   const [localReports,setLocalReports]=useState<LocalReport[]>([]);
   const [assignments,setAssignments]=useState<Record<string,string>>({});
@@ -29,9 +29,11 @@ export default function AdminPanel({projects,onClose}:{projects:Project[];onClos
       return [project.id,(await result.json()).user_id??''] as const;
     }));
     setAssignments(Object.fromEntries(pairs));
-    const local=await authFetch('/api/local-reports');
-    if(!local.ok)throw new Error('读取本机项目总览失败');
-    setLocalReports(await local.json());
+    if(!mockMode){
+      const local=await authFetch('/api/local-reports');
+      if(!local.ok)throw new Error('读取本机项目总览失败');
+      setLocalReports(await local.json());
+    }
   }
   useEffect(()=>{void refresh().catch(cause=>setError(String(cause)));},[]);
   async function create(event:FormEvent) {
@@ -75,7 +77,7 @@ export default function AdminPanel({projects,onClose}:{projects:Project[];onClos
     </form>
     <h3>账号</h3><div className="admin-list">{users.map(user=><div key={user.id}><span>{user.display_name} · {user.username} · {user.role==='admin'?'管理员':'标注人'}</span><span className="admin-buttons"><button className="secondary" onClick={()=>setResetId(user.id)}>重置密码</button><button className="secondary" onClick={()=>void toggle(user)}>{user.active?'停用':'启用'}</button></span></div>)}</div>
     {resetId&&<form className="admin-reset" onSubmit={event=>void reset(event)}><strong>重置 {users.find(user=>user.id===resetId)?.display_name} 的密码</strong><input type="password" autoComplete="new-password" minLength={12} value={resetPassword} onChange={event=>setResetPassword(event.target.value)} required/><button type="button" className="secondary" onClick={()=>{setResetId('');setResetPassword('');}}>取消</button><button className="primary">保存</button></form>}
-    <h3>NAS 项目领取人</h3><div className="admin-list">{projects.map(project=><label key={project.id}><span>{project.name}</span><select value={assignments[project.id]??''} onChange={event=>void assign(project.id,event.target.value)}><option value="">未领取</option>{users.filter(user=>user.role==='annotator'&&user.active).map(user=><option key={user.id} value={user.id}>{user.display_name} · {user.username}</option>)}</select></label>)}</div>
-    <h3>标注员本机项目</h3><div className="admin-list">{localReports.length?localReports.map(report=><div key={report.id}><span>{report.name} · {report.owner_name} · 姿势覆盖 {coveredPercent(report,'posture')}% · 场景覆盖 {coveredPercent(report,'scene')}% · {Object.values(report.annotations).reduce((total,items)=>total+items.length,0)} 条标注 · {report.has_documents?'已写回 NAS':'标注中'}{report.nas_relative_path?` · NAS：homes/datacollection/${report.nas_relative_path}`:''} · 更新于 {report.updated_at}</span>{report.has_documents&&<button className="secondary" onClick={()=>void downloadReport(report)}>下载时间轴 ZIP</button>}</div>):<p>暂无已同步的本机项目。</p>}</div>
+    <h3>{mockMode?'模拟项目领取人':'NAS 项目领取人'}</h3><div className="admin-list">{projects.map(project=><label key={project.id}><span>{project.name}</span><select value={assignments[project.id]??''} onChange={event=>void assign(project.id,event.target.value)}><option value="">未领取</option>{users.filter(user=>user.role==='annotator'&&user.active).map(user=><option key={user.id} value={user.id}>{user.display_name} · {user.username}</option>)}</select></label>)}</div>
+    {!mockMode&&<><h3>标注员本机项目</h3><div className="admin-list">{localReports.length?localReports.map(report=><div key={report.id}><span>{report.name} · {report.owner_name} · 姿势覆盖 {coveredPercent(report,'posture')}% · 场景覆盖 {coveredPercent(report,'scene')}% · {Object.values(report.annotations).reduce((total,items)=>total+items.length,0)} 条标注 · {report.has_documents?'已写回 NAS':'标注中'}{report.nas_relative_path?` · NAS：homes/datacollection/${report.nas_relative_path}`:''} · 更新于 {report.updated_at}</span>{report.has_documents&&<button className="secondary" onClick={()=>void downloadReport(report)}>下载时间轴 ZIP</button>}</div>):<p>暂无已同步的本机项目。</p>}</div></>}
   </section></div>;
 }
