@@ -55,9 +55,9 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 每次新提交先在镜像构建中运行前端测试和构建，再在隔离容器中运行后端测试；失败时不触碰运行中的服务。通过后，`deploy/ci-deploy-intranet.sh` 从该提交创建独立发布目录、在线备份两个 SQLite 数据库、仅更新 DataMark 的 Compose 服务，并通过内网证书验证健康接口。健康检查失败会尝试恢复先前容器版本，`current` 链接仅在健康检查成功后切换；成功后也会把持久配置中的网页镜像标识更新为已验证的提交，避免后续重启恢复旧镜像。备份存放于 `backups/<提交>-<时间>/`，不会自动删除；数据库模式不兼容时须人工评估恢复，不能直接覆盖仍在写入的数据库。Jenkins 的测试通过和健康接口正常不等于真实项目的 NAS 写回验收；仍需用授权账号实际标注并读回全部时间轴文件。
 
-### Vercel 网页与 Ubuntu 公网接口（待启用）
+### Vercel 网页与 Ubuntu 公网接口
 
-公网网页只在 Vercel 托管构建后的 React 静态文件；账号、项目、SQLite 草稿、NAS 读取、预览生成和写回继续由 Ubuntu 提供。网页 `https://annotate.reltydynamic.com` 与接口 `https://api-annotate.reltydynamic.com:10443` 使用两个独立域名；视频和预览图片从 Ubuntu 接口域名直达浏览器，不经过 Vercel 转发。Cloudflare 只管理 DNS，这两个明确记录须为 DNS only。现有内网 HTTPS 入口与本机启动模式保留；公网入口须完成证书和真实外网登录验证后才能视为可用。
+公网网页只在 Vercel 托管构建后的 React 静态文件；账号、项目、SQLite 草稿、NAS 读取、预览生成和写回继续由 Ubuntu 提供。网页 `https://annotate.reltydynamic.com` 与接口 `https://api-annotate.reltydynamic.com:10443` 使用两个独立域名；视频和预览图片从 Ubuntu 接口域名直达浏览器，不经过 Vercel 转发。Cloudflare 只管理 DNS，这两个明确记录须为 DNS only。现有内网 HTTPS 入口与本机启动模式保留。公网入口已启用：2026-10-10 完成可信证书签发、外网 HTTPS 健康检查，用户已在正式域名登录并进入项目页；素材处理及 NAS 写回尚未完成真实业务验收。
 
 Vercel 项目的 Root Directory 为 `frontend`，框架为 Vite，构建命令 `npm run build`，输出目录 `dist`，并设置公开的构建变量 `VITE_DATAMARK_API_ORIGIN=https://api-annotate.reltydynamic.com:10443`。缺少该变量时 Vercel 构建会失败。登录会话 Cookie 仅发给 Ubuntu 接口域名，网页跨域请求明确携带凭据；页面安全令牌由登录响应或已登录状态接口返回。两个正式域名应同属 `reltydynamic.com`，以便继续使用严格同站 Cookie；默认 `*.vercel.app` 预览网址与接口不同站，不能用于已登录流程验收。若需要预览验收，先绑定同站的测试子域名，并将该测试域名配置为后端允许的页面来源。用户已确认使用 Vercel Pro。
 
