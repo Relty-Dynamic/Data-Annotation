@@ -73,7 +73,7 @@ class CloudMirror:
                 raise HTTPException(409, "请先连接公网标注账号，再同步本机项目。")
             client, _, csrf = session
             public = service.public(project)
-            snapshot = {key: public[key] for key in ("id", "name", "revision", "duration_ms", "custom_tracks", "annotations")}
+            snapshot = {key: public[key] for key in ("id", "name", "revision", "duration_ms", "fixed_tracks", "track_labels", "custom_tracks", "annotations")}
             snapshot["source_folder_name"] = Path(project["source_dir"]).name if project.get("source_dir") else public["name"]
             snapshot["videos"] = [{key: video.get(key) for key in ("id", "name", "start_ms", "end_ms", "duration_ms", "recording_start")}
                                   for video in public["videos"]]

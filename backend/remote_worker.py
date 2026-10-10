@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
-from .service import AXES, FILENAMES, VIDEO_EXTENSIONS, ProjectService, document_bytes, filename_for_axis, validate_annotations, validate_custom_tracks, validate_project_name
+from .service import AXES, FILENAMES, VIDEO_EXTENSIONS, ProjectService, document_bytes, filename_for_axis, fixed_tracks, track_labels, validate_annotations, validate_custom_tracks, validate_project_name
 from .session_cache import PROFILE
 from .nas_archive import NasArchiveCache, sha256
 
@@ -537,9 +537,11 @@ class Worker:
         if not isinstance(hashes, dict) or any(value is not None and not re.fullmatch('[0-9a-f]{64}', str(value)) for value in hashes.values()):
             raise HTTPException(422, 'Invalid writeback conflict hashes.')
         project['custom_tracks'] = validate_custom_tracks(project.get('custom_tracks', []))
+        project['fixed_tracks'] = fixed_tracks(project)
+        project['track_labels'] = track_labels(project)
         project['annotations'] = validate_annotations(project.get('annotations'), duration, final=True,
                                                        videos=videos, require_scene_coverage=False,
-                                                       custom_tracks=project['custom_tracks'])
+                                                       custom_tracks=project['custom_tracks'], enabled_fixed_tracks=project['fixed_tracks'], fixed_label_options=project['track_labels'])
         project.setdefault('gaps', [])
         project.setdefault('warnings', [])
         project.setdefault('updated_at', datetime.now().isoformat())

@@ -63,6 +63,8 @@ export interface Project {
   videos: Video[];
   skipped_videos?: Array<{id: string; name: string; start_ms: number; end_ms: number; reason: string}>;
   custom_tracks?: CustomTrack[];
+  fixed_tracks?: FixedTrack[];
+  track_labels?: Record<FixedTrack, string[]>;
   annotations: Record<string, Segment[]>;
   revision: number;
   updated_at: string;
@@ -78,7 +80,7 @@ export const TRACK_LABELS: Record<FixedTrack, string> = {
 };
 
 export const TRACKS: FixedTrack[] = ['scene', 'posture', 'category', 'habit'];
-export function projectTracks(project: Project): Track[] { return [...TRACKS, ...(project.custom_tracks??[]).map(track=>track.id)]; }
+export function projectTracks(project: Project): Track[] { return [...TRACKS.filter(track=>(project.fixed_tracks??TRACKS).includes(track)), ...(project.custom_tracks??[]).map(track=>track.id)]; }
 export function customTrack(project: Project, track: Track): CustomTrack | undefined { return project.custom_tracks?.find(item=>item.id===track); }
 export function trackName(project: Project, track: Track): string { return track.startsWith('custom_') ? customTrack(project,track)?.name??'自定义轴' : TRACK_LABELS[track as FixedTrack]; }
 export function isEventTrack(project: Project, track: Track): boolean { return track==='habit'||customTrack(project,track)?.mode==='event'; }
@@ -86,6 +88,13 @@ export function isExclusiveTrack(project: Project, track: Track): boolean { retu
 export const SCENE_LABELS = ['室内', '室外'];
 export const POSTURE_LABELS = ['动', '坐', '站', '躺'];
 export const CATEGORY_LABELS = ['专注', '活动', '用餐', '通勤', '社交', '放松', '休息', '其他'];
+export const DEFAULT_TRACK_LABELS: Record<FixedTrack,string[]> = {
+  scene: SCENE_LABELS, posture: POSTURE_LABELS, category: CATEGORY_LABELS, habit: [],
+};
+export function projectTrackLabels(project: Project, track: Track): string[] {
+  return track.startsWith('custom_') ? customTrack(project, track)?.labels ?? []
+    : project.track_labels?.[track as FixedTrack] ?? DEFAULT_TRACK_LABELS[track as FixedTrack];
+}
 
 export function formatTime(ms: number): string {
   const value = Math.max(0, Math.round(Number.isFinite(ms) ? ms : 0));

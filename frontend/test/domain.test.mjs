@@ -1,9 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { annotationsEqual, applyAnnotationRange, arrangeLanes, formatTime, isPointSegment, locateVideo, normalizeStateSeams, parseTime, projectTracks, switchState, trackName } from '../src/domain.ts';
+import { annotationsEqual, applyAnnotationRange, arrangeLanes, formatTime, isPointSegment, locateVideo, normalizeStateSeams, parseTime, projectTracks, projectTrackLabels, switchState, trackName } from '../src/domain.ts';
 
 const segment = (id, label, start_ms, end_ms) => ({ id, label, start_ms, end_ms });
 const compact = (segments) => segments.map(({ label, start_ms, end_ms }) => [label, start_ms, end_ms]);
+
+test('project label choices use saved labels and old projects keep defaults',()=>{
+  const axis='custom_'+'a'.repeat(32);
+  const project={track_labels:{scene:['办公室'],posture:['蹲'],category:[],habit:['喝水']},custom_tracks:[{id:axis,name:'活动',mode:'state',labels:['搬运']}]};
+  assert.deepEqual(projectTrackLabels(project,'scene'),['办公室']);
+  assert.deepEqual(projectTrackLabels(project,'posture'),['蹲']);
+  assert.deepEqual(projectTrackLabels(project,'category'),[]);
+  assert.deepEqual(projectTrackLabels(project,'habit'),['喝水']);
+  assert.deepEqual(projectTrackLabels(project,axis),['搬运']);
+  assert.deepEqual(projectTrackLabels({custom_tracks:[]},'posture'),['动','坐','站','躺']);
+});
 
 test('project custom axes appear by name and take part in draft comparison',()=>{
   const axis='custom_'+'a'.repeat(32);
@@ -15,6 +26,14 @@ test('project custom axes appear by name and take part in draft comparison',()=>
   assert.equal(annotationsEqual(first,second),false);
   const replaced=applyAnnotationRange([segment('old','安静',0,1000)],250,750,'嘈杂',[{start_ms:0,end_ms:1000}],axis,undefined,true);
   assert.deepEqual(compact(replaced),[['安静',0,250],['嘈杂',250,750],['安静',750,1000]]);
+});
+
+test('deleted fixed axes disappear from the timeline while custom axes remain',()=>{
+  const axis='custom_'+'a'.repeat(32);
+  const project={fixed_tracks:['posture','habit'],custom_tracks:[{id:axis,name:'环境',mode:'event',labels:[]}]};
+  assert.deepEqual(projectTracks(project),['posture','habit',axis]);
+  assert.deepEqual(projectTracks({...project,fixed_tracks:[]}),[axis]);
+  assert.deepEqual(projectTracks({...project,fixed_tracks:[],custom_tracks:[]}),[]);
 });
 
 test('state switch splits the current interval and preserves later state changes', () => {

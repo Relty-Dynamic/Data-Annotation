@@ -82,6 +82,22 @@ class LocalReportTests(unittest.TestCase):
             store.documents(admin, snapshot["id"])
         self.assertEqual(readback.exception.status_code, 409)
 
+    def test_local_project_with_removed_posture_writes_empty_json_to_nas(self):
+        auth = AuthStore(self.root)
+        owner = auth.create_user("owner", "本机标注员", "correct horse battery staple")
+        store = LocalReportStore(auth, self.nas_root)
+        project = complete_project(self.service.load(self.service.open_path(str(self.source))["id"]))
+        project["fixed_tracks"] = ["scene", "category", "habit"]
+        project["annotations"]["posture"] = []
+        snapshot = {key: project[key] for key in ("id", "name", "revision", "duration_ms", "fixed_tracks", "custom_tracks", "annotations") if key in project}
+        snapshot["videos"] = [{key: video.get(key) for key in ("id", "name", "start_ms", "end_ms", "duration_ms", "recording_start")}
+                              for video in project["videos"]]
+        _, raw = self.service.export_documents(project, for_writeback=True)
+        result = store.put(owner, snapshot, {axis: value.decode("utf-8") for axis, value in raw.items()})
+        saved = json.loads((self.nas_root / result["nas_relative_path"] / "posture.timeline.json").read_bytes())
+        self.assertEqual(saved["segments"], [])
+        self.assertEqual(saved["timebase"]["fixed_tracks"], project["fixed_tracks"])
+
     def test_stale_revision_and_inconsistent_batch_are_rejected(self):
         auth = AuthStore(self.root)
         owner = auth.create_user("owner", "本机标注员", "correct horse battery staple")

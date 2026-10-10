@@ -514,6 +514,20 @@ html, body, #root { background: var(--bg); }
 .annotation-panel .track-tabs .custom i { background: #6dbbb9; }
 .annotation-panel .delete-custom-track-button { color: #d6a09a; }
 .annotation-panel .delete-custom-track-button:hover:not(:disabled) { color: #ffd1c9; background: #4b2b31; }
+.annotation-panel .section-caption .manage-track-labels { margin-left: auto; white-space: nowrap; font-size: 11px; }
+.state-buttons.event-label-buttons { display: flex; flex-wrap: wrap; margin-bottom: 9px; }
+.state-buttons.event-label-buttons button { width: auto; height: 32px; padding: 4px 12px; }
+.state-buttons:not(.event-label-buttons) button { min-width: 0; min-height: 34px; height: auto; padding: 7px 4px; overflow-wrap: anywhere; }
+.track-labels-dialog { width: min(500px, calc(100vw - 32px)); }
+.track-label-list { max-height: 260px; overflow-y: auto; margin: 12px 0; border: 1px solid #405563; border-radius: 6px; }
+.track-label-list > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; }
+.track-label-list > div + div { border-top: 1px solid #344653; }
+.track-label-list > div span { overflow-wrap: anywhere; }
+.track-label-list > div button { flex: 0 0 auto; }
+.track-label-list > p { padding: 10px; }
+.track-label-add { display: flex; gap: 8px; }
+.track-label-add input { min-width: 0; flex: 1; }
+.track-label-warning { color: #f1b0a6; }
 .state-buttons.custom button { min-width: 0; }
 .custom-track-dialog { width: min(440px, calc(100vw - 32px)); border: 1px solid #3a5861; border-radius: 12px; padding: 20px; background: #192631; color: #e4eff1; box-shadow: 0 20px 70px #0009; }
 .custom-track-dialog::backdrop { background: #050c14bc; }
@@ -522,6 +536,8 @@ html, body, #root { background: var(--bg); }
 .custom-track-dialog p, .custom-track-dialog small { color: #a7bac5; line-height: 1.5; }
 .custom-track-dialog label { display: flex; flex-direction: column; gap: 7px; }
 .custom-track-dialog textarea { width: 100%; resize: vertical; border: 1px solid #435563; border-radius: 6px; padding: 10px; background: #111a23; color: #e4eff1; font: inherit; }
+.restore-fixed-tracks { display: flex; flex-direction: column; gap: 8px; }
+.restore-fixed-tracks > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .custom-track-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .delete-custom-track-dialog[open] { display: flex; flex-direction: column; gap: 15px; }
 .delete-custom-track-dialog .import-error { padding: 9px 11px; border: 1px solid #825251; border-radius: 6px; background: #39272a; color: #f0bcb4; }

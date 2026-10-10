@@ -124,7 +124,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   const progress = Math.max(0, Math.min(displayedTime / duration, 1));
   const overlapSegments = useMemo(() => Object.fromEntries(projectTracks(project)
     .filter(track=>track==='category'||isEventTrack(project,track))
-    .map(track=>[track,arrangeLanes(project.annotations[track]??[],duration)])), [project.annotations,project.custom_tracks,duration]);
+    .map(track=>[track,arrangeLanes(project.annotations[track]??[],duration)])), [project.annotations,project.custom_tracks,project.fixed_tracks,duration]);
   const rows = useMemo(() => [
     ...(comparison ? [{key: 'external', track: comparison.track, external: true, segments: arrangeLanes(comparison.segments, duration)}] : []),
     ...(comparison ? [comparison.track] : projectTracks(project)).map(track => ({key: track, track, external: false, segments: track === 'category' || isEventTrack(project,track) ? overlapSegments[track]??[] : (project.annotations[track]??[]).map(segment => ({segment, lane: 0}))})),
@@ -645,7 +645,6 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     </section>
   );
 }
-
 
 
 

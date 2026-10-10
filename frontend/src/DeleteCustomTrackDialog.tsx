@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
-import type { CustomTrack } from './domain';
+import type { Track } from './domain';
 
 export default function DeleteCustomTrackDialog({track,count,deleting,error,onCancel,onConfirm}: {
-  track: CustomTrack;
+  track: {id: Track; name: string; fixed: boolean};
   count: number;
   deleting: boolean;
   error: string;
@@ -15,8 +15,8 @@ export default function DeleteCustomTrackDialog({track,count,deleting,error,onCa
     aria-labelledby="delete-custom-track-title"
     onCancel={event => { event.preventDefault(); if (!deleting) onCancel(); }}>
     <h2 id="delete-custom-track-title">删除「{track.name}」时间轴？</h2>
-    <p>此项目中的 {count} 条标注会随时间轴删除。四条固定轴、原视频和其它项目不受影响。</p>
-    <p>如已写回 NAS，对应 JSON 会在下次写回时删除，并保留一份备份。</p>
+    <p>此项目中该轴的 {count} 条标注会随时间轴删除。原视频和其它项目不受影响。</p>
+    <p>{track.fixed?'导出和写回仍保留该固定轴的空 JSON；再次添加时从空白开始。':'如已写回 NAS，对应 JSON 会在下次写回时核对、备份并删除。'}</p>
     {error && <p role="alert" className="import-error">{error}</p>}
     <div className="custom-track-actions">
       <button className="secondary" disabled={deleting} onClick={onCancel}>取消</button>

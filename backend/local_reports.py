@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from .service import AXES, FILENAMES, validate_annotations, validate_custom_tracks
+from .service import AXES, FILENAMES, DEFAULT_TRACK_LABELS, validate_annotations, validate_custom_tracks, validate_fixed_tracks, validate_track_labels
 
 PROJECT_ID = re.compile(r"[0-9a-f]{32}\Z")
 
@@ -51,11 +51,14 @@ def validate_report(snapshot: dict, documents: dict[str, str] | None) -> dict:
                 or video["start_ms"] < 0 or video["end_ms"] > duration or video["start_ms"] >= video["end_ms"]):
             raise HTTPException(422, "本机视频时间范围无效。")
     tracks = validate_custom_tracks(snapshot.get("custom_tracks", []))
-    annotations = validate_annotations(snapshot.get("annotations"), duration, videos=videos, custom_tracks=tracks)
+    fixed = validate_fixed_tracks(snapshot.get("fixed_tracks", list(AXES)))
+    labels = validate_track_labels(snapshot.get("track_labels", DEFAULT_TRACK_LABELS))
+    annotations = validate_annotations(snapshot.get("annotations"), duration, videos=videos,
+                                       custom_tracks=tracks, enabled_fixed_tracks=fixed, fixed_label_options=labels)
     safe = {"id": snapshot["id"], "name": name.strip(), "source_folder_name": source_folder.strip(),
             "revision": revision,
             "duration_ms": duration, "videos": [{key: video.get(key) for key in ("id", "name", "start_ms", "end_ms", "duration_ms", "recording_start")}
-                                                 for video in videos], "custom_tracks": tracks, "annotations": annotations,
+                                                 for video in videos], "fixed_tracks": fixed, "track_labels": labels, "custom_tracks": tracks, "annotations": annotations,
             "submitted_at": None}
     if documents is not None:
         expected = set(AXES) | {item["id"] for item in tracks}
@@ -71,6 +74,8 @@ def validate_report(snapshot: dict, documents: dict[str, str] | None) -> dict:
                 if (item["schema_version"] != 3 or item["axis"] != axis
                         or item["collection_id"] != safe["id"] or item["collection_name"] != safe["name"]
                         or timebase["duration_ms"] != duration
+                        or timebase.get("fixed_tracks", list(AXES)) != fixed
+                        or timebase.get("track_labels", DEFAULT_TRACK_LABELS) != labels
                         or timebase.get("custom_tracks", []) != tracks):
                     raise ValueError("mismatch")
                 exported = [

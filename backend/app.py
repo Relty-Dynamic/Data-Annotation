@@ -68,6 +68,16 @@ class EditingSessionRequest(BaseModel):
     tab_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
 
 
+class FixedTrackRequest(BaseModel):
+    enabled: bool
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class TrackLabelsRequest(BaseModel):
+    labels: list[str]
+    expected_revision: int = Field(ge=0, strict=True)
+
+
 class LocalReportRequest(BaseModel):
     snapshot: dict
     documents: dict[str, str] | None = None
@@ -554,6 +564,15 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.post("/api/projects/{project_id}/custom-tracks")
     def add_custom_track(project_id: str, body: CustomTrackRequest):
         return service.add_custom_track(project_id, body.name, body.mode, body.labels, body.expected_revision)
+
+    @app.put("/api/projects/{project_id}/fixed-tracks/{track_id}")
+    def set_fixed_track(project_id: str, track_id: str, body: FixedTrackRequest):
+        return service.set_fixed_track(project_id, track_id, body.enabled, body.expected_revision)
+
+    @app.put("/api/projects/{project_id}/tracks/{track_id}/labels")
+    def set_track_labels(project_id: str, track_id: str, body: TrackLabelsRequest, request: Request):
+        return service.set_track_labels(project_id, track_id, body.labels, body.expected_revision,
+                                        actor=request.state.user if auth_required else None)
 
     @app.delete("/api/projects/{project_id}/custom-tracks/{track_id}")
     def delete_custom_track(project_id: str, track_id: str, body: DeleteProjectRequest):

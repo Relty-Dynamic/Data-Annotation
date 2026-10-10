@@ -306,6 +306,18 @@ class RemoteWorkerTests(unittest.TestCase):
         restored, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
         self.assertEqual(restored['scene'], [])
 
+    def test_writeback_accepts_removed_posture_with_empty_fixed_json(self):
+        project = self.project()
+        project['fixed_tracks'] = ['scene', 'category', 'habit']
+        project['annotations']['posture'] = []
+        response = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(response.status_code, 200, response.text)
+        document = json.loads((self.nas / 'timeline' / FILENAMES['posture']).read_bytes())
+        self.assertEqual(document['segments'], [])
+        self.assertEqual(document['timebase']['fixed_tracks'], project['fixed_tracks'])
+        _, _, _, enabled, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']), include_tracks=True)
+        self.assertEqual(enabled, project['fixed_tracks'])
+
     def test_writeback_includes_custom_track_file(self):
         project = self.project()
         axis = 'custom_' + 'b' * 32

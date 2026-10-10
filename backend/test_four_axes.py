@@ -129,6 +129,86 @@ class FourAxisPersistenceTests(unittest.TestCase):
     tearDown = test_service.PersistenceTests.tearDown
     annotated_project = test_service.PersistenceTests.annotated_project
 
+    def test_fixed_tracks_can_all_be_removed_and_restored_with_empty_json(self):
+        project = self.service.open_path(str(self.source))
+        annotations = empty_annotations()
+        annotations["scene"] = [interval("scene", "室内", 0, project["duration_ms"])]
+        annotations["posture"] = [interval("posture", "坐", 0, project["duration_ms"])]
+        saved = self.service.update_draft(project["id"], annotations, project["revision"])
+        for axis in AXES:
+            saved = self.service.set_fixed_track(project["id"], axis, False, saved["revision"])
+        self.assertEqual(saved["fixed_tracks"], [])
+        self.assertTrue(all(saved["annotations"][axis] == [] for axis in AXES))
+        with self.assertRaises(HTTPException):
+            self.service.update_draft(project["id"], {**saved["annotations"], "posture": annotations["posture"]}, saved["revision"])
+        self.service.writeback(project["id"])
+        for axis in AXES:
+            document = json.loads((self.source / "timeline" / FILENAMES[axis]).read_bytes())
+            self.assertEqual(document["segments"], [])
+            self.assertEqual(document["timebase"]["fixed_tracks"], [])
+        fresh = self.service.create(list(self.fpv.glob("*.mp4")), "Round trip", self.source)
+        restored, _, _, enabled, _ = self.service.read_external(fresh, include_tracks=True)
+        self.assertEqual(enabled, [])
+        self.assertTrue(all(restored[axis] == [] for axis in AXES))
+        added = self.service.set_fixed_track(project["id"], "posture", True, saved["revision"])
+        self.assertEqual(added["fixed_tracks"], ["posture"])
+        with self.assertRaises(HTTPException):
+            self.service.export_documents(self.service.load(project["id"]), for_writeback=True)
+
+    def test_track_labels_delete_annotations_and_round_trip_with_stable_json(self):
+        project = self.annotated_project()
+        annotations = project["annotations"]
+        annotations["category"] = [interval("category", "专注", 0, project["duration_ms"])]
+        saved = self.service.update_draft(project["id"], annotations, project["revision"])
+        labels = [value for value in saved["track_labels"]["category"] if value != "专注"] + ["阅读"]
+        changed = self.service.set_track_labels(project["id"], "category", labels, saved["revision"])
+        self.assertEqual(changed["annotations"]["category"], [])
+        self.assertEqual(changed["track_labels"]["category"], labels)
+        with self.assertRaises(HTTPException) as stale:
+            self.service.set_track_labels(project["id"], "category", labels, saved["revision"])
+        self.assertEqual(stale.exception.status_code, 409)
+        with self.assertRaises(HTTPException):
+            self.service.update_draft(project["id"], {**changed["annotations"], "category": annotations["category"]}, changed["revision"])
+        relabeled = self.service.update_draft(project["id"], {**changed["annotations"], "category": [interval("new", "阅读", 0, project["duration_ms"])]}, changed["revision"])
+        save_id, documents = self.service.export_documents(self.service.load(project["id"]), for_writeback=True)
+        self.assertTrue(save_id)
+        category = json.loads(documents["category"])
+        self.assertEqual([item["label"] for item in relabeled["annotations"]["category"]], ["阅读"])
+        self.assertEqual([item["label"] for item in category["segments"]], ["阅读"])
+        self.assertEqual(category["timebase"]["track_labels"]["category"], labels)
+        self.assertIn("阅读", [item["name"] for item in category["labels"]])
+        self.service.writeback(project["id"])
+        fresh = self.service.create(list(self.fpv.glob("*.mp4")), "Round trip", self.source)
+        imported, _, _, _, imported_labels = self.service.read_external(fresh, include_tracks=True)
+        self.assertEqual([item["label"] for item in imported["category"]], ["阅读"])
+        self.assertEqual(imported_labels["category"], labels)
+
+    def test_removing_used_posture_requires_coverage_before_writeback(self):
+        project = self.annotated_project()
+        changed = self.service.set_track_labels(project["id"], "posture", ["动", "站", "躺", "蹲"], project["revision"])
+        self.assertEqual(changed["annotations"]["posture"], [])
+        with self.assertRaises(HTTPException):
+            self.service.export_documents(self.service.load(project["id"]), for_writeback=True)
+
+    def test_custom_event_shortcut_labels_can_be_added_and_removed(self):
+        project = self.annotated_project()
+        created = self.service.add_custom_track(project["id"], "事件", "event", [], project["revision"])
+        axis = created["custom_tracks"][0]["id"]
+        changed = self.service.set_track_labels(project["id"], axis, ["喝水", "看手机"], created["revision"])
+        self.assertEqual(changed["custom_tracks"][0]["labels"], ["喝水", "看手机"])
+        self.assertEqual(self.service.set_track_labels(project["id"], axis, [], changed["revision"])["custom_tracks"][0]["labels"], [])
+
+    def test_custom_state_last_button_can_be_deleted_with_its_annotations(self):
+        project = self.annotated_project()
+        created = self.service.add_custom_track(project["id"], "环境", "state", ["安静"], project["revision"])
+        axis = created["custom_tracks"][0]["id"]
+        annotations = {**created["annotations"], axis: [interval("one", "安静", 0, project["duration_ms"])]}
+        saved = self.service.update_draft(project["id"], annotations, created["revision"])
+        changed = self.service.set_track_labels(project["id"], axis, [], saved["revision"])
+        self.assertEqual(changed["custom_tracks"][0]["labels"], [])
+        self.assertEqual(changed["annotations"][axis], [])
+        self.assertEqual(json.loads(self.service.export_documents(self.service.load(project["id"]))[1][axis])["segments"], [])
+
     def test_custom_track_api_adds_to_project_and_rejects_stale_revision(self):
         project = self.annotated_project()
         with TestClient(create_app(self.root, auth_required=False), base_url="http://127.0.0.1") as client:
