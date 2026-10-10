@@ -62,7 +62,7 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 ### Jenkins 自动发布
 
-`main` 是 Ubuntu 发布分支。`relty-server` 上的 Jenkins 任务应建为 **Pipeline script from SCM**：仓库地址 `https://github.com/Relty-Dynamic/Data-Annotation.git`，分支指定 `*/main`，脚本路径 `Jenkinsfile`，只允许运行在同机的 `built-in` 节点。Jenkinsfile 使用 `pollSCM('H/2 * * * *')`，约每 2 分钟检查一次；只有 `main` 出现新提交才构建。不要把具有 Docker 权限的此任务用于未合并分支或外部提交。任务创建后的首次运行会注册轮询规则；单有 Jenkinsfile 不会自动创建任务。
+本阶段 Ubuntu 自动发布源为用户授权的 `feat/s3-mock` 分支。`relty-server` 上的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。Jenkinsfile 使用 `pollSCM('H/2 * * * *')`，约每 2 分钟检查一次；只有该分支出现新提交才构建。检出阶段和部署脚本都校验提交等于 `origin/feat/s3-mock` 的最新提交，其他分支不能经此任务发布。任务创建后的首次运行会注册轮询规则；单有 Jenkinsfile 不会自动创建任务。发布此分支的代码不会自动启用 S3 模拟模式；该模式仍需本机的测试视频目录和独立配置。
 
 首次启用前，由 `relty` 在 Ubuntu 上把当前发布目录中的 `deploy/intranet.env` 复制到持久目录 `/home/relty/services/datamark-web/intranet.env`，权限设为 `600`，并将 `/home/relty/services/datamark-web/current` 链接到已运行的发布目录。配置文件、数据库、证书和 NAS 素材始终留在仓库外。Jenkins 与网页容器使用同一台主机上的 `relty` 账号，且该账号已有 Docker 权限；流水线不会创建管理员或更改系统服务。
 

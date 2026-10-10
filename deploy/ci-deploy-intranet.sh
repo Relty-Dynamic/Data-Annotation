@@ -20,8 +20,8 @@ die() {
 [[ -f "$deploy_home/state/auth.sqlite3" ]] || die 'administrator database is missing'
 
 commit="$(git rev-parse --verify HEAD)"
-main_commit="$(git rev-parse --verify refs/remotes/origin/main)"
-[[ "$commit" == "$main_commit" ]] || die 'only the checked-out origin/main commit may deploy'
+release_commit="$(git rev-parse --verify refs/remotes/origin/feat/s3-mock)"
+[[ "$commit" == "$release_commit" ]] || die 'only the checked-out origin/feat/s3-mock commit may deploy'
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || die 'tracked source files have changed in the workspace'
 docker image inspect "datamark-web:$commit" >/dev/null || die 'tested release image is missing'
 

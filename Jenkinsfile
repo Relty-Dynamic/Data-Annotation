@@ -8,16 +8,16 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
-    // Poll main every two minutes; a build runs only when the commit changes.
+    // Poll feat/s3-mock every two minutes; a build runs only when the commit changes.
     triggers { pollSCM('H/2 * * * *') }
 
     stages {
-        stage('Checkout main') {
+        stage('Checkout feat/s3-mock') {
             steps {
                 checkout scm
                 sh '''#!/bin/sh
                     set -eu
-                    test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+                    test "$(git rev-parse HEAD)" = "$(git rev-parse --verify refs/remotes/origin/feat/s3-mock)"
                 '''
             }
         }
