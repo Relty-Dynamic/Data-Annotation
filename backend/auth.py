@@ -51,7 +51,8 @@ class AuthStore:
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
                     display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','annotator')),
-                    password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1
+                    password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+                    can_upload INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
                     token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
@@ -65,6 +66,8 @@ class AuthStore:
                     touched_at INTEGER NOT NULL, PRIMARY KEY(project_id, tab_id)
                 );
             """)
+            if "can_upload" not in {row[1] for row in con.execute("PRAGMA table_info(users)")}:
+                con.execute("ALTER TABLE users ADD COLUMN can_upload INTEGER NOT NULL DEFAULT 0")
         if os.name != "nt":
             os.chmod(self.path, 0o600)
 
@@ -98,15 +101,31 @@ class AuthStore:
         ident = uuid.uuid4().hex
         with self.connection() as con:
             try:
-                con.execute("INSERT INTO users VALUES (?,?,?,?,?,1)", (ident, username, display_name, role, encoded))
+                con.execute("INSERT INTO users (id,username,display_name,role,password_hash,active,can_upload) VALUES (?,?,?,?,?,1,0)",
+                            (ident, username, display_name, role, encoded))
             except sqlite3.IntegrityError as error:
                 raise HTTPException(409, "账号已存在。") from error
-        return {"id": ident, "username": username, "display_name": display_name, "role": role, "active": True}
+        return {"id": ident, "username": username, "display_name": display_name, "role": role,
+                "active": True, "can_upload": role == "admin"}
 
     def list_users(self) -> list[dict]:
         with self.connection() as con:
-            rows = con.execute("SELECT id,username,display_name,role,active FROM users ORDER BY username").fetchall()
-        return [dict(row) for row in rows]
+            rows = con.execute("SELECT id,username,display_name,role,active,can_upload FROM users ORDER BY username").fetchall()
+        return [{**dict(row), "can_upload": bool(row["can_upload"]) or row["role"] == "admin"} for row in rows]
+
+    def set_upload_permission(self, user_id: str, allowed: bool) -> None:
+        with self.connection() as con:
+            row = con.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "账号不存在。")
+            if row["role"] != "annotator":
+                raise HTTPException(422, "只能调整标注账号的上传权限。")
+            con.execute("UPDATE users SET can_upload=? WHERE id=?", (int(allowed), user_id))
+
+    def can_upload(self, user_id: str) -> bool:
+        with self.connection() as con:
+            row = con.execute("SELECT role,active,can_upload FROM users WHERE id=?", (user_id,)).fetchone()
+        return bool(row and row["active"] and (row["role"] == "admin" or row["can_upload"]))
 
     def set_active(self, user_id: str, active: bool) -> None:
         with self.connection() as con:
@@ -165,7 +184,8 @@ class AuthStore:
 
     @staticmethod
     def _public(row: sqlite3.Row) -> dict:
-        return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "role": row["role"]}
+        return {"id": row["id"], "username": row["username"], "display_name": row["display_name"],
+                "role": row["role"], "can_upload": row["role"] == "admin" or bool(row["can_upload"])}
 
     def session(self, token: str | None) -> tuple[dict, str] | None:
         if not token:

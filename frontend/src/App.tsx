@@ -3,6 +3,7 @@ import {authFetch, type Account} from './auth';
 import {apiUrl, separateApiOrigin} from './apiOrigin.ts';
 import {browserVideoUrl, clearBrowserVideoCache} from './browserVideoCache.ts';
 import AdminPanel from './AdminPanel';
+import MockUploadPanel from './MockUploadPanel';
 import PasswordDialog from './PasswordDialog';
 import HistoryPanel from './HistoryPanel';
 import { Upload, FolderOpen, Download, Save, Play, Pause, SkipBack, SkipForward, Plus, X, Trash2, Check, Film, Layers3, ChevronDown, RotateCcw, RotateCw, Keyboard, Maximize, Minimize, Volume2, VolumeX, Circle, ArrowRight, LoaderCircle, Bookmark, ScanLine, Pencil, Settings, History } from 'lucide-react';
@@ -112,6 +113,8 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const [cloudConnected,setCloudConnected]=useState(false),[cloudSyncError,setCloudSyncError]=useState('');
  const [mockMode,setMockMode]=useState(false),[mockCatalogAvailable,setMockCatalogAvailable]=useState(false);
  const [mockListing,setMockListing]=useState<NasListing|null>(null),[mockLoading,setMockLoading]=useState(false);
+ const [mockUploadOpen,setMockUploadOpen]=useState(false);
+ const [mockUploading,setMockUploading]=useState(false);
  const cloudQueue=useRef<Promise<void>>(Promise.resolve());
  const [clearedPreviewId,setClearedPreviewId]=useState('');
  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[saveState,setSaveState]=useState('已保存到平台');
@@ -471,7 +474,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(!importOpen)return;
   const dialog=importDialogRef.current;dialog?.focus();
   const key=(event:KeyboardEvent)=>{
-   if(event.key==='Escape'){event.preventDefault();if(!busyRef.current)setImportOpen(false);return;}
+   if(event.key==='Escape'){event.preventDefault();if(!busyRef.current&&!mockUploading)setImportOpen(false);return;}
    if(event.key!=='Tab'||!dialog)return;
    const controls=Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]'));
    const first=controls[0],last=controls[controls.length-1];
@@ -481,7 +484,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   };
   window.addEventListener('keydown',key,true);
   return()=>{window.removeEventListener('keydown',key,true);importTriggerRef.current?.focus();};
- },[importOpen]);
+ },[importOpen,mockUploading]);
  function pauseClearedPreviews(id:string){
   forgetProjectPreviews(id);
   if(projectRef.current?.id!==id)return;
@@ -780,16 +783,18 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    </div><div className="annotation-footer"><button className="secondary" disabled={!history.length||!!busy} onClick={undo} title="Ctrl + Z"><RotateCcw size={14}/>撤销</button><button className="secondary" disabled={!redoHistory.length||!!busy} onClick={redo} title="Ctrl + Shift + Z"><RotateCw size={14}/>恢复</button></div>
   </section>}{sessionEntered&&project&&projectTracks(project).length===0&&<section className="annotation-panel"><div className="panel-heading"><h2>标注面板</h2></div><p className="instruction">此项目还没有时间轴。添加固定轴或自定义轴后开始标注。</p><button className="primary wide" disabled={!!busy||pendingSaves.current>0||saveFailed} onClick={()=>setCustomTrackOpen(true)}><Plus size={15}/>添加时间轴</button></section>}</aside></main>
   {saveFailed&&<div className="save-recovery" role="alert" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen}><span>{saveState}</span><button className="text-button" disabled={!!busy} onClick={retrySave}>重试保存</button><button className="text-button" disabled={!!busy} title="先下载包含本页未保存改动的恢复 JSON，再读取服务器草稿" onClick={recoverAndReload}>保存恢复副本并重新载入</button></div>}
-  {importOpen&&<div className="modal-backdrop" onClick={()=>!busy&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className={'import-modal'+(nasPickerKind||mockListing?' nas-picker-open':'')} onClick={e=>e.stopPropagation()}>
-   <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
+  {importOpen&&<div className="modal-backdrop" onClick={()=>!busy&&!mockUploading&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className={'import-modal'+(nasPickerKind||mockListing?' nas-picker-open':'')} onClick={e=>e.stopPropagation()}>
+   <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy||mockUploading} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
    <h2 id="import-title">{mockMode?'新建 S3 mock 项目':importMode==='relink'?'关联原视频目录':importMode==='supplement'?'补导入视频':'新建采集项目'}</h2>
    {mockMode ? <>
-    <p>模拟 S3 按采集目录的层级显示。依次进入 daily、采集文件夹和日期文件夹，再选择完整项目文件夹。测试视频只从桌面副本读取。</p>
+    <p>模拟 S3 按采集目录逐层浏览。新上传的数据位于 daily、采集日期、个人文件夹；进入个人文件夹后选择完整项目。已有桌面测试目录仍可使用。</p>
     <label className="field-label" htmlFor="mock-project-name">项目名称</label>
     <input id="mock-project-name" className="project-name-input" value={newProjectName} disabled={!!busy} maxLength={80} onChange={e=>setNewProjectName(e.target.value)}/>
+    {user.can_upload&&<><button className="secondary wide" disabled={!!busy||mockUploading} onClick={()=>setMockUploadOpen(value=>!value)}>{mockUploadOpen?'收起上传':'上传本机采集目录'}</button>
+      {mockUploadOpen&&<MockUploadPanel onPublished={prefix=>{setMockUploadOpen(false);void browseMock(prefix);}} onRunningChange={setMockUploading}/>}</>}
     {mockCatalogAvailable&&<><button className="upload-zone" disabled={!!busy||mockLoading} onClick={()=>void browseMock()}><FolderOpen size={23}/><strong>浏览模拟 S3 项目文件夹</strong><span>按采集目录层级逐级选择</span></button>
     {mockListing&&<div className="nas-browser"><div className="nas-browser-heading"><strong>模拟 S3：{mockListing.path||'采集数据'}</strong><button className="secondary" disabled={!!busy||mockLoading} onClick={()=>setMockListing(null)}>关闭</button></div><div className="nas-browser-list">{mockListing.parent!==null&&<button disabled={!!busy||mockLoading} onClick={()=>void browseMock(mockListing.parent??'')}>↑ 上一级</button>}{mockListing.entries.map(entry=><div className="nas-browser-row" key={entry.path}>{entry.kind==='directory'?<button disabled={!!busy||mockLoading} onClick={()=>void browseMock(entry.path)}><FolderOpen size={15}/>{entry.name}</button>:<span>{entry.name}{entry.size!==undefined?` · ${(entry.size/1024/1024/1024).toFixed(2)} GB`:''}</span>}</div>)}</div>{mockListing.can_open&&<button className="primary wide" disabled={!!busy||mockLoading||!!projectNameError(newProjectName,false)} onClick={()=>void importMockFolder()}>使用此项目文件夹</button>}</div>}</>}
-    {!mockCatalogAvailable&&<p className="import-error" role="alert">尚未配置模拟视频目录，请按 README 设置桌面测试文件夹。</p>}
+    {!mockCatalogAvailable&&<p className="import-error" role="alert">模拟存储目录不可用，请检查本机服务。</p>}
     {importError&&<p className="import-error" role="alert">{importError}</p>}
    </> : <>
    {importMode==='new'&&<div className="project-name-field"><label className="field-label" htmlFor="new-project-name">项目名称</label><input id="new-project-name" className="project-name-input" value={newProjectName} disabled={!!busy} placeholder="留空则使用所选文件夹名" autoComplete="off" aria-describedby="new-project-name-hint" aria-invalid={!!projectNameError(newProjectName,false)} onChange={e=>setNewProjectName(e.target.value)}/><p id="new-project-name-hint" className={projectNameError(newProjectName,false)?'import-error':'input-hint'}>{projectNameError(newProjectName,false)?projectNameError(newProjectName,false):sharedServer?'领取完整采集目录，标注文件写回目录中的 timeline/；最多 80 个字符':'选择视频文件时，留空仍按导入时间命名；最多 80 个字符'}</p></div>}

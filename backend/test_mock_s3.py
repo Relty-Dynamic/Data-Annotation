@@ -107,7 +107,7 @@ class MockS3WorkflowTests(unittest.TestCase):
         submitted = self.client.post(f"/api/projects/{ident}/writeback", json={"expected_revision": 1}, headers=self.csrf)
         self.assertEqual(submitted.status_code, 200, submitted.text)
         store = self.app.state.mock_s3
-        pointer = json.loads((store.objects / "submissions" / ident / "latest.json").read_text())
+        pointer = json.loads((store.objects / "daily/1001test/20261010/timeline/.latest.json").read_text())
         self.assertEqual(len(pointer["keys"]), 4)
         self.assertEqual(pointer["save_id"], submitted.json()["save_id"])
         for key in pointer["keys"]:
@@ -125,3 +125,81 @@ class MockS3WorkflowTests(unittest.TestCase):
                                     files=[("files", (self.video.name, self.video.read_bytes(), "video/mp4"))])
         self.assertEqual(uploaded.status_code, 404, uploaded.text)
         self.assertEqual(self.client.get("/api/projects").json(), [])
+
+    def test_authorized_upload_publishes_compressed_fpv_and_timeline(self):
+        files = [{"path": self.video.name, "size": self.video.stat().st_size},
+                 {"path": "IMU/120000/sample.txt", "size": 9},
+                 {"path": "HEART/pulse.csv", "size": 7}]
+        body = {"person": "1001test", "files": files}
+        start = self.client.post("/api/mock-s3/uploads", json=body, headers=self.csrf)
+        self.assertEqual(start.status_code, 403)
+        worker = next(user for user in self.app.state.auth.list_users() if user["username"] == "worker")
+        self.app.state.auth.set_upload_permission(worker["id"], True)
+        started = self.client.post("/api/mock-s3/uploads", json=body, headers=self.csrf)
+        self.assertEqual(started.status_code, 200, started.text)
+        task = started.json()
+        self.assertEqual(task["prefix"], "daily/20261010/1001test")
+        self.assertEqual(self.client.put(f"/api/mock-s3/uploads/{task['id']}/files/0", content=self.video.read_bytes(),
+                                         headers=self.csrf).status_code, 200)
+        self.assertEqual(self.client.put(f"/api/mock-s3/uploads/{task['id']}/files/1", content=b"imu,1,2\n\n",
+                                         headers=self.csrf).status_code, 200)
+        self.assertEqual(self.client.put(f"/api/mock-s3/uploads/{task['id']}/files/2", content=b"bpm,100",
+                                         headers=self.csrf).status_code, 200)
+        finished = self.client.post(f"/api/mock-s3/uploads/{task['id']}/finish", headers=self.csrf)
+        self.assertEqual(finished.status_code, 200, finished.text)
+        self.assertEqual(finished.json()["state"], "ready")
+        capture = self.app.state.mock_s3.objects / task["prefix"]
+        compressed = capture / "FPV" / self.video.with_suffix(".mp4").name
+        self.assertTrue(compressed.is_file())
+        self.assertFalse((capture / self.video.name).exists())
+        self.assertEqual((capture / "IMU/120000/sample.txt").read_bytes(), b"imu,1,2\n\n")
+        self.assertEqual((capture / "HEART/pulse.csv").read_bytes(), b"bpm,100")
+        self.assertEqual(self.app.state.service.probe(compressed)["codec"], "h264")
+        self.assertEqual(self.client.get("/api/mock-s3/sources", params={"prefix": "daily/20261010/1001test"}).json()["can_open"], True)
+        opened = self.client.post("/api/mock-s3/projects/open", headers=self.csrf,
+                                  json={"path": task["prefix"]})
+        self.assertEqual(opened.status_code, 200, opened.text)
+        project = opened.json()
+        ident = project["id"]
+        self.assertEqual(project["videos"][0]["relative_path"], f"FPV/{compressed.name}")
+        started = self.client.post(f"/api/projects/{ident}/session/prepare", json={}, headers=self.csrf)
+        self.assertEqual(started.status_code, 200, started.text)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            state = self.client.get(f"/api/projects/{ident}/session").json()["state"]
+            if state in {"ready", "partial", "error"}:
+                break
+            time.sleep(.2)
+        self.assertEqual(state, "ready")
+        manifest = self.client.get(f"/api/projects/{ident}/session/manifest").json()
+        self.assertIn(f"/mock-objects/{task['prefix']}/FPV/", manifest["videos"][0]["url"])
+        self.assertEqual(self.client.get(manifest["videos"][0]["url"]).status_code, 200)
+        annotations = project["annotations"]
+        annotations["posture"] = [{"id": "p1", "label": "动", "kind": "interval", "start_ms": 0,
+                                   "end_ms": project["duration_ms"]}]
+        saved = self.client.put(f"/api/projects/{ident}/draft", json={"annotations": annotations, "expected_revision": 0},
+                                headers=self.csrf)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        submitted = self.client.post(f"/api/projects/{ident}/writeback", json={"expected_revision": 1}, headers=self.csrf)
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertEqual(len(list((capture / "timeline").glob("*.timeline.json"))), 4)
+        self.assertEqual(json.loads((capture / "timeline/posture.timeline.json").read_text())["schema_version"], 3)
+        self.assertEqual(self.client.post("/api/mock-s3/uploads", json=body, headers=self.csrf).status_code, 409)
+        self.app.state.auth.set_upload_permission(worker["id"], False)
+        self.assertEqual(self.client.post("/api/mock-s3/uploads", json={**body,"person":"another"}, headers=self.csrf).status_code, 403)
+
+    def test_revoked_uploader_cannot_publish_and_can_discard_staging(self):
+        worker = next(user for user in self.app.state.auth.list_users() if user["username"] == "worker")
+        self.app.state.auth.set_upload_permission(worker["id"], True)
+        started = self.client.post("/api/mock-s3/uploads", headers=self.csrf,
+                                   json={"person": "another", "files": [{"path": self.video.name,
+                                                                            "size": self.video.stat().st_size}]})
+        self.assertEqual(started.status_code, 200, started.text)
+        ident = started.json()["id"]
+        self.assertEqual(self.client.put(f"/api/mock-s3/uploads/{ident}/files/0", content=self.video.read_bytes(),
+                                         headers=self.csrf).status_code, 200)
+        self.app.state.auth.set_upload_permission(worker["id"], False)
+        self.assertEqual(self.client.post(f"/api/mock-s3/uploads/{ident}/finish", headers=self.csrf).status_code, 403)
+        self.assertFalse((self.app.state.mock_s3.objects / started.json()["prefix"]).exists())
+        self.assertEqual(self.client.request("DELETE", f"/api/mock-s3/uploads/{ident}", headers=self.csrf).status_code, 200)
+        self.assertFalse((self.app.state.mock_uploads.staging / ident).exists())

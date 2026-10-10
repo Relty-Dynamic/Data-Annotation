@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -127,11 +128,32 @@ class AccountAccessTests(unittest.TestCase):
         csrf = self.login("admin", "correct horse battery staple")
         users = self.client.get("/api/users")
         self.assertEqual(users.status_code, 200)
+        self.assertTrue(next(user for user in users.json() if user["id"] == self.admin["id"])["can_upload"])
+        self.assertFalse(next(user for user in users.json() if user["id"] == self.annotator["id"])["can_upload"])
+        permission = f"/api/users/{self.annotator['id']}/upload-permission"
+        self.assertEqual(self.client.put(permission, json={"can_upload": True}).status_code, 403)
+        self.assertEqual(self.client.put(permission, json={"can_upload": True}, headers={"X-CSRF-Token": csrf}).status_code, 200)
+        self.assertTrue(next(user for user in self.client.get("/api/users").json() if user["id"] == self.annotator["id"])["can_upload"])
+        self.assertEqual(self.client.put(permission, json={"can_upload": False}, headers={"X-CSRF-Token": csrf}).status_code, 200)
+        self.assertFalse(next(user for user in self.client.get("/api/users").json() if user["id"] == self.annotator["id"])["can_upload"])
+        self.assertEqual(self.client.put(f"/api/users/{self.admin['id']}/upload-permission", json={"can_upload": False}, headers={"X-CSRF-Token": csrf}).status_code, 422)
         project_id = self.project["id"]
         self.assertEqual(self.client.put(f"/api/projects/{project_id}/assignment", json={"user_id": self.annotator["id"]}).status_code, 403)
         assigned = self.client.put(f"/api/projects/{project_id}/assignment", json={"user_id": self.annotator["id"]}, headers={"X-CSRF-Token": csrf})
         self.assertEqual(assigned.status_code, 200, assigned.text)
         self.assertEqual(self.auth.assignment(project_id), self.annotator["id"])
+
+    def test_existing_account_database_gains_disabled_upload_permission(self):
+        with tempfile.TemporaryDirectory(prefix="auth-migration-") as root:
+            local = Path(root) / ".local"
+            local.mkdir()
+            with sqlite3.connect(local / "auth.sqlite3") as con:
+                con.execute("CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE, display_name TEXT, role TEXT, password_hash TEXT, active INTEGER)")
+                con.execute("INSERT INTO users VALUES ('old','oldworker','旧账号','annotator','unused',1)")
+            migrated = AuthStore(Path(root))
+            self.assertFalse(migrated.list_users()[0]["can_upload"])
+            migrated.set_upload_permission("old", True)
+            self.assertTrue(migrated.can_upload("old"))
 
     def test_editing_presence_names_other_user_and_expires(self):
         other = self.auth.create_user("second", "第二位", "correct horse battery staple")

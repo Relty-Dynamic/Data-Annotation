@@ -522,6 +522,13 @@ class SessionCache:
         if self._compact_ready(spec.source, target):
             update(100)
             return
+        if spec.source.get('precompressed'):
+            self.service.check_media_source(spec.path, spec.source)
+            self._copy_asset(spec.path, target, stopping)
+            self._write_json(marker, {'profile': PROFILE, 'duration_ms': spec.source['duration_ms'],
+                                      'file': self._file_record(target, target.parent)})
+            update(100)
+            return
         normal = self.service.cached_preview_for_spec(spec)
         if normal is None or normal == target:
             self.service.check_media_source(spec.path, spec.source)

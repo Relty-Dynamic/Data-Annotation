@@ -28,7 +28,7 @@ from .media_response import CancellableFileResponse
 from .auth import AuthStore
 from .local_reports import LocalReportStore
 from .cloud_mirror import CloudMirror
-from .mock_s3 import MockProjectService, MockS3Catalog, MockS3Store
+from .mock_s3 import MockProjectService, MockS3Catalog, MockS3Store, MockUploadManager
 
 
 class OpenRequest(BaseModel):
@@ -137,6 +137,15 @@ class ActiveRequest(BaseModel):
     active: bool
 
 
+class UploadPermissionRequest(BaseModel):
+    can_upload: bool
+
+
+class MockUploadRequest(BaseModel):
+    person: str = Field(min_length=1, max_length=120)
+    files: list[dict] = Field(min_length=1, max_length=1000)
+
+
 class PasswordRequest(BaseModel):
     password: str = Field(min_length=12, max_length=1024)
 
@@ -152,12 +161,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     public_origin = os.getenv("DATAMARK_PUBLIC_ORIGIN", "").strip()
     public_api_origin = os.getenv("DATAMARK_PUBLIC_API_ORIGIN", "").strip()
     mock_mode = os.getenv("DATAMARK_S3_MOCK", "").strip() == "1"
+    if mock_mode and (configured_origin or public_origin or public_api_origin):
+        raise ValueError("S3 mock is limited to the local application; public and Ubuntu origins are not allowed")
     data_root = root / ".local" / "s3-mock-app" if mock_mode else root
     mock_source = os.getenv("DATAMARK_S3_MOCK_SOURCE_DIR", "").strip()
-    mock_catalog = (MockS3Catalog(Path(mock_source).expanduser(),
-                                  os.getenv("DATAMARK_S3_MOCK_SOURCE_KEY", "").strip()
-                                  or f"daily/{Path(mock_source).name}/{datetime.now().astimezone():%Y%m%d}")
-                    if mock_mode and mock_source else None)
     nas_source_root = source_root or Path(os.getenv("DATAMARK_SOURCE_ROOT", "/mnt/nas/homes/datacollection"))
     allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
     allowed_origins: set[str] = set()
@@ -205,6 +212,11 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         allowed_hosts.append(api_host)
         allowed_origins.add(public_origin)
     mock_s3 = MockS3Store(data_root) if mock_mode else None
+    mock_uploads = MockUploadManager(mock_s3) if mock_s3 else None
+    mock_catalog = (MockS3Catalog(mock_s3, Path(mock_source).expanduser() if mock_source else None,
+                                  os.getenv("DATAMARK_S3_MOCK_SOURCE_KEY", "").strip()
+                                  or (f"daily/{Path(mock_source).name}/{datetime.now().astimezone():%Y%m%d}" if mock_source else ""))
+                    if mock_s3 else None)
     service = MockProjectService(data_root, mock_s3) if mock_s3 else ProjectService(root)
     auth = AuthStore(data_root)
     local_reports = LocalReportStore(auth, nas_source_root if configured_origin and not mock_mode else None)
@@ -248,6 +260,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     app.state.local_reports = local_reports
     app.state.cloud_mirror = cloud_mirror
     app.state.mock_s3 = mock_s3
+    app.state.mock_uploads = mock_uploads
     app.state.mock_catalog = mock_catalog
     app.state.browser_lifetime = lifetime
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
@@ -405,6 +418,11 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         auth.set_active(user_id, body.active)
         return {"ok": True}
 
+    @app.put("/api/users/{user_id}/upload-permission")
+    def set_upload_permission(user_id: str, body: UploadPermissionRequest):
+        auth.set_upload_permission(user_id, body.can_upload)
+        return {"ok": True}
+
     @app.put("/api/users/{user_id}/password")
     def reset_password(user_id: str, body: PasswordRequest):
         auth.reset_password(user_id, body.password)
@@ -549,6 +567,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             stored["_mock_s3"] = True
             if key:
                 stored["_mock_s3_key"] = key
+                stored["_mock_s3_uploaded"] = folder.is_relative_to(mock_s3.objects)
+                if stored["_mock_s3_uploaded"]:
+                    for source in stored["_sources"].values():
+                        source["precompressed"] = True
             service.save(stored)
             if user and user["role"] == "annotator" and not auth.claim(stored["id"], user["id"]):
                 raise HTTPException(403, "该项目已由其他标注员领取。")
@@ -564,7 +586,39 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     def open_mock_project(body: OpenRequest, request: Request):
         if not mock_catalog:
             raise HTTPException(404, "未配置模拟项目文件夹。")
-        return open_mock_folder(mock_catalog.project_directory(body.path), body.name or "", request, mock_catalog.prefix)
+        return open_mock_folder(mock_catalog.project_directory(body.path), body.name or "", request, body.path)
+
+    def require_mock_upload(request: Request) -> str:
+        if not mock_uploads:
+            raise HTTPException(404, "S3 mock 上传未启用。")
+        user = getattr(request.state, "user", None)
+        if not user or not auth.can_upload(user["id"]):
+            raise HTTPException(403, "管理员尚未开放此账号的上传权限。")
+        return user["id"]
+
+    @app.post("/api/mock-s3/uploads")
+    def start_mock_upload(body: MockUploadRequest, request: Request):
+        return mock_uploads.start(require_mock_upload(request), body.person, body.files)
+
+    @app.put("/api/mock-s3/uploads/{upload_id}/files/{index}")
+    async def receive_mock_upload(upload_id: str, index: int, request: Request):
+        return await mock_uploads.receive(upload_id, require_mock_upload(request), index, request)
+
+    @app.get("/api/mock-s3/uploads/{upload_id}")
+    def mock_upload_status(upload_id: str, request: Request):
+        if not mock_uploads:
+            raise HTTPException(404, "S3 mock 上传未启用。")
+        return mock_uploads.status(upload_id, request.state.user["id"])
+
+    @app.delete("/api/mock-s3/uploads/{upload_id}")
+    def abort_mock_upload(upload_id: str, request: Request):
+        if not mock_uploads:
+            raise HTTPException(404, "S3 mock 上传未启用。")
+        return mock_uploads.abort(upload_id, request.state.user["id"])
+
+    @app.post("/api/mock-s3/uploads/{upload_id}/finish")
+    def finish_mock_upload(upload_id: str, request: Request):
+        return mock_uploads.finish(upload_id, require_mock_upload(request), service, auth.can_upload)
 
     @app.post("/api/projects/upload")
     def legacy_upload():

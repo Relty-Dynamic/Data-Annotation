@@ -6,16 +6,20 @@ Ubuntu 内网部署是现行主服务，本机模式用于开发和旧数据处�
 
 ## S3 模拟模式（仅供本分支本机试用）
 
-设置 `DATAMARK_S3_MOCK=1` 后，页面可浏览模拟的 S3 项目目录、准备视频、标注并把时间轴 JSON 保存到本机模拟的对象存储。`1001test` 测试视频来自桌面副本；本次模拟对象键为 `daily/1001test/20261010/<视频文件名>`，页面从 `datacollection` 根目录依次进入 `daily`、`1001test`、日期 `20261010`，再选择项目文件夹。日期层按现有 NAS 中含日期的采集目录顺序模拟，不移动桌面原视频，也不声称 NAS 中的 `1001test` 已有该日期子目录。未显式设置对象前缀时，模拟模式默认使用启动当天的 `YYYYMMDD` 日期。模拟对象和结果存放在被 Git 忽略的 `.local/s3-mock-app/`，账号、项目和草稿也使用这个独立目录；此模式不读取 NAS，也不连接真实 S3。这里的“签名链接”只是本机服务生成的限时测试链接。现有 Ubuntu 服务、Vercel 发布和 Cloudflare 解析均不使用此模式。
+设置 `DATAMARK_S3_MOCK=1` 后，本机可上传完整采集目录，并在隔离的模拟对象存储中浏览、标注和写回。管理员仍由 `zengl` 担任：所有有效标注账号都能领取未领取的项目并标注，只有管理员能在“账号管理”中开放或禁用每个标注账号的上传权限；新账号默认不能上传，管理员始终可上传。上传权限在服务端逐次核验，禁用后已登录账号也不能继续上传或发布。
+
+上传时，浏览器把所选目录交给**本机 mock 服务**处理；视频先转换为 480×270 的低码率 MP4，校验时长和起点后，才发布到 `daily/<采集日期>/<个人文件夹>/FPV/`。采集日期取视频文件名中最早的录制日期，不取上传当天；例如桌面 `1001test` 的 `A09999_20261009204230_0000.avi` 会成为 `daily/20261009/1001test/FPV/A09999_20261009204230_0000.mp4`。IMU 与 HEART 保留原格式及目录内相对路径。目标采集目录已存在时拒绝覆盖。模拟对象、账号、项目和草稿位于被 Git 忽略的 `.local/s3-mock-app/`，原视频不被修改，也不会连接 NAS 或真实 S3。
+
+标注员逐层进入 `daily`、采集日期、个人文件夹，选择完整项目；普通和倍速播放素材在开始标注前完整缓存到其浏览器的本机专用存储。普通视频直接使用模拟对象存储中的压缩 MP4，倍速视频、封面和悬停图片仍由准备流程生成。提交后，四个固定时间轴 JSON 和自定义轴 JSON 写入同一采集目录的 `timeline/` 并读回核验，格式与 NAS 的 `timeline/` 一致。这里的签名链接只供本机测试，不是 AWS S3 链接。现有 Ubuntu 服务、Vercel 发布和 Cloudflare 解析均不使用此模式。
 
 在已经安装项目内 Python 环境、前端依赖和 FFmpeg 的 macOS 开发机上，从项目根目录运行：
 
 ```sh
 .venv/bin/python -m backend.auth --root .local/s3-mock-app
-DATAMARK_S3_MOCK=1 DATAMARK_S3_MOCK_SOURCE_DIR="$HOME/Desktop/1001test" DATAMARK_S3_MOCK_SOURCE_KEY=daily/1001test/20261010 FFMPEG_PATH=/opt/homebrew/bin/ffmpeg FFPROBE_PATH=/opt/homebrew/bin/ffprobe .venv/bin/python launch.py --no-browser
+DATAMARK_S3_MOCK=1 FFMPEG_PATH=/opt/homebrew/bin/ffmpeg FFPROBE_PATH=/opt/homebrew/bin/ffprobe .venv/bin/python -c 'from backend.app import create_app; import uvicorn; uvicorn.run(create_app(), host="127.0.0.1", port=8766)'
 ```
 
-首条命令只在首次创建模拟模式管理员时执行，交互输入密码；FFmpeg 路径按本机实际位置替换。随后打开 `http://127.0.0.1:8765`，点击“新建项目”→“浏览模拟 S3 项目文件夹”→`daily`→`1001test`→`20261010`→“使用此项目文件夹”。桌面原视频只读，服务生成精简播放预览，浏览器在进入标注前将普通及倍速预览完整缓存到标注者电脑；草稿保存在独立状态目录，提交后的时间轴 JSON 保存到模拟对象存储，供读回核验。不涉及视频上传。结果索引位于 `.local/s3-mock-app/.local/mock-s3/objects/submissions/<项目ID>/latest.json`。模拟数据只用于验证流程，不能当作真实 S3 或公网验收；后续接入真实视频时，S3 对象键应保留相对于 NAS `datacollection/` 根目录的完整路径，例如本次的 `daily/1001test/20261010/<视频文件>`；其它采集目录可能含 `FPV/` 等更深层级，页面也应逐级浏览到完整项目文件夹。S3 桶、权限和部署方式仍需另行确定。
+首条命令仅在首次创建模拟管理员时运行，账号输入 `zengl`，密码在终端交互输入；FFmpeg 路径按本机实际位置替换。随后打开 `http://127.0.0.1:8766`，由有上传权的账号进入“新建项目”→“上传本机采集目录”，选择包含视频以及可选 `IMU/`、`HEART/` 的完整目录，等待上传与压缩完成，再选择刚发布的个人文件夹。`8766` 仅供本机 mock 使用，可与原有的 `8765` 服务并行。旧桌面只读测试入口可通过 `DATAMARK_S3_MOCK_SOURCE_DIR` 和 `DATAMARK_S3_MOCK_SOURCE_KEY` 继续启用；它不是新上传目录，也不会被自动迁移。当前 mock 的压缩发生在本机服务中；真实 S3 接入时，上传端须先在本机压缩并校验，再将压缩成品上传到 S3，不能让公网标注员的原片经 Ubuntu 中转。真实 S3 的桶、身份和权限、直传方式、跨域设置与部署尚未配置或验证。
 
 ## 启动与停止
 
@@ -62,7 +66,7 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 ### Jenkins 自动发布
 
-`main` 是 Ubuntu 内网发布分支。当前 `relty-server` 的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。这个任务只构建和测试 S3 mock 分支，不部署内网；部署脚本只接受 `origin/main` 提交。Jenkinsfile 保留 `pollSCM('H/2 * * * *')` 轮询配置，但实际轮询日志仍显示检查 `main`，自动触发当前分支尚未验证，须修正任务配置并以新提交验证。S3 模拟模式仍需本机测试视频目录和独立配置，不随分支构建自动启用。
+`main` 是 Ubuntu 内网发布分支。当前 `relty-server` 的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。这个任务只构建和测试 S3 mock 分支，不部署内网；部署脚本只接受 `origin/main` 提交。Jenkinsfile 保留 `pollSCM('H/2 * * * *')` 轮询配置，但实际轮询日志仍显示检查 `main`，自动触发当前分支尚未验证，须修正任务配置并以新提交验证。S3 模拟模式须在本机明确启用；通过页面上传采集目录时无需预设桌面测试视频路径，也不会随分支构建自动启用。
 
 首次启用前，由 `relty` 在 Ubuntu 上把当前发布目录中的 `deploy/intranet.env` 复制到持久目录 `/home/relty/services/datamark-web/intranet.env`，权限设为 `600`，并将 `/home/relty/services/datamark-web/current` 链接到已运行的发布目录。配置文件、数据库、证书和 NAS 素材始终留在仓库外。Jenkins 与网页容器使用同一台主机上的 `relty` 账号，且该账号已有 Docker 权限；流水线不会创建管理员或更改系统服务。
 

@@ -1,6 +1,6 @@
 import {apiUrl, separateApiOrigin} from './apiOrigin.ts';
 
-export type Account = {id:string; username:string; display_name:string; role:'admin'|'annotator'};
+export type Account = {id:string; username:string; display_name:string; role:'admin'|'annotator'; can_upload:boolean};
 let csrfToken = '';
 export function setCsrfToken(value: string) { csrfToken = value; }
 

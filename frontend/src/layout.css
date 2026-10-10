@@ -233,6 +233,9 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 .nas-browser-row input[type='checkbox'] { width: auto; margin: 0; }
 .nas-browser-list p { padding: 12px; font-size: 11px; }
 .nas-browser-actions { justify-content: flex-end; margin-top: 10px; }
+.mock-upload-panel { display: grid; gap: 10px; padding: 14px; border: 1px solid #34414b; border-radius: 8px; background: #14232b; }
+.mock-upload-panel h3 { margin: 0; font-size: 14px; }
+.mock-upload-panel p { line-height: 1.5; color: #aac0c7; }
 @media (max-width: 1100px) { .source-relink-notice { margin-inline: 18px; } }
 
 /* Four dimensions and reusable anchor selection. */
