@@ -127,6 +127,7 @@ class LoginRequest(BaseModel):
 
 class UserRequest(LoginRequest):
     display_name: str = Field(min_length=1, max_length=80)
+    email: str | None = Field(default=None, max_length=254)
 
 
 class AssignmentRequest(BaseModel):
@@ -411,7 +412,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/users")
     def create_user(body: UserRequest):
-        return auth.create_user(body.username, body.display_name, body.password)
+        return auth.create_user(body.username, body.display_name, body.password, email=body.email)
 
     @app.patch("/api/users/{user_id}")
     def set_user_active(user_id: str, body: ActiveRequest):

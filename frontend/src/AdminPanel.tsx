@@ -2,7 +2,7 @@ import {useEffect, useState, type FormEvent} from 'react';
 import {authFetch} from './auth';
 import type {Project} from './domain';
 
-type ManagedUser = {id:string; username:string; display_name:string; role:string; active:number; can_upload:boolean};
+type ManagedUser = {id:string; username:string; display_name:string; email:string|null; role:string; active:number; can_upload:boolean};
 type LocalSegment = {start_ms:number; end_ms:number|null};
 type LocalReport = {id:string; name:string; owner_name:string; revision:number; updated_at:string; submitted_at?:string|null; has_documents:boolean; nas_relative_path?:string|null; videos:{start_ms:number;end_ms:number}[]; annotations:Record<string, LocalSegment[]>};
 
@@ -17,7 +17,7 @@ export default function AdminPanel({projects,mockMode=false,onClose}:{projects:P
   const [users,setUsers]=useState<ManagedUser[]>([]);
   const [localReports,setLocalReports]=useState<LocalReport[]>([]);
   const [assignments,setAssignments]=useState<Record<string,string>>({});
-  const [username,setUsername]=useState(''),[displayName,setDisplayName]=useState(''),[password,setPassword]=useState('');
+  const [username,setUsername]=useState(''),[displayName,setDisplayName]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState('');
   const [resetId,setResetId]=useState(''),[resetPassword,setResetPassword]=useState('');
   const [error,setError]=useState(''),[notice,setNotice]=useState('');
   async function refresh() {
@@ -38,9 +38,9 @@ export default function AdminPanel({projects,mockMode=false,onClose}:{projects:P
   useEffect(()=>{void refresh().catch(cause=>setError(String(cause)));},[]);
   async function create(event:FormEvent) {
     event.preventDefault();setError('');setNotice('');
-    const response=await authFetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,display_name:displayName,password})});
+    const response=await authFetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,display_name:displayName,email:email.trim()||null,password})});
     if(!response.ok){setError((await response.json()).detail??'创建账号失败');return;}
-    setUsername('');setDisplayName('');setPassword('');setNotice('账号已创建。');await refresh();
+    setUsername('');setDisplayName('');setEmail('');setPassword('');setNotice('账号已创建。');await refresh();
   }
   async function assign(projectId:string,userId:string) {
     setError('');
@@ -78,10 +78,11 @@ export default function AdminPanel({projects,mockMode=false,onClose}:{projects:P
     <h3>新建标注账号</h3><form onSubmit={event=>void create(event)} className="admin-form">
       <label>账号<input value={username} onChange={event=>setUsername(event.target.value)} autoComplete="off" required/></label>
       <label>标注人姓名<input value={displayName} onChange={event=>setDisplayName(event.target.value)} required/></label>
+      <label>邮箱（选填）<input type="email" value={email} onChange={event=>setEmail(event.target.value)} autoComplete="off"/></label>
       <label>初始密码<input type="password" value={password} onChange={event=>setPassword(event.target.value)} minLength={12} autoComplete="new-password" required/></label>
       <button className="primary">创建账号</button>
     </form>
-    <h3>账号</h3><p>所有有效账号均可标注已领取的项目；视频上传权限由管理员单独开放或关闭。</p><div className="admin-list">{users.map(user=><div key={user.id}><span>{user.display_name} · {user.username} · {user.role==='admin'?'管理员':'标注人'} · 上传{user.can_upload?'已开放':'未开放'}</span><span className="admin-buttons">{user.role==='annotator'&&<button className="secondary" onClick={()=>void setUploadPermission(user)}>{user.can_upload?'禁用上传':'开放上传'}</button>}<button className="secondary" onClick={()=>setResetId(user.id)}>重置密码</button><button className="secondary" onClick={()=>void toggle(user)}>{user.active?'停用':'启用'}</button></span></div>)}</div>
+    <h3>账号</h3><p>所有有效账号均可标注已领取的项目；视频上传权限由管理员单独开放或关闭。</p><div className="admin-list">{users.map(user=><div key={user.id}><span>{user.display_name} · {user.username}{user.email?` · ${user.email}`:''} · {user.role==='admin'?'管理员':'标注人'} · 上传{user.can_upload?'已开放':'未开放'}</span><span className="admin-buttons">{user.role==='annotator'&&<button className="secondary" onClick={()=>void setUploadPermission(user)}>{user.can_upload?'禁用上传':'开放上传'}</button>}<button className="secondary" onClick={()=>setResetId(user.id)}>重置密码</button><button className="secondary" onClick={()=>void toggle(user)}>{user.active?'停用':'启用'}</button></span></div>)}</div>
     {resetId&&<form className="admin-reset" onSubmit={event=>void reset(event)}><strong>重置 {users.find(user=>user.id===resetId)?.display_name} 的密码</strong><input type="password" autoComplete="new-password" minLength={12} value={resetPassword} onChange={event=>setResetPassword(event.target.value)} required/><button type="button" className="secondary" onClick={()=>{setResetId('');setResetPassword('');}}>取消</button><button className="primary">保存</button></form>}
     <h3>{mockMode?'模拟项目领取人':'NAS 项目领取人'}</h3><div className="admin-list">{projects.map(project=><label key={project.id}><span>{project.name}</span><select value={assignments[project.id]??''} onChange={event=>void assign(project.id,event.target.value)}><option value="">未领取</option>{users.filter(user=>user.role==='annotator'&&user.active).map(user=><option key={user.id} value={user.id}>{user.display_name} · {user.username}</option>)}</select></label>)}</div>
     {!mockMode&&<><h3>标注员本机项目</h3><div className="admin-list">{localReports.length?localReports.map(report=><div key={report.id}><span>{report.name} · {report.owner_name} · 姿势覆盖 {coveredPercent(report,'posture')}% · 场景覆盖 {coveredPercent(report,'scene')}% · {Object.values(report.annotations).reduce((total,items)=>total+items.length,0)} 条标注 · {report.has_documents?'已写回 NAS':'标注中'}{report.nas_relative_path?` · NAS：homes/datacollection/${report.nas_relative_path}`:''} · 更新于 {report.updated_at}</span>{report.has_documents&&<button className="secondary" onClick={()=>void downloadReport(report)}>下载时间轴 ZIP</button>}</div>):<p>暂无已同步的本机项目。</p>}</div></>}

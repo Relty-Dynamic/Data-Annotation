@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 SESSION_SECONDS = 12 * 60 * 60
 USERNAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._@+-]{2,119}$")
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _password_hash(password: str, salt: bytes | None = None) -> str:
@@ -50,7 +51,8 @@ class AuthStore:
             con.executescript("""
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                    display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','annotator')),
+                    display_name TEXT NOT NULL, email TEXT,
+                    role TEXT NOT NULL CHECK(role IN ('admin','annotator')),
                     password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
                     can_upload INTEGER NOT NULL DEFAULT 0
                 );
@@ -68,6 +70,9 @@ class AuthStore:
             """)
             if "can_upload" not in {row[1] for row in con.execute("PRAGMA table_info(users)")}:
                 con.execute("ALTER TABLE users ADD COLUMN can_upload INTEGER NOT NULL DEFAULT 0")
+            if "email" not in {row[1] for row in con.execute("PRAGMA table_info(users)")}:
+                con.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users(email COLLATE NOCASE) WHERE email IS NOT NULL")
         if os.name != "nt":
             os.chmod(self.path, 0o600)
 
@@ -90,9 +95,12 @@ class AuthStore:
         with self.connection() as con:
             return con.execute("SELECT 1 FROM users WHERE role='admin' AND active=1 LIMIT 1").fetchone() is not None
 
-    def create_user(self, username: str, display_name: str, password: str, role: str = "annotator") -> dict:
+    def create_user(self, username: str, display_name: str, password: str, role: str = "annotator",
+                    email: str | None = None) -> dict:
         username, display_name = username.strip(), display_name.strip()
-        if not USERNAME.fullmatch(username) or not 1 <= len(display_name) <= 80 or role not in {"admin", "annotator"}:
+        email = email.strip().lower() if email else None
+        if (not USERNAME.fullmatch(username) or not 1 <= len(display_name) <= 80 or role not in {"admin", "annotator"}
+                or (email is not None and (len(email) > 254 or not EMAIL.fullmatch(email)))):
             raise HTTPException(422, "账号、姓名或角色格式不正确。")
         try:
             encoded = _password_hash(password)
@@ -101,16 +109,16 @@ class AuthStore:
         ident = uuid.uuid4().hex
         with self.connection() as con:
             try:
-                con.execute("INSERT INTO users (id,username,display_name,role,password_hash,active,can_upload) VALUES (?,?,?,?,?,1,0)",
-                            (ident, username, display_name, role, encoded))
+                con.execute("INSERT INTO users (id,username,display_name,email,role,password_hash,active,can_upload) VALUES (?,?,?,?,?,?,1,0)",
+                            (ident, username, display_name, email, role, encoded))
             except sqlite3.IntegrityError as error:
-                raise HTTPException(409, "账号已存在。") from error
-        return {"id": ident, "username": username, "display_name": display_name, "role": role,
+                raise HTTPException(409, "账号或邮箱已存在。") from error
+        return {"id": ident, "username": username, "display_name": display_name, "email": email, "role": role,
                 "active": True, "can_upload": role == "admin"}
 
     def list_users(self) -> list[dict]:
         with self.connection() as con:
-            rows = con.execute("SELECT id,username,display_name,role,active,can_upload FROM users ORDER BY username").fetchall()
+            rows = con.execute("SELECT id,username,display_name,email,role,active,can_upload FROM users ORDER BY username").fetchall()
         return [{**dict(row), "can_upload": bool(row["can_upload"]) or row["role"] == "admin"} for row in rows]
 
     def set_upload_permission(self, user_id: str, allowed: bool) -> None:
@@ -168,6 +176,8 @@ class AuthStore:
             if any(attempt and attempt["blocked_until"] > int(time.time()) for attempt in attempts):
                 raise HTTPException(429, "登录尝试过多，请稍后再试。")
             row = con.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE AND active=1", (username,)).fetchone()
+            if not row and "@" in username:
+                row = con.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE AND active=1", (username,)).fetchone()
             if not row or not _verify_password(password, row["password_hash"]):
                 for key, attempt in zip(keys, attempts):
                     failures = (attempt["failures"] if attempt else 0) + 1
@@ -184,7 +194,7 @@ class AuthStore:
 
     @staticmethod
     def _public(row: sqlite3.Row) -> dict:
-        return {"id": row["id"], "username": row["username"], "display_name": row["display_name"],
+        return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "email": row["email"],
                 "role": row["role"], "can_upload": row["role"] == "admin" or bool(row["can_upload"])}
 
     def session(self, token: str | None) -> tuple[dict, str] | None:

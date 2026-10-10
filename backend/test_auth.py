@@ -152,8 +152,23 @@ class AccountAccessTests(unittest.TestCase):
                 con.execute("INSERT INTO users VALUES ('old','oldworker','旧账号','annotator','unused',1)")
             migrated = AuthStore(Path(root))
             self.assertFalse(migrated.list_users()[0]["can_upload"])
+            self.assertIsNone(migrated.list_users()[0]["email"])
             migrated.set_upload_permission("old", True)
             self.assertTrue(migrated.can_upload("old"))
+
+    def test_account_email_is_optional_unique_and_visible_to_admin(self):
+        csrf = self.login("admin", "correct horse battery staple")
+        response = self.client.post("/api/users", json={"username": "emailed", "display_name": "测试标注",
+            "email": "Worker@Example.com", "password": "another long safe password"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["email"], "worker@example.com")
+        self.assertEqual(next(user for user in self.client.get("/api/users").json()
+                              if user["username"] == "emailed")["email"], "worker@example.com")
+        duplicate = self.client.post("/api/users", json={"username": "duplicate", "display_name": "另一位",
+            "email": "worker@example.com", "password": "another long safe password"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(duplicate.status_code, 409)
+        self.login("WORKER@example.com", "another long safe password")
+        self.assertEqual(self.client.get("/api/auth/me").json()["username"], "emailed")
 
     def test_editing_presence_names_other_user_and_expires(self):
         other = self.auth.create_user("second", "第二位", "correct horse battery staple")
