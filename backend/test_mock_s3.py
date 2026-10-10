@@ -30,7 +30,7 @@ class MockS3WorkflowTests(unittest.TestCase):
         self.environment = patch.dict(os.environ, {"DATAMARK_S3_MOCK": "1", "FFMPEG_PATH": shutil.which("ffmpeg"),
                                                   "FFPROBE_PATH": shutil.which("ffprobe"),
                                                   "DATAMARK_S3_MOCK_SOURCE_DIR": str(self.catalog_dir),
-                                                  "DATAMARK_S3_MOCK_SOURCE_KEY": "daily/1001test"})
+                                                  "DATAMARK_S3_MOCK_SOURCE_KEY": "daily/1001test/20261010"})
         self.environment.start()
         self.app = create_app(self.root)
         self.app.state.auth.create_user("worker", "标注员", "another long safe password")
@@ -53,19 +53,22 @@ class MockS3WorkflowTests(unittest.TestCase):
         root_listing = self.client.get("/api/mock-s3/sources").json()
         self.assertEqual([item["path"] for item in root_listing["entries"]], ["daily"])
         self.assertEqual(self.client.get("/api/mock-s3/sources", params={"prefix": "daily"}).json()["entries"][0]["path"], "daily/1001test")
-        folder_listing = self.client.get("/api/mock-s3/sources", params={"prefix": "daily/1001test"}).json()
+        date_listing = self.client.get("/api/mock-s3/sources", params={"prefix": "daily/1001test"}).json()
+        self.assertEqual(date_listing["entries"][0]["path"], "daily/1001test/20261010")
+        self.assertFalse(date_listing["can_open"])
+        folder_listing = self.client.get("/api/mock-s3/sources", params={"prefix": "daily/1001test/20261010"}).json()
         self.assertTrue(folder_listing["can_open"])
-        self.assertEqual(folder_listing["entries"][0]["path"], f"daily/1001test/{self.video.name}")
+        self.assertEqual(folder_listing["entries"][0]["path"], f"daily/1001test/20261010/{self.video.name}")
         self.assertEqual(self.client.get("/api/mock-s3/sources", params={"prefix": "../outside"}).status_code, 422)
         self.assertEqual(self.client.post("/api/mock-s3/projects/open", headers=self.csrf,
                                           json={"path": "daily"}).status_code, 404)
         uploaded = self.client.post("/api/mock-s3/projects/open", headers=self.csrf,
-                                    json={"path": "daily/1001test", "name": "测试项目"})
+                                    json={"path": "daily/1001test/20261010", "name": "测试项目"})
         self.assertEqual(uploaded.status_code, 200, uploaded.text)
         project = uploaded.json()
         ident = project["id"]
         self.assertEqual(project["storage_mode"], "s3-mock")
-        self.assertEqual(project["storage_prefix"], "daily/1001test")
+        self.assertEqual(project["storage_prefix"], "daily/1001test/20261010")
         self.assertIsNone(project["source_dir"])
         self.assertNotIn("/mnt/nas", json.dumps(project))
         self.assertEqual(self.client.get(f"/api/projects/{ident}").json()["storage_mode"], "s3-mock")
@@ -115,7 +118,7 @@ class MockS3WorkflowTests(unittest.TestCase):
             self.assertEqual(login.status_code, 200)
             self.assertEqual(other.get(f"/api/projects/{ident}/session/manifest").status_code, 403)
             self.assertEqual(other.post("/api/mock-s3/projects/open", headers={"X-CSRF-Token": login.json()["csrf"]},
-                                        json={"path": "daily/1001test"}).status_code, 403)
+                                        json={"path": "daily/1001test/20261010"}).status_code, 403)
 
     def test_folder_only_selection_does_not_accept_video_uploads(self):
         uploaded = self.client.post("/api/mock-s3/projects", headers=self.csrf,

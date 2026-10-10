@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import os
 import re
 import uuid
-import hmac
-import hashlib
-import ipaddress
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -154,7 +155,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     data_root = root / ".local" / "s3-mock-app" if mock_mode else root
     mock_source = os.getenv("DATAMARK_S3_MOCK_SOURCE_DIR", "").strip()
     mock_catalog = (MockS3Catalog(Path(mock_source).expanduser(),
-                                  os.getenv("DATAMARK_S3_MOCK_SOURCE_KEY", "").strip() or f"daily/{Path(mock_source).name}")
+                                  os.getenv("DATAMARK_S3_MOCK_SOURCE_KEY", "").strip()
+                                  or f"daily/{Path(mock_source).name}/{datetime.now().astimezone():%Y%m%d}")
                     if mock_mode and mock_source else None)
     nas_source_root = source_root or Path(os.getenv("DATAMARK_SOURCE_ROOT", "/mnt/nas/homes/datacollection"))
     allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
@@ -211,7 +213,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     def require_nas_source(value: str) -> None:
         if mock_mode:
-            raise HTTPException(404, "S3 mock 项目只接受测试视频上传。")
+            raise HTTPException(404, "S3 mock 请从模拟目录选择完整项目文件夹。")
         if not configured_origin:
             return
         candidate = Path(value.strip().strip('"')).expanduser()
@@ -524,7 +526,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.post("/api/projects/files")
     def open_files(body: FilesRequest, request: Request):
         if mock_mode:
-            raise HTTPException(404, "S3 mock 项目只接受测试视频上传。")
+            raise HTTPException(404, "S3 mock 请从模拟目录选择完整项目文件夹。")
         if configured_origin:
             raise HTTPException(422, "NAS 标注请领取完整采集目录，保证统一写回 timeline 文件夹。")
         for value in body.paths:

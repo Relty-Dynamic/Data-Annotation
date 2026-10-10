@@ -6,16 +6,16 @@ Ubuntu 内网部署是现行主服务，本机模式用于开发和旧数据处�
 
 ## S3 模拟模式（仅供本分支本机试用）
 
-设置 `DATAMARK_S3_MOCK=1` 后，页面可浏览模拟的 S3 项目目录、准备视频、标注并把时间轴 JSON 保存到本机模拟的对象存储。`1001test` 测试视频来自桌面副本，浏览时显示的键为 `daily/1001test/<视频文件名>`，与现有 NAS 项目选择器从 `datacollection` 根目录进入 `daily`、再进入 `1001test` 的深度一致。模拟对象和结果存放在被 Git 忽略的 `.local/s3-mock-app/`，账号、项目和草稿也使用这个独立目录；此模式不读取 NAS，也不连接真实 S3。这里的“签名链接”只是本机服务生成的限时测试链接。现有 Ubuntu 服务、Vercel 发布和 Cloudflare 解析均不使用此模式。
+设置 `DATAMARK_S3_MOCK=1` 后，页面可浏览模拟的 S3 项目目录、准备视频、标注并把时间轴 JSON 保存到本机模拟的对象存储。`1001test` 测试视频来自桌面副本；本次模拟对象键为 `daily/1001test/20261010/<视频文件名>`，页面从 `datacollection` 根目录依次进入 `daily`、`1001test`、日期 `20261010`，再选择项目文件夹。日期层按现有 NAS 中含日期的采集目录顺序模拟，不移动桌面原视频，也不声称 NAS 中的 `1001test` 已有该日期子目录。未显式设置对象前缀时，模拟模式默认使用启动当天的 `YYYYMMDD` 日期。模拟对象和结果存放在被 Git 忽略的 `.local/s3-mock-app/`，账号、项目和草稿也使用这个独立目录；此模式不读取 NAS，也不连接真实 S3。这里的“签名链接”只是本机服务生成的限时测试链接。现有 Ubuntu 服务、Vercel 发布和 Cloudflare 解析均不使用此模式。
 
 在已经安装项目内 Python 环境、前端依赖和 FFmpeg 的 macOS 开发机上，从项目根目录运行：
 
 ```sh
 .venv/bin/python -m backend.auth --root .local/s3-mock-app
-DATAMARK_S3_MOCK=1 DATAMARK_S3_MOCK_SOURCE_DIR="$HOME/Desktop/1001test" DATAMARK_S3_MOCK_SOURCE_KEY=daily/1001test FFMPEG_PATH=/opt/homebrew/bin/ffmpeg FFPROBE_PATH=/opt/homebrew/bin/ffprobe .venv/bin/python launch.py --no-browser
+DATAMARK_S3_MOCK=1 DATAMARK_S3_MOCK_SOURCE_DIR="$HOME/Desktop/1001test" DATAMARK_S3_MOCK_SOURCE_KEY=daily/1001test/20261010 FFMPEG_PATH=/opt/homebrew/bin/ffmpeg FFPROBE_PATH=/opt/homebrew/bin/ffprobe .venv/bin/python launch.py --no-browser
 ```
 
-首条命令只在首次创建模拟模式管理员时执行，交互输入密码；FFmpeg 路径按本机实际位置替换。随后打开 `http://127.0.0.1:8765`，点击“新建项目”→“浏览模拟 S3 项目文件夹”→`daily`→`1001test`→“使用此项目文件夹”。桌面原视频只读，服务生成精简播放预览，浏览器在进入标注前将普通及倍速预览完整缓存到标注者电脑；草稿保存在独立状态目录，提交后的时间轴 JSON 保存到模拟对象存储，供读回核验。不涉及视频上传。结果索引位于 `.local/s3-mock-app/.local/mock-s3/objects/submissions/<项目ID>/latest.json`。模拟数据只用于验证流程，不能当作真实 S3 或公网验收；后续接入真实视频时，S3 对象键应保留相对于 NAS `datacollection/` 根目录的完整路径，例如 `daily/1001test/<视频文件>`，现有其它采集目录含 `FPV/` 等更深层级，页面也应逐级浏览到完整项目文件夹。S3 桶、权限和部署方式仍需另行确定。
+首条命令只在首次创建模拟模式管理员时执行，交互输入密码；FFmpeg 路径按本机实际位置替换。随后打开 `http://127.0.0.1:8765`，点击“新建项目”→“浏览模拟 S3 项目文件夹”→`daily`→`1001test`→`20261010`→“使用此项目文件夹”。桌面原视频只读，服务生成精简播放预览，浏览器在进入标注前将普通及倍速预览完整缓存到标注者电脑；草稿保存在独立状态目录，提交后的时间轴 JSON 保存到模拟对象存储，供读回核验。不涉及视频上传。结果索引位于 `.local/s3-mock-app/.local/mock-s3/objects/submissions/<项目ID>/latest.json`。模拟数据只用于验证流程，不能当作真实 S3 或公网验收；后续接入真实视频时，S3 对象键应保留相对于 NAS `datacollection/` 根目录的完整路径，例如本次的 `daily/1001test/20261010/<视频文件>`；其它采集目录可能含 `FPV/` 等更深层级，页面也应逐级浏览到完整项目文件夹。S3 桶、权限和部署方式仍需另行确定。
 
 ## 启动与停止
 

@@ -784,7 +784,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
    <h2 id="import-title">{mockMode?'新建 S3 mock 项目':importMode==='relink'?'关联原视频目录':importMode==='supplement'?'补导入视频':'新建采集项目'}</h2>
    {mockMode ? <>
-    <p>模拟 S3 按当前采集目录的层级显示。进入 daily，再进入 1001test，选择完整项目文件夹。测试视频只从桌面副本读取。</p>
+    <p>模拟 S3 按采集目录的层级显示。依次进入 daily、采集文件夹和日期文件夹，再选择完整项目文件夹。测试视频只从桌面副本读取。</p>
     <label className="field-label" htmlFor="mock-project-name">项目名称</label>
     <input id="mock-project-name" className="project-name-input" value={newProjectName} disabled={!!busy} maxLength={80} onChange={e=>setNewProjectName(e.target.value)}/>
     {mockCatalogAvailable&&<><button className="upload-zone" disabled={!!busy||mockLoading} onClick={()=>void browseMock()}><FolderOpen size={23}/><strong>浏览模拟 S3 项目文件夹</strong><span>按采集目录层级逐级选择</span></button>
