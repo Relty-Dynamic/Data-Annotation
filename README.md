@@ -62,11 +62,11 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 ### Jenkins 自动发布
 
-本阶段 Ubuntu 自动发布源为用户授权的 `feat/s3-mock` 分支。`relty-server` 上的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。Jenkinsfile 使用 `pollSCM('H/2 * * * *')`，约每 2 分钟检查一次；只有该分支出现新提交才构建。检出阶段和部署脚本都校验提交等于 `origin/feat/s3-mock` 的最新提交，其他分支不能经此任务发布。任务创建后的首次运行会注册轮询规则；单有 Jenkinsfile 不会自动创建任务。发布此分支的代码不会自动启用 S3 模拟模式；该模式仍需本机的测试视频目录和独立配置。
+`main` 是 Ubuntu 内网发布分支。当前 `relty-server` 的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。这个任务只构建和测试 S3 mock 分支，不部署内网；部署脚本只接受 `origin/main` 提交。Jenkinsfile 保留 `pollSCM('H/2 * * * *')` 轮询配置，但实际轮询日志仍显示检查 `main`，自动触发当前分支尚未验证，须修正任务配置并以新提交验证。S3 模拟模式仍需本机测试视频目录和独立配置，不随分支构建自动启用。
 
 首次启用前，由 `relty` 在 Ubuntu 上把当前发布目录中的 `deploy/intranet.env` 复制到持久目录 `/home/relty/services/datamark-web/intranet.env`，权限设为 `600`，并将 `/home/relty/services/datamark-web/current` 链接到已运行的发布目录。配置文件、数据库、证书和 NAS 素材始终留在仓库外。Jenkins 与网页容器使用同一台主机上的 `relty` 账号，且该账号已有 Docker 权限；流水线不会创建管理员或更改系统服务。
 
-每次新提交先在镜像构建中运行前端测试和构建，再在隔离容器中运行后端测试；失败时不触碰运行中的服务。通过后，`deploy/ci-deploy-intranet.sh` 从该提交创建独立发布目录、在线备份两个 SQLite 数据库、仅更新 DataMark 的 Compose 服务，并通过内网证书验证健康接口。健康检查失败会尝试恢复先前容器版本，`current` 链接仅在健康检查成功后切换；成功后也会把持久配置中的网页镜像标识更新为已验证的提交，避免后续重启恢复旧镜像。备份存放于 `backups/<提交>-<时间>/`，不会自动删除；数据库模式不兼容时须人工评估恢复，不能直接覆盖仍在写入的数据库。Jenkins 的测试通过和健康接口正常不等于真实项目的 NAS 写回验收；仍需用授权账号实际标注并读回全部时间轴文件。
+`feat/s3-mock` 的新提交在镜像构建中运行前端测试和构建，再在隔离容器中运行后端测试；该任务不会调用部署脚本。`main` 的内网部署仍由 `deploy/ci-deploy-intranet.sh` 执行：它从已构建且测试通过的 `main` 提交创建独立发布目录、在线备份两个 SQLite 数据库、仅更新 DataMark 的 Compose 服务，并通过内网证书验证健康接口。健康检查失败会尝试恢复先前容器版本，`current` 链接仅在健康检查成功后切换；成功后也会把持久配置中的网页镜像标识更新为已验证的提交，避免后续重启恢复旧镜像。备份存放于 `backups/<提交>-<时间>/`，不会自动删除；数据库模式不兼容时须人工评估恢复，不能直接覆盖仍在写入的数据库。Jenkins 的测试通过和健康接口正常不等于真实项目的 NAS 写回验收；仍需用授权账号实际标注并读回全部时间轴文件。
 
 ### Vercel 网页与 Ubuntu 公网接口
 

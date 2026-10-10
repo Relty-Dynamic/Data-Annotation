@@ -8,7 +8,7 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
-    // Poll feat/s3-mock every two minutes; a build runs only when the commit changes.
+    // Validate feat/s3-mock without changing the running intranet release.
     triggers { pollSCM('H/2 * * * *') }
 
     stages {
@@ -38,10 +38,5 @@ pipeline {
             }
         }
 
-        stage('Deploy to relty-server') {
-            steps {
-                sh 'bash deploy/ci-deploy-intranet.sh'
-            }
-        }
     }
 }
