@@ -12,6 +12,9 @@ services:
       - NET_BIND_SERVICE
     environment:
       DATAMARK_PUBLIC_API_ORIGIN: ${DATAMARK_PUBLIC_API_ORIGIN:?Public API HTTPS origin is required}
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
     ports:
       - target: 10443
         published: "10443"
