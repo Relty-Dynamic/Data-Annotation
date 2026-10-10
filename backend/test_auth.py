@@ -206,9 +206,9 @@ class AccountAccessTests(unittest.TestCase):
             AuthStore(root).create_user("admin", "管理员", "correct horse battery staple", "admin")
             with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40",
                                             "DATAMARK_PUBLIC_ORIGIN": "https://annotate.example.com",
-                                            "DATAMARK_PUBLIC_API_ORIGIN": "https://api-annotate.example.com"}):
+                                            "DATAMARK_PUBLIC_API_ORIGIN": "https://api-annotate.example.com:10443"}):
                 app = create_app(root)
-            with TestClient(app, base_url="https://api-annotate.example.com") as public:
+            with TestClient(app, base_url="https://api-annotate.example.com:10443") as public:
                 self.assertEqual(public.get("/api/health").status_code, 200)
                 preflight = public.options("/api/auth/login", headers={
                     "Origin": "https://annotate.example.com", "Access-Control-Request-Method": "POST",
@@ -241,7 +241,7 @@ class AccountAccessTests(unittest.TestCase):
                 self.assertEqual(media.headers["access-control-allow-origin"], "https://annotate.example.com")
                 self.assertEqual(public.post("/api/auth/logout", headers={"Origin": "https://annotate.example.com",
                                                                 "X-CSRF-Token": me.json()["csrf"]}).status_code, 200)
-                with public.websocket_connect("ws://api-annotate.example.com/api/browser/connection",
+                with public.websocket_connect("ws://api-annotate.example.com:10443/api/browser/connection",
                                               headers={"origin": "https://annotate.example.com"}) as socket:
                     socket.send_text("connected")
             with TestClient(app, base_url="http://10.20.30.40") as intranet:

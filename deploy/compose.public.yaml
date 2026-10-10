@@ -1,6 +1,6 @@
 services:
   public_gateway:
-    image: caddy:2.11.4-alpine
+    image: ghcr.io/caddy-dns/cloudflare@sha256:f46799052f9dfcf7e634326d279d47a58c1ea598f8330c0b77921971f14aeaf0
     user: "1000:1000"
     restart: unless-stopped
     init: true
@@ -8,19 +8,15 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - NET_BIND_SERVICE
     environment:
       DATAMARK_PUBLIC_API_ORIGIN: ${DATAMARK_PUBLIC_API_ORIGIN:?Public API HTTPS origin is required}
     ports:
-      - target: 80
-        published: "80"
+      - target: 10443
+        published: "10443"
         host_ip: ${DATAMARK_PUBLIC_BIND_IP:?Public gateway bind IP is required}
         protocol: tcp
-      - target: 443
-        published: "443"
-        host_ip: ${DATAMARK_PUBLIC_BIND_IP:?Public gateway bind IP is required}
-        protocol: tcp
+    secrets:
+      - cloudflare_api_token
     volumes:
       - type: bind
         source: ./Caddyfile.public
@@ -42,3 +38,7 @@ services:
     networks:
       - private
       - ingress
+
+secrets:
+  cloudflare_api_token:
+    file: ${DATAMARK_HOME:?Deployment directory is required}/secrets/cloudflare-api-token

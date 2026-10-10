@@ -1,4 +1,11 @@
+{
+	auto_https disable_redirects
+}
+
 {$DATAMARK_PUBLIC_API_ORIGIN} {
+	tls {
+		dns cloudflare {file./run/secrets/cloudflare_api_token}
+	}
 	@api path /api/*
 	handle @api {
 		reverse_proxy web:8765

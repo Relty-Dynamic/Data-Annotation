@@ -143,7 +143,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
     allowed_origins: set[str] = set()
 
-    def validate_https_origin(origin: str, setting: str, *, dns_hostname: bool = False) -> str:
+    def validate_https_origin(origin: str, setting: str, *, dns_hostname: bool = False,
+                              allow_port: bool = False) -> str:
         parsed_origin = urlsplit(origin)
         if (parsed_origin.scheme != "https" or not parsed_origin.hostname
                 or parsed_origin.username or parsed_origin.password
@@ -151,11 +152,11 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 or parsed_origin.netloc != parsed_origin.netloc.lower()
                 or "*" in parsed_origin.netloc or any(char.isspace() for char in origin)):
             raise ValueError(f"{setting} must be an HTTPS origin without a path or credentials")
-        parsed_origin.port  # Validate an optional numeric port before accepting the origin.
+        port = parsed_origin.port  # Reject invalid or out-of-range ports.
+        if port is not None and (not allow_port or port == 443):
+            raise ValueError(f"{setting} must not include this port")
         hostname = parsed_origin.hostname
         if dns_hostname:
-            if parsed_origin.port is not None:
-                raise ValueError(f"{setting} must not include a port")
             labels = hostname.split(".")
             if (len(labels) < 2 or len(hostname) > 253
                     or any(not 1 <= len(label) <= 63 or not label[0].isalnum() or not label[-1].isalnum()
@@ -178,7 +179,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         if not configured_origin or not public_origin or not public_api_origin:
             raise ValueError("public frontend and API origins require DATAMARK_ORIGIN and each other")
         frontend_host = validate_https_origin(public_origin, "DATAMARK_PUBLIC_ORIGIN", dns_hostname=True)
-        api_host = validate_https_origin(public_api_origin, "DATAMARK_PUBLIC_API_ORIGIN", dns_hostname=True)
+        api_host = validate_https_origin(public_api_origin, "DATAMARK_PUBLIC_API_ORIGIN",
+                                         dns_hostname=True, allow_port=True)
         if frontend_host == api_host:
             raise ValueError("public frontend and API must use separate hostnames")
         allowed_hosts.append(api_host)

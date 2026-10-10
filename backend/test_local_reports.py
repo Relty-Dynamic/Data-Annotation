@@ -190,9 +190,10 @@ class LocalReportTests(unittest.TestCase):
                                                  "nas_relative_path": f'{body["snapshot"]["id"]}/timeline' if body["documents"] else None})
             return httpx.Response(404)
         client_type = httpx.Client
-        with patch.dict(os.environ, {"DATAMARK_CLOUD_API_ORIGIN": "https://api.example.test"}), \
+        with patch.dict(os.environ, {"DATAMARK_CLOUD_API_ORIGIN": "https://api.example.test:10443"}), \
                 patch("backend.cloud_mirror.httpx.Client", side_effect=lambda **kw: client_type(transport=httpx.MockTransport(handler), **kw)):
             mirror = CloudMirror()
+            self.assertEqual(mirror.origin, "https://api.example.test:10443")
             mirror.connect("local-user", "owner", "password")
             mirror.sync("local-user", self.service.load(project["id"]), self.service)
             completed = complete_project(self.service.load(project["id"]))

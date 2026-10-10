@@ -14,10 +14,11 @@ from .service import AXES, FILENAMES
 
 class CloudMirror:
     def __init__(self):
-        origin = os.getenv("DATAMARK_CLOUD_API_ORIGIN", "https://api-annotate.reltydynamic.com").strip()
+        origin = os.getenv("DATAMARK_CLOUD_API_ORIGIN", "https://api-annotate.reltydynamic.com:10443").strip()
         if origin:
             parsed = urlsplit(origin)
-            if (parsed.scheme != "https" or not parsed.hostname or parsed.port or parsed.path
+            port = parsed.port
+            if (parsed.scheme != "https" or not parsed.hostname or port == 443 or parsed.path
                     or parsed.query or parsed.fragment or parsed.username or parsed.password
                     or parsed.netloc != parsed.netloc.lower()):
                 raise ValueError("DATAMARK_CLOUD_API_ORIGIN must be a plain HTTPS origin")
