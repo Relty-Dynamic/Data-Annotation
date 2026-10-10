@@ -21,7 +21,7 @@ from .previews import run_ffmpeg
 from .service import VIDEO_EXTENSIONS, ProjectService, alignment_warnings, digest, filename_for_axis, now, parse_recording_start
 
 
-PART = re.compile(r"[A-Za-z0-9_.-]{1,120}\Z")
+PART = re.compile(r"[\w.-]{1,120}\Z")
 VIDEO_SUFFIXES = VIDEO_EXTENSIONS
 
 
@@ -69,10 +69,16 @@ class MockS3Catalog:
         else:
             raise HTTPException(404, "模拟存储目录不存在。")
         listed = sorted(entries.values(), key=lambda item: (item["kind"] != "directory", item["name"].casefold(), item["name"]))
-        uploaded = len(parts) == 3 and (self.store.objects / raw_prefix / "manifest.json").is_file()
+        manifest_path = self.store.objects / raw_prefix / "manifest.json" if len(parts) == 3 else None
+        uploaded = bool(manifest_path and manifest_path.is_file())
+        capture = None
+        if uploaded:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            capture = {field: manifest.get(field) for field in
+                       ("collector_name", "uploader_name", "uploaded_by_username", "note", "capture_date")}
         return {"root": "", "path": raw_prefix, "parent": "/".join(parts[:-1]) if parts else None,
                 "entries": listed, "page": 0, "has_more": False,
-                "can_open": uploaded or (bool(self.parts) and parts == self.parts)}
+                "can_open": uploaded or (bool(self.parts) and parts == self.parts), "capture": capture}
 
     def project_directory(self, prefix: str) -> Path:
         parts = prefix.split("/")
@@ -242,22 +248,24 @@ class MockUploadManager:
                 or any(ord(char) < 32 or char in "\\:" for char in part) for part in parts)):
             raise HTTPException(422, "上传文件的相对路径无效。")
         source = Path(parts[-1])
-        is_video = source.suffix.casefold() in VIDEO_SUFFIXES
-        if is_video:
-            if len(parts) == 1:
-                return "FPV/" + source.stem + ".mp4", True
-            if len(parts) == 2 and parts[0].casefold() == "fpv":
-                return "FPV/" + source.stem + ".mp4", True
-            raise HTTPException(422, "视频须直接位于采集目录或 FPV 子目录。")
-        if any(part.casefold() in {"timeline", ".datamark-cache"} for part in parts) or parts[0].casefold() == "manifest.json":
-            raise HTTPException(422, "旧标注、缓存和平台索引不能作为采集数据上传。")
-        normalized = [parts[0].upper() if parts[0].casefold() in {"fpv", "imu", "heart"} else parts[0], *parts[1:]]
-        return "/".join(normalized), False
+        if source.suffix.casefold() != ".avi":
+            raise HTTPException(422, "本次仅上传 AVI 视频，不接收 TXT、IMU 或心率文件。")
+        if len(parts) == 1 or (len(parts) == 2 and parts[0].casefold() in {"fpv", "video"}):
+            return "FPV/" + source.stem + ".mp4", True
+        raise HTTPException(422, "AVI 须来自 video 或 FPV 子目录，或直接选择视频文件。")
 
-    def start(self, user_id: str, person: str, files: list[dict]) -> dict:
-        person = person.strip()
-        if not PART.fullmatch(person) or person in {".", ".."}:
-            raise HTTPException(422, "个人文件夹名称无效。")
+    def start(self, user: dict, collector_name: str, uploader_name: str | None,
+              note: str | None, files: list[dict]) -> dict:
+        collector_name = collector_name.strip()
+        uploader_name = (uploader_name or "").strip() or user["display_name"]
+        note = (note or "").strip() or None
+        if (not 1 <= len(collector_name) <= 80 or not PART.fullmatch(collector_name)
+                or collector_name in {".", ".."}):
+            raise HTTPException(422, "采集人姓名只能包含文字、数字、下划线、点或短横线。")
+        if not 1 <= len(uploader_name) <= 80 or any(ord(char) < 32 for char in uploader_name):
+            raise HTTPException(422, "上传人姓名无效。")
+        if note and (len(note) > 500 or any(ord(char) < 32 and char not in "\n\r\t" for char in note)):
+            raise HTTPException(422, "备注无效或超过 500 字。")
         if not files or len(files) > self.MAX_FILES:
             raise HTTPException(422, "请选择 1 到 1000 个文件。")
         records, outputs, total, dates = [], set(), 0, []
@@ -280,7 +288,8 @@ class MockUploadManager:
             raise HTTPException(422, "须包含 FPV 视频，且上传总量不得超过上限。")
         capture_date = min(dates)
         datetime.strptime(capture_date, "%Y%m%d")
-        prefix = f"daily/{capture_date}/{person}"
+        folder = f"{capture_date[4:]}{collector_name}"
+        prefix = f"daily/{capture_date}/{folder}"
         with self.lock:
             if (self.store.objects / prefix).exists():
                 raise HTTPException(409, "此采集日期和个人文件夹已存在，不能覆盖已有素材或标注。")
@@ -291,10 +300,12 @@ class MockUploadManager:
                 raise HTTPException(507, "本机空间不足，无法暂存待压缩文件。")
             ident = uuid.uuid4().hex
             (self.staging / ident / "incoming").mkdir(parents=True)
-            job = {"id": ident, "owner": user_id, "prefix": prefix, "records": records,
+            job = {"id": ident, "owner": user["id"], "prefix": prefix, "records": records,
+                   "capture_date": capture_date, "collector_name": collector_name,
+                   "uploader_name": uploader_name, "uploaded_by_username": user["username"], "note": note,
                    "state": "receiving", "progress": 0, "detail": "等待上传文件。", "updated_at": time.time()}
             self.jobs[ident] = job
-        return self.status(ident, user_id)
+        return self.status(ident, user["id"])
 
     def _job(self, ident: str, user_id: str) -> dict:
         with self.lock:
@@ -308,6 +319,8 @@ class MockUploadManager:
         with self.lock:
             return {"id": ident, "prefix": job["prefix"], "state": job["state"],
                     "progress": job["progress"], "detail": job["detail"],
+                    "collector_name": job["collector_name"], "uploader_name": job["uploader_name"],
+                    "uploaded_by_username": job["uploaded_by_username"], "note": job["note"],
                     "received": sum(record["received"] for record in job["records"]),
                     "total": len(job["records"])}
 
@@ -371,16 +384,14 @@ class MockUploadManager:
                 source = workspace / "incoming" / str(record["index"])
                 target = publish / record["output"]
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if record["video"]:
-                    self._compress_video(service, source, target)
-                else:
-                    shutil.copyfile(source, target)
-                    if self.store._file_digest(source) != self.store._file_digest(target):
-                        raise HTTPException(503, "非视频文件复制后核对失败。")
+                self._compress_video(service, source, target)
                 with self.lock:
                     job.update(progress=round(50 + count / len(job["records"]) * 49, 1),
                                detail=f"已处理 {count}/{len(job['records'])} 个文件。")
             manifest = {"schema_version": 1, "prefix": job["prefix"], "uploaded_by": user_id,
+                        "uploaded_by_username": job["uploaded_by_username"],
+                        "collector_name": job["collector_name"], "uploader_name": job["uploader_name"],
+                        "capture_date": job["capture_date"], "note": job["note"],
                         "created_at": now(), "video_profile": "playback-480x270-256k32k-v1",
                         "files": [{"source": item["path"], "key": item["output"],
                                    "size": (publish / item["output"]).stat().st_size,

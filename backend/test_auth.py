@@ -170,6 +170,25 @@ class AccountAccessTests(unittest.TestCase):
         self.login("WORKER@example.com", "another long safe password")
         self.assertEqual(self.client.get("/api/auth/me").json()["username"], "emailed")
 
+    def test_administrator_can_create_account_with_numeric_password(self):
+        csrf = self.login("admin", "correct horse battery staple")
+        created = self.client.post("/api/users", json={"username": "numeric", "display_name": "数字密码账号",
+            "password": "12345678"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(created.status_code, 200, created.text)
+        self.login("numeric", "12345678")
+        csrf = self.login("admin", "correct horse battery staple")
+        too_short = self.client.post("/api/users", json={"username": "shortnum", "display_name": "短密码账号",
+            "password": "1234567"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(too_short.status_code, 422)
+        mixed = self.client.post("/api/users", json={"username": "shortmix", "display_name": "混合密码账号",
+            "password": "abc12345"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(mixed.status_code, 422)
+        reset = self.client.put(f"/api/users/{created.json()['id']}/password", json={"password": "87654321"},
+                                headers={"X-CSRF-Token": csrf})
+        self.assertEqual(reset.status_code, 200, reset.text)
+        self.assertEqual(self.client.post("/api/auth/login", json={"username": "numeric",
+            "password": "87654321"}).status_code, 200)
+
     def test_editing_presence_names_other_user_and_expires(self):
         other = self.auth.create_user("second", "第二位", "correct horse battery staple")
         project_id = self.project["id"]

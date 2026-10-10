@@ -236,6 +236,8 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 .mock-upload-panel { display: grid; gap: 10px; padding: 14px; border: 1px solid #34414b; border-radius: 8px; background: #14232b; }
 .mock-upload-panel h3 { margin: 0; font-size: 14px; }
 .mock-upload-panel p { line-height: 1.5; color: #aac0c7; }
+.mock-upload-panel .field-label { display: grid; gap: 5px; margin: 0; }
+.mock-upload-panel .field-label input, .mock-upload-panel .field-label textarea { width: 100%; border: 1px solid #435563; border-radius: 6px; padding: 9px; background: #111a23; color: #e4eff1; font: inherit; }
 @media (max-width: 1100px) { .source-relink-notice { margin-inline: 18px; } }
 
 /* Four dimensions and reusable anchor selection. */

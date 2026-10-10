@@ -1,7 +1,7 @@
 import {useState} from 'react';
-import {authFetch} from './auth';
+import {authFetch, type Account} from './auth';
 
-type UploadStatus = {id:string; prefix:string; state:string; progress:number; detail:string; received:number; total:number};
+type UploadStatus = {id:string; prefix:string; state:string; progress:number; detail:string; received:number; total:number; collector_name:string; uploader_name:string; uploaded_by_username:string};
 type SelectedFile = {file:File; path:string};
 
 async function responseJson<T>(response:Response):Promise<T> {
@@ -13,17 +13,16 @@ async function responseJson<T>(response:Response):Promise<T> {
   return response.json();
 }
 
-function selectedFiles(list:FileList):{person:string; files:SelectedFile[]} {
-  const files=Array.from(list).filter(file=>file.name!=='.DS_Store'&&!file.webkitRelativePath.split('/').slice(1)
-    .some(part=>part.toLowerCase()==='timeline'||part.toLowerCase()==='.datamark-cache'));
-  if(!files.length)throw new Error('所选目录没有可上传的文件。');
-  const roots=new Set(files.map(file=>file.webkitRelativePath.split('/')[0]));
-  if(roots.size!==1)throw new Error('请一次选择一个完整采集目录。');
-  return {person:[...roots][0],files:files.map(file=>({file,path:file.webkitRelativePath.split('/').slice(1).join('/')||file.name}))};
+function selectedVideos(list:FileList):SelectedFile[] {
+  const files=Array.from(list);
+  if(!files.length)throw new Error('请从 video 文件夹选择 AVI 视频。');
+  if(files.some(file=>!file.name.toLowerCase().endsWith('.avi')))throw new Error('这一步只选择 AVI 视频；不要选择身份 TXT 或其他文件。');
+  return files.map(file=>({file,path:file.name}));
 }
 
-export default function MockUploadPanel({onPublished,onRunningChange}:{onPublished:(prefix:string)=>void;onRunningChange:(running:boolean)=>void}){
-  const [files,setFiles]=useState<SelectedFile[]>([]),[person,setPerson]=useState('');
+export default function MockUploadPanel({account,onPublished,onRunningChange}:{account:Account;onPublished:(prefix:string)=>void;onRunningChange:(running:boolean)=>void}){
+  const [files,setFiles]=useState<SelectedFile[]>([]),[collectorName,setCollectorName]=useState('');
+  const [uploaderName,setUploaderName]=useState(''),[note,setNote]=useState('');
   const [status,setStatus]=useState(''),[error,setError]=useState(''),[running,setRunning]=useState(false);
   async function publish(){
     setRunning(true);onRunningChange(true);setError('');
@@ -32,7 +31,8 @@ export default function MockUploadPanel({onPublished,onRunningChange}:{onPublish
     try{
       const started=await responseJson<UploadStatus>(await authFetch('/api/mock-s3/uploads',{
         method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({person,files:files.map(item=>({path:item.path,size:item.file.size}))})
+        body:JSON.stringify({collector_name:collectorName,uploader_name:uploaderName.trim()||null,note:note.trim()||null,
+          files:files.map(item=>({path:item.path,size:item.file.size}))})
       }));
       taskId=started.id;
       setStatus(`采集目录：${started.prefix}。开始接收 ${files.length} 个文件。`);
@@ -42,11 +42,11 @@ export default function MockUploadPanel({onPublished,onRunningChange}:{onPublish
           method:'PUT',headers:{'Content-Type':'application/octet-stream'},body:files[index].file
         }));
       }
-      setStatus('文件接收完成，正在压缩 FPV 视频；IMU 和 HEART 保留原格式。');
+      setStatus('文件接收完成，正在压缩 AVI 视频。');
       timer=setInterval(()=>{void authFetch(`/api/mock-s3/uploads/${started.id}`).then(responseJson<UploadStatus>)
         .then(value=>setStatus(`${value.detail} ${value.progress}%`)).catch(()=>{});},1000);
       const finished=await responseJson<UploadStatus>(await authFetch(`/api/mock-s3/uploads/${started.id}/finish`,{method:'POST'}));
-      setStatus(`已发布 ${finished.prefix}，可以选择此采集目录开始标注。`);
+      setStatus(`已发布 ${finished.prefix}。采集人：${finished.collector_name}；上传人：${finished.uploader_name}；操作账号：${finished.uploaded_by_username}。`);
       onPublished(finished.prefix);
     }catch(cause){
       if(taskId)void authFetch(`/api/mock-s3/uploads/${taskId}`,{method:'DELETE'}).catch(()=>{});
@@ -54,14 +54,16 @@ export default function MockUploadPanel({onPublished,onRunningChange}:{onPublish
     }
     finally{if(timer)clearInterval(timer);setRunning(false);onRunningChange(false);}
   }
-  return <section className="mock-upload-panel" aria-label="上传本机采集目录到 S3 mock">
-    <h3>上传本机采集目录到 S3 mock</h3>
-    <p>选择完整采集目录。视频根据文件名中的采集日期归档，先压缩为 270p MP4 再放入 FPV；IMU、HEART 等非视频文件保留原格式和相对目录。已有 timeline 和缓存不会上传，原文件仍在你的电脑上。</p>
-    <input ref={element=>{element?.setAttribute('webkitdirectory','');}} type="file" multiple disabled={running}
-      aria-label="选择完整采集目录" onChange={event=>{try{const result=selectedFiles(event.target.files!);setPerson(result.person);setFiles(result.files);setError('');setStatus(`已选择 ${result.files.length} 个文件。`);}catch(cause){setError(cause instanceof Error?cause.message:'无法读取目录。');setFiles([]);}}}/>
-    {files.length>0&&<><label className="field-label">个人文件夹名称<input value={person} disabled={running} maxLength={120} onChange={event=>setPerson(event.target.value)}/></label>
-      <p className="input-hint">原目录：{files[0].file.webkitRelativePath.split('/')[0]} · {files.length} 个文件</p>
-      <button className="primary wide" disabled={running||!person.trim()} onClick={()=>void publish()}>{running?'上传和压缩中…':'上传并压缩到 S3 mock'}</button></>}
+  return <section className="mock-upload-panel" aria-label="上传 video 文件夹中的 AVI 到 S3 mock">
+    <h3>上传 AVI 视频到 S3 mock</h3>
+    <p>在文件选择窗口进入采集设备的 video 文件夹，选中本次采集的全部 AVI。可直接从 U 盘选择；程序会先暂存到本机，再压缩为 270p MP4。此处不选择身份 TXT。</p>
+    <input type="file" accept=".avi" multiple disabled={running} aria-label="选择 video 文件夹中的 AVI"
+      onChange={event=>{try{const result=selectedVideos(event.target.files!);setFiles(result);setError('');setStatus(`已选择 ${result.length} 个 AVI 视频。`);}catch(cause){setError(cause instanceof Error?cause.message:'无法读取视频。');setFiles([]);}}}/>
+    {files.length>0&&<><label className="field-label">采集人姓名<input value={collectorName} disabled={running} maxLength={80} onChange={event=>setCollectorName(event.target.value)} required/></label>
+      <label className="field-label">上传人（选填；默认 {account.display_name}）<input value={uploaderName} disabled={running} maxLength={80} onChange={event=>setUploaderName(event.target.value)}/></label>
+      <label className="field-label">备注（选填）<textarea value={note} disabled={running} maxLength={500} rows={3} onChange={event=>setNote(event.target.value)}/></label>
+      <p className="input-hint">已选 {files.length} 个 AVI；采集日期从视频文件名读取，目标文件夹自动命名为“月日＋采集人”。实际操作账号会单独记录。</p>
+      <button className="primary wide" disabled={running||!collectorName.trim()} onClick={()=>void publish()}>{running?'上传和压缩中…':'上传并压缩到 S3 mock'}</button></>}
     {status&&<p role="status">{status}</p>}{error&&<p role="alert" className="import-error">{error}</p>}
   </section>;
 }

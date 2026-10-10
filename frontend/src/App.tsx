@@ -41,7 +41,8 @@ type ComposerDraft = {label:string; start:string; end:string; kind:'point'|'inte
 type SupplementResponse = {project:Project; added_count:number; skipped_names:string[]};
 type RelinkResponse = {project:Project; relinked_count:number; removed_copies:number; warnings?:string[]};
 type NasEntry = {name:string; path:string; kind:'directory'|'file'; size?:number};
-type NasListing = {root:string; path:string; parent:string|null; entries:NasEntry[]; page:number; has_more:boolean; can_open?:boolean};
+type NasListing = {root:string; path:string; parent:string|null; entries:NasEntry[]; page:number; has_more:boolean; can_open?:boolean;
+ capture?:{collector_name?:string|null; uploader_name?:string|null; uploaded_by_username?:string|null; note?:string|null; capture_date?:string|null}|null};
 const oldBackendMessage = '后台仍是旧版本，请关闭所有平台网页，等待约15秒后重新启动。';
 type SupplementContext = {project:Project; cursor:VideoTimeAnchor|null; composer:ComposerDraft|null; start:VideoTimeAnchor|null; end:VideoTimeAnchor|null};
 
@@ -787,13 +788,13 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy||mockUploading} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
    <h2 id="import-title">{mockMode?'新建 S3 mock 项目':importMode==='relink'?'关联原视频目录':importMode==='supplement'?'补导入视频':'新建采集项目'}</h2>
    {mockMode ? <>
-    <p>模拟 S3 按采集目录逐层浏览。新上传的数据位于 daily、采集日期、个人文件夹；进入个人文件夹后选择完整项目。已有桌面测试目录仍可使用。</p>
+    <p>从采集设备的 video 文件夹选择本次采集的 AVI，填写采集人后上传。新数据位于 daily、采集日期、“月日＋采集人”文件夹；进入该文件夹后选择项目。已有桌面测试目录仍可使用。</p>
     <label className="field-label" htmlFor="mock-project-name">项目名称</label>
     <input id="mock-project-name" className="project-name-input" value={newProjectName} disabled={!!busy} maxLength={80} onChange={e=>setNewProjectName(e.target.value)}/>
-    {user.can_upload&&<><button className="secondary wide" disabled={!!busy||mockUploading} onClick={()=>setMockUploadOpen(value=>!value)}>{mockUploadOpen?'收起上传':'上传本机采集目录'}</button>
-      {mockUploadOpen&&<MockUploadPanel onPublished={prefix=>{setMockUploadOpen(false);void browseMock(prefix);}} onRunningChange={setMockUploading}/>}</>}
+    {user.can_upload&&<><button className="secondary wide" disabled={!!busy||mockUploading} onClick={()=>setMockUploadOpen(value=>!value)}>{mockUploadOpen?'收起上传':'上传 AVI 视频'}</button>
+      {mockUploadOpen&&<MockUploadPanel account={user} onPublished={prefix=>{setMockUploadOpen(false);void browseMock(prefix);}} onRunningChange={setMockUploading}/>}</>}
     {mockCatalogAvailable&&<><button className="upload-zone" disabled={!!busy||mockLoading} onClick={()=>void browseMock()}><FolderOpen size={23}/><strong>浏览模拟 S3 项目文件夹</strong><span>按采集目录层级逐级选择</span></button>
-    {mockListing&&<div className="nas-browser"><div className="nas-browser-heading"><strong>模拟 S3：{mockListing.path||'采集数据'}</strong><button className="secondary" disabled={!!busy||mockLoading} onClick={()=>setMockListing(null)}>关闭</button></div><div className="nas-browser-list">{mockListing.parent!==null&&<button disabled={!!busy||mockLoading} onClick={()=>void browseMock(mockListing.parent??'')}>↑ 上一级</button>}{mockListing.entries.map(entry=><div className="nas-browser-row" key={entry.path}>{entry.kind==='directory'?<button disabled={!!busy||mockLoading} onClick={()=>void browseMock(entry.path)}><FolderOpen size={15}/>{entry.name}</button>:<span>{entry.name}{entry.size!==undefined?` · ${(entry.size/1024/1024/1024).toFixed(2)} GB`:''}</span>}</div>)}</div>{mockListing.can_open&&<button className="primary wide" disabled={!!busy||mockLoading||!!projectNameError(newProjectName,false)} onClick={()=>void importMockFolder()}>使用此项目文件夹</button>}</div>}</>}
+    {mockListing&&<div className="nas-browser"><div className="nas-browser-heading"><strong>模拟 S3：{mockListing.path||'采集数据'}</strong><button className="secondary" disabled={!!busy||mockLoading} onClick={()=>setMockListing(null)}>关闭</button></div>{mockListing.capture&&<p className="nas-browser-path">采集人：{mockListing.capture.collector_name||'未记录'} · 上传人：{mockListing.capture.uploader_name||'未记录'} · 操作账号：{mockListing.capture.uploaded_by_username||'未记录'}{mockListing.capture.note?` · 备注：${mockListing.capture.note}`:''}</p>}<div className="nas-browser-list">{mockListing.parent!==null&&<button disabled={!!busy||mockLoading} onClick={()=>void browseMock(mockListing.parent??'')}>↑ 上一级</button>}{mockListing.entries.map(entry=><div className="nas-browser-row" key={entry.path}>{entry.kind==='directory'?<button disabled={!!busy||mockLoading} onClick={()=>void browseMock(entry.path)}><FolderOpen size={15}/>{entry.name}</button>:<span>{entry.name}{entry.size!==undefined?` · ${(entry.size/1024/1024/1024).toFixed(2)} GB`:''}</span>}</div>)}</div>{mockListing.can_open&&<button className="primary wide" disabled={!!busy||mockLoading||!!projectNameError(newProjectName,false)} onClick={()=>void importMockFolder()}>使用此项目文件夹</button>}</div>}</>}
     {!mockCatalogAvailable&&<p className="import-error" role="alert">模拟存储目录不可用，请检查本机服务。</p>}
     {importError&&<p className="import-error" role="alert">{importError}</p>}
    </> : <>

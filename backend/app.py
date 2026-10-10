@@ -143,12 +143,14 @@ class UploadPermissionRequest(BaseModel):
 
 
 class MockUploadRequest(BaseModel):
-    person: str = Field(min_length=1, max_length=120)
+    collector_name: str = Field(min_length=1, max_length=80)
+    uploader_name: str | None = Field(default=None, max_length=80)
+    note: str | None = Field(default=None, max_length=500)
     files: list[dict] = Field(min_length=1, max_length=1000)
 
 
 class PasswordRequest(BaseModel):
-    password: str = Field(min_length=12, max_length=1024)
+    password: str = Field(min_length=8, max_length=1024)
 
 
 class ChangePasswordRequest(PasswordRequest):
@@ -599,7 +601,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/mock-s3/uploads")
     def start_mock_upload(body: MockUploadRequest, request: Request):
-        return mock_uploads.start(require_mock_upload(request), body.person, body.files)
+        require_mock_upload(request)
+        return mock_uploads.start(request.state.user, body.collector_name, body.uploader_name, body.note, body.files)
 
     @app.put("/api/mock-s3/uploads/{upload_id}/files/{index}")
     async def receive_mock_upload(upload_id: str, index: int, request: Request):

@@ -24,8 +24,9 @@ EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _password_hash(password: str, salt: bytes | None = None) -> str:
-    if len(password) < 12 or len(password) > 1024:
-        raise ValueError("密码长度须为 12 至 1024 个字符。")
+    minimum = 8 if password.isascii() and password.isdecimal() else 12
+    if len(password) < minimum or len(password) > 1024:
+        raise ValueError("纯数字密码至少 8 位；其他密码至少 12 位，最长 1024 位。")
     salt = salt or os.urandom(16)
     key = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**15, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024)
     return "scrypt:32768:8:1:" + salt.hex() + ":" + key.hex()
@@ -272,7 +273,7 @@ def main():
         parser.error("管理员已存在，请在应用内管理其他账号。")
     username = input("管理员账号：").strip()
     display_name = input("显示姓名：").strip()
-    password = getpass.getpass("密码（至少 12 字符）：")
+    password = getpass.getpass("密码（纯数字至少 8 位；其他至少 12 位）：")
     repeat = getpass.getpass("再次输入密码：")
     if password != repeat:
         parser.error("两次密码不一致。")
