@@ -74,11 +74,11 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 ### Jenkins 自动发布
 
-`main` 是 Ubuntu 内网发布分支。当前 `relty-server` 的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。这个任务只构建和测试 S3 mock 分支，不部署内网；部署脚本只接受 `origin/main` 提交。Jenkinsfile 保留 `pollSCM('H/2 * * * *')` 轮询配置，但实际轮询日志仍显示检查 `main`，自动触发当前分支尚未验证，须修正任务配置并以新提交验证。S3 模拟模式须在本机明确启用；通过页面上传采集目录时无需预设桌面测试视频路径，也不会随分支构建自动启用。
+`main` 保留为 Ubuntu 默认的 443 发布分支。当前 `relty-server` 的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。Jenkins 轮询该远端分支；每次新提交先构建并测试，再自动更新当前的 10443 内网 NAS 服务。检出提交必须与 `origin/feat/s3-mock` 完全一致，发布脚本还会再次核对分支、端口、内网来源配置和正在运行的服务；其他本地开发分支不会触发此发布流程。S3 模拟模式须在本机明确启用；通过页面上传采集目录时无需预设桌面测试视频路径，也不会随分支构建自动启用。
 
 首次启用前，由 `relty` 在 Ubuntu 上把当前发布目录中的 `deploy/intranet.env` 复制到持久目录 `/home/relty/services/datamark-web/intranet.env`，权限设为 `600`，并将 `/home/relty/services/datamark-web/current` 链接到已运行的发布目录。配置文件、数据库、证书和 NAS 素材始终留在仓库外。Jenkins 与网页容器使用同一台主机上的 `relty` 账号，且该账号已有 Docker 权限；流水线不会创建管理员或更改系统服务。
 
-`feat/s3-mock` 的新提交在镜像构建中运行前端测试和构建，再在隔离容器中运行后端测试；该任务不会调用部署脚本。`main` 的内网部署仍由 `deploy/ci-deploy-intranet.sh` 执行：它从已构建且测试通过的 `main` 提交创建独立发布目录、在线备份两个 SQLite 数据库、仅更新 DataMark 的 Compose 服务，并通过内网证书验证健康接口。健康检查失败会尝试恢复先前容器版本，`current` 链接仅在健康检查成功后切换；成功后也会把持久配置中的网页镜像标识更新为已验证的提交，避免后续重启恢复旧镜像。备份存放于 `backups/<提交>-<时间>/`，不会自动删除；数据库模式不兼容时须人工评估恢复，不能直接覆盖仍在写入的数据库。内网发布脚本要求旧公网来源配置为空，并要求旧公网网关已停止，防止 NAS 服务随发布重新暴露。Jenkins 的测试通过和健康接口正常不等于真实项目的 NAS 写回验收；仍需用授权账号实际标注并读回全部时间轴文件。
+`feat/s3-mock` 的新提交在镜像构建中运行前端测试和构建，再在隔离容器中运行后端测试；测试通过后，流水线调用 `deploy/ci-deploy-intranet.sh s3-mock-10443`。同一个脚本不带参数时仍只接受 `origin/main` 和 443；传入 `s3-mock-10443` 时只接受 `origin/feat/s3-mock` 和 10443，不能从其他本地分支发布。它从已构建且测试通过的提交创建独立发布目录、在线备份两个 SQLite 数据库、仅更新 DataMark 的 Compose 服务，并通过内网证书验证对应端口的健康接口。发布会短暂重启网页服务；健康检查失败会尝试恢复先前容器版本，`current` 链接仅在健康检查成功后切换；成功后也会把持久配置中的网页镜像标识更新为已验证的提交，避免后续重启恢复旧镜像。备份存放于 `backups/<提交>-<时间>/`，不会自动删除；数据库模式不兼容时须人工评估恢复，不能直接覆盖仍在写入的数据库。内网发布脚本要求旧公网来源配置为空，并要求旧公网网关已停止，防止 NAS 服务随发布重新暴露。Jenkins 的测试通过和健康接口正常不等于真实项目的 NAS 写回验收；仍需用授权账号实际标注并读回全部时间轴文件。
 
 ### Vercel 公网页面与 S3 服务（尚未接入）
 

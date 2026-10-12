@@ -12,6 +12,22 @@ die() {
     exit 1
 }
 
+[[ $# -le 1 ]] || die 'expected at most one deployment profile'
+profile="${1:-main}"
+case "$profile" in
+    main)
+        branch_ref=refs/remotes/origin/main
+        expected_port=443
+        expected_suffix=
+        ;;
+    s3-mock-10443)
+        branch_ref=refs/remotes/origin/feat/s3-mock
+        expected_port=10443
+        expected_suffix=:10443
+        ;;
+    *) die 'unknown deployment profile' ;;
+esac
+
 [[ "$(id -un)" == relty ]] || die 'run on relty-server as relty'
 [[ -f "$env_file" && -r "$env_file" ]] || die 'stable intranet.env is missing'
 [[ -f "$root_ca" && -r "$root_ca" ]] || die 'Caddy public root certificate is missing'
@@ -20,8 +36,8 @@ die() {
 [[ -f "$deploy_home/state/auth.sqlite3" ]] || die 'administrator database is missing'
 
 commit="$(git rev-parse --verify HEAD)"
-main_commit="$(git rev-parse --verify refs/remotes/origin/main)"
-[[ "$commit" == "$main_commit" ]] || die 'only the checked-out origin/main commit may deploy'
+branch_commit="$(git rev-parse --verify "$branch_ref")"
+[[ "$commit" == "$branch_commit" ]] || die "only the checked-out $branch_ref commit may deploy"
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || die 'tracked source files have changed in the workspace'
 docker image inspect "datamark-web:$commit" >/dev/null || die 'tested release image is missing'
 
@@ -31,14 +47,20 @@ host="$(sed -n 's/^DATAMARK_HOST=//p' "$env_file" | tail -n 1)"
 [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'DATAMARK_HOST must be the internal IPv4 address'
 https_port="$(sed -n 's/^DATAMARK_HTTPS_PORT=//p' "$env_file" | tail -n 1)"
 origin_port_suffix="$(sed -n 's/^DATAMARK_ORIGIN_PORT_SUFFIX=//p' "$env_file" | tail -n 1)"
-[[ -z "$https_port" || "$https_port" == 443 ]] || die 'main intranet release must use HTTPS port 443'
-[[ -z "$origin_port_suffix" ]] || die 'main intranet release must not set an origin port suffix'
+if [[ "$profile" == main ]]; then
+    [[ -z "$https_port" || "$https_port" == "$expected_port" ]] || die 'main intranet release must use HTTPS port 443'
+else
+    [[ "$https_port" == "$expected_port" ]] || die 'S3 mock branch intranet release must use HTTPS port 10443'
+fi
+[[ "$origin_port_suffix" == "$expected_suffix" ]] || die 'intranet origin port suffix does not match the deployment profile'
 for setting in DATAMARK_PUBLIC_ORIGIN DATAMARK_PUBLIC_API_ORIGIN DATAMARK_PUBLIC_BIND_IP; do
     value="$(sed -n "s/^${setting}=//p" "$env_file" | tail -n 1)"
     [[ -z "$value" ]] || die "$setting must be empty for the NAS-only intranet deployment"
 done
 [[ "$(docker inspect datamark-intranet-public_gateway-1 --format '{{.State.Running}}' 2>/dev/null || true)" != true ]] ||
     die 'stop the legacy public gateway before deploying the NAS-only service'
+exec 9>"$deploy_home/.manual-deploy.lock"
+flock -n 9 || die 'another DataMark deployment is running'
 
 previous="$(readlink -f "$current")"
 [[ "$previous" == "$deploy_home"/releases/* && -f "$previous/deploy/compose.intranet.yaml" ]] || die 'current symlink points outside a valid release'
@@ -155,8 +177,8 @@ docker compose --env-file "$env_file" "${compose_files[@]}" \
 [[ "$(docker inspect datamark-intranet-web-1 --format '{{.Config.Image}}')" == "datamark-web:$commit" ]] ||
     die 'running web container is not the tested image'
 curl --fail --silent --show-error --cacert "$root_ca" \
-    "https://$host/api/health" |
-    python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and "account-login" in data["capabilities"]'
+    "https://$host$expected_suffix/api/health" |
+    python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and data["application"] == "datamark" and data["storage_backend"] == "nas" and "account-login" in data["capabilities"]'
 persist_image_tag "$commit"
 env_tag_updated=1
 next_link="$deploy_home/.current-$commit-$$"

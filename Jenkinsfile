@@ -8,7 +8,8 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
-    // Validate feat/s3-mock without changing the running intranet release.
+    // This job checks out only feat/s3-mock. The deploy script repeats the
+    // exact commit and 10443 checks before touching the running service.
     triggers { pollSCM('H/2 * * * *') }
 
     stages {
@@ -35,6 +36,12 @@ pipeline {
                         "datamark-web:$tag" \
                         /opt/venv/bin/python -c 'import sys, unittest; suite = unittest.defaultTestLoader.discover("backend", pattern="test_*.py"); count = suite.countTestCases(); print(f"Discovered {count} backend tests"); assert count > 0, "backend tests missing from image"; result = unittest.TextTestRunner(verbosity=1).run(suite); sys.exit(not result.wasSuccessful())'
                 '''
+            }
+        }
+
+        stage('Deploy feat/s3-mock to intranet 10443') {
+            steps {
+                sh 'bash deploy/ci-deploy-intranet.sh s3-mock-10443'
             }
         }
 
