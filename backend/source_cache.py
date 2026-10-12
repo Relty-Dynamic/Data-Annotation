@@ -26,6 +26,19 @@ README = """# DataMark 视频预览缓存
 - 不要在这里保存原视频或个人文件，不要改动 .datamark-owner.json 所有权标记。
 """
 
+WINDOWS_NAS_ROOT = r"\\Relty\homes\datacollection"
+
+
+def local_nas_root(*, windows: bool | None = None) -> Path | None:
+    """Opt in with an explicit mount, or use the established Windows share."""
+    configured = os.getenv("DATAMARK_LOCAL_NAS_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    use_windows = os.name == "nt" if windows is None else windows
+    if use_windows:
+        return Path(WINDOWS_NAS_ROOT)
+    return None
+
 
 def is_reparse(path: Path) -> bool:
     try:

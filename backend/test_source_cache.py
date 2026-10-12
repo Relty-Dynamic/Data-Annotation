@@ -16,7 +16,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from backend.service import FILENAMES, ProjectService, empty_annotations
-from backend.source_cache import CACHE_FOLDER, MARKER
+from backend.source_cache import CACHE_FOLDER, MARKER, WINDOWS_NAS_ROOT, local_nas_root
 from backend.testing_annotations import complete_annotations
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +171,35 @@ class SourceCacheTests(unittest.TestCase):
         self.assertTrue(source.is_file())
         self.assertEqual(list(self.service.local.rglob('*.avi')), [])
         self.assertEqual(list(self.service.local.rglob('*.mp4')), [])
+
+    def test_local_nas_import_keeps_unmarked_cache_read_only(self):
+        source = self.video()
+        cache = source.parent / CACHE_FOLDER
+        cache.mkdir()
+        foreign = cache / uuid.uuid4().hex
+        foreign.mkdir()
+        (foreign / 'existing.txt').write_bytes(b'keep NAS cache')
+        before = sorted((str(path.relative_to(cache)), path.read_bytes())
+                        for path in cache.rglob('*') if path.is_file())
+        with self.assertRaises(HTTPException) as caught:
+            self.service.open_files([str(source)])
+        self.assertEqual(caught.exception.status_code, 409)
+        with patch.dict(os.environ, {'DATAMARK_LOCAL_NAS_ROOT': str(self.root),
+                                      'DATAMARK_STORAGE_BACKEND': 'local'}):
+            opened = self.service.open_files([str(source)])
+            project = self.service.load(opened['id'])
+            self.assertEqual(opened['cache_mode'], 'legacy')
+            self.assertFalse(project['_sources']['v0001'].get('cache_directory'))
+            self.assertTrue(self.service.preview_spec(project, 'v0001').target.is_relative_to(self.service.local))
+        self.assertEqual(before, sorted((str(path.relative_to(cache)), path.read_bytes())
+                                        for path in cache.rglob('*') if path.is_file()))
+        self.assertFalse((cache / MARKER).exists())
+
+    def test_windows_uses_standard_share_without_global_environment_changes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(str(local_nas_root(windows=True)), WINDOWS_NAS_ROOT)
+        with patch.dict(os.environ, {'DATAMARK_LOCAL_NAS_ROOT': 'X:\\captured'}):
+            self.assertEqual(str(local_nas_root(windows=True)), 'X:\\captured')
 
     def test_offline_original_directory_does_not_silently_fall_back_to_platform_cache(self):
         source = self.video()

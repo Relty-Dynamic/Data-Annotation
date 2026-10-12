@@ -25,7 +25,7 @@ from fastapi import HTTPException
 
 from .previews import PreviewManager, PreviewSpec, run_ffmpeg
 from .project_storage import ProjectStorage, import_name, checked_tree, link_copy
-from .source_cache import SourceCache, CACHE_FOLDER, check_plain_tree
+from .source_cache import SourceCache, CACHE_FOLDER, check_plain_tree, local_nas_root
 from .session_cache import SessionCache
 from .remote import RemoteClient
 from .storyboards import StoryboardCache
@@ -597,11 +597,17 @@ class ProjectService:
 
     def attach_source_caches(self, project: dict, *, video_ids: set[str] | None = None, migrate: bool = False) -> None:
         warnings = []
+        nas_root = local_nas_root() if os.getenv("DATAMARK_STORAGE_BACKEND", "local") == "local" else None
         for video in project["videos"]:
             if video_ids is not None and video["id"] not in video_ids:
                 continue
             source = project["_sources"][video["id"]]
             if source.get("cache_directory") or self.is_managed_copy(Path(source["path"])):
+                continue
+            # A mounted NAS cache belongs to the intranet project. Local tests
+            # keep their previews under .local and never claim its owner marker.
+            if nas_root and Path(source["path"]).is_relative_to(nas_root):
+                self.check_media_source(Path(source["path"]), source)
                 continue
             try:
                 path = Path(source["path"])

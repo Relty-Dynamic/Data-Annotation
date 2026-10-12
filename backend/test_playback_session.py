@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import errno
 import json
+import ntpath
 import os
 import tempfile
 import threading
@@ -10,7 +11,7 @@ import time
 import unittest
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -193,6 +194,105 @@ class PlaybackSessionTests(unittest.TestCase):
                 restarted.sessions.start(self.ident)
                 self.wait_ready(restarted)
             self.assertEqual(self.asset('normal', version=manifest['version'], service=restarted).read_bytes(), MEDIA)
+
+    def test_local_project_downloads_verified_intranet_cache_without_nas_writes(self):
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                      'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            self.prepare()
+        nas = self.source / '.datamark-cache' / 'ubuntu-playback-v1'
+        before = {str(path.relative_to(nas)): path.read_bytes() for path in nas.rglob('*') if path.is_file()}
+        local = ProjectService(self.root / 'local-app')
+        local.probe = self.probe
+        self.services.append(local)
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'local',
+                                      'DATAMARK_LOCAL_NAS_ROOT': str(self.root)}):
+            opened = local.open_files([str(path) for path in sorted(self.source.glob('*.avi'))])
+            self.assertNotEqual(opened['id'], self.ident)
+            self.assertEqual(opened['cache_mode'], 'legacy')
+            local.remote = SimpleNamespace(map_path=lambda _: '/mnt/nas/fixture',
+                                           prepare=lambda *args: self.fail('must read mounted NAS first'))
+            with patch('backend.session_cache.run_ffmpeg', side_effect=AssertionError('must download NAS cache')):
+                local.sessions.start(opened['id'])
+                deadline = time.monotonic() + 5
+                while local.sessions.status(opened['id'])['state'] == 'running' and time.monotonic() < deadline:
+                    time.sleep(.01)
+            status = local.sessions.status(opened['id'])
+            self.assertEqual(status['state'], 'ready', status)
+            asset = local.sessions.asset(opened['id'], 'normal', 'v0001')
+            self.assertTrue(asset.is_relative_to(local.storage.directory(opened['id']) / 'playback'))
+            self.assertEqual(asset.read_bytes(), MEDIA)
+        self.assertEqual(before, {str(path.relative_to(nas)): path.read_bytes()
+                                  for path in nas.rglob('*') if path.is_file()})
+
+    def test_local_nas_cache_rejects_tampered_bytes_and_changed_original(self):
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                      'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            self.prepare()
+        local = ProjectService(self.root / 'local-app')
+        local.probe = self.probe
+        self.services.append(local)
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'local',
+                                      'DATAMARK_LOCAL_NAS_ROOT': str(self.root)}):
+            opened = local.open_files([str(path) for path in sorted(self.source.glob('*.avi'))])
+            source = local.load(opened['id'])['_sources']['v0001']
+            found = local.sessions._local_nas_entry(source)
+            self.assertIsNotNone(found)
+            entry, directory = found
+            normal = directory / entry['normal']['path']
+            normal.write_bytes(normal.read_bytes() + b'tampered')
+            self.assertIsNone(local.sessions._local_nas_entry(source))
+            self.source.joinpath(self.project['videos'][0]['name']).write_bytes(b'changed original')
+            with self.assertRaises(HTTPException) as caught:
+                local.sessions._local_nas_entry(source)
+            self.assertEqual(caught.exception.status_code, 409)
+
+    def test_local_nas_cache_finds_legacy_key_from_ubuntu_path(self):
+        server_root = Path('/mnt/nas/homes/datacollection')
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                      'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            self.prepare()
+        nas = self.source / '.datamark-cache' / 'ubuntu-playback-v1'
+        for source in self.project['_sources'].values():
+            old_key = self.service.sessions._source_key(source)
+            server_source = {**source, 'path': str(server_root / Path(source['path']).relative_to(self.root))}
+            new_key = self.service.sessions._source_key(server_source)
+            manifest = nas / self.ident / (old_key + '.assets.json')
+            data = json.loads(manifest.read_text(encoding='utf-8'))
+            data.pop('source_identity', None)
+            data['key'] = new_key
+            (nas / self.ident / (new_key + '.assets.json')).write_text(json.dumps(data), encoding='utf-8')
+            manifest.unlink()
+        local = ProjectService(self.root / 'local-app')
+        local.probe = self.probe
+        self.services.append(local)
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'local',
+                                      'DATAMARK_LOCAL_NAS_ROOT': str(self.root)}):
+            opened = local.open_files([str(path) for path in sorted(self.source.glob('*.avi'))])
+            source = local.load(opened['id'])['_sources']['v0001']
+            self.assertIsNotNone(local.sessions._local_nas_entry(source))
+
+    def test_windows_relative_path_builds_the_linux_cache_key(self):
+        root = PureWindowsPath(r'\\Relty\homes\datacollection')
+        path = root / 'habit' / 'smoking' / 'recording' / 'FPV' / 'clip.avi'
+        relative = path.relative_to(root)
+        server = PurePosixPath('/mnt/nas/homes/datacollection').joinpath(*relative.parts)
+        self.assertEqual(str(server), '/mnt/nas/homes/datacollection/habit/smoking/recording/FPV/clip.avi')
+        source = self.project['_sources']['v0001']
+        expected = self.service.sessions._ubuntu_source_key(source, server)
+        self.assertEqual(expected, self.service.sessions._source_key({**source, 'path': str(server)}))
+        with patch('backend.session_cache.os.path.normcase', ntpath.normcase):
+            self.assertNotEqual(expected, self.service.sessions._source_key({**source, 'path': str(server)}))
+            self.assertEqual(expected, self.service.sessions._ubuntu_source_key(source, server))
+
+    def test_portable_nas_identity_allows_only_submillisecond_smb_rounding(self):
+        source = self.project['_sources']['v0001']
+        identity = self.service.sessions._portable_source_identity(source, Path(source['path']), self.root)
+        self.assertTrue(self.service.sessions._portable_identity_matches(
+            {**identity, 'mtime_ns': identity['mtime_ns'] + 999_999}, identity))
+        self.assertFalse(self.service.sessions._portable_identity_matches(
+            {**identity, 'mtime_ns': identity['mtime_ns'] + 1_000_000}, identity))
+        self.assertFalse(self.service.sessions._portable_identity_matches(
+            {**identity, 'sample_sha256': 'changed'}, identity))
 
     def test_nas_publication_failure_keeps_ubuntu_playback_for_retry(self):
         with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',

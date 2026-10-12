@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, wait
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import HTTPException
 
@@ -19,7 +19,8 @@ from .previews import PreviewSpec, run_ffmpeg
 from .io_rate import read_rates
 from .local_playback import render_local_fast, render_local_thumbnail
 from .storyboards import StoryboardCache
-from .project_storage import checked_tree
+from .project_storage import PROJECT_ID, checked_tree
+from .source_cache import is_reparse, local_nas_root
 from .encoding import encoder_threads
 from .video_selection import active_videos
 
@@ -101,6 +102,106 @@ class SessionCache:
         return _digest([PROFILE, os.path.normcase(source.get('cache_identity_path', source['path'])),
                         source.get('cache_identity_stamp', source['stamp']), source['duration_ms'],
                         source.get('media_start_seconds', 0)])[:32]
+
+    @staticmethod
+    def _portable_source_identity(source: dict, path: Path, root: Path) -> dict:
+        stamp = source['stamp']
+        return {'profile': PROFILE, 'relative_path': path.relative_to(root).as_posix(),
+                'size': stamp['size'], 'mtime_ns': stamp['mtime_ns'],
+                'sample_sha256': stamp['sample_sha256'],
+                'duration_ms': source['duration_ms'],
+                'media_start_seconds': source.get('media_start_seconds', 0)}
+
+    @staticmethod
+    def _portable_identity_matches(actual: dict | None, expected: dict) -> bool:
+        if not isinstance(actual, dict):
+            return False
+        try:
+            return (all(actual.get(field) == value for field, value in expected.items() if field != 'mtime_ns')
+                    and abs(actual['mtime_ns'] - expected['mtime_ns']) < 1_000_000)
+        except (KeyError, TypeError):
+            return False
+
+    @staticmethod
+    def _ubuntu_source_key(source: dict, server_path: PurePosixPath) -> str:
+        # Linux generated this key without Windows normcase/backslash conversion.
+        return _digest([PROFILE, str(server_path), source['stamp'], source['duration_ms'],
+                        source.get('media_start_seconds', 0)])[:32]
+
+    def _local_nas_entry(self, source: dict) -> tuple[dict, Path] | None:
+        """Find an intranet cache on an explicitly mounted NAS, without claiming it."""
+        root = local_nas_root()
+        if root is None or os.getenv('DATAMARK_STORAGE_BACKEND', 'local') != 'local':
+            return None
+        path = Path(source['path'])
+        if not path.is_relative_to(root):
+            return None
+        try:
+            root = root.resolve(strict=True)
+            resolved_path = path.resolve(strict=True)
+            if (is_reparse(path) or is_reparse(path.parent)
+                    or not resolved_path.is_relative_to(root)):
+                return None
+            self.service.check_media_source(path, source)
+            base = path.parent / '.datamark-cache' / 'ubuntu-playback-v1'
+            if not base.is_dir() or is_reparse(base) or is_reparse(base.parent):
+                return None
+            relative = resolved_path.relative_to(root)
+            identity = self._portable_source_identity(source, resolved_path, root)
+            server_root = PurePosixPath(os.getenv('DATAMARK_LOCAL_NAS_SERVER_ROOT', '/mnt/nas/homes/datacollection'))
+            server_path = server_root.joinpath(*relative.parts)
+            keys = {self._source_key(source), self._ubuntu_source_key(source, server_path)}
+            for child in base.iterdir():
+                if not PROJECT_ID.fullmatch(child.name) or is_reparse(child) or not child.is_dir():
+                    continue
+                directory = checked_tree(child, base)
+                for manifest in directory.glob('*.assets.json'):
+                    if is_reparse(manifest) or not manifest.is_file():
+                        continue
+                    key = manifest.name.removesuffix('.assets.json')
+                    if key not in keys:
+                        try:
+                            raw = json.loads(manifest.read_bytes())
+                        except (OSError, ValueError, AttributeError):
+                            continue
+                        if not self._portable_identity_matches(raw.get('source_identity'), identity):
+                            continue
+                    entry = self._nas_entry(directory, key, source)
+                    if entry and (entry.get('source_identity') is None
+                                  or self._portable_identity_matches(entry.get('source_identity'), identity)):
+                        return entry, directory
+        except (OSError, ValueError):
+            return None
+        return None
+
+    def _download_local_nas_entry(self, job: dict, video_id: str, source: dict,
+                                  entry: dict, nas: Path, local: Path, key: str) -> dict:
+        records = [entry[kind] for kind in ('normal', 'fast', 'thumbnail')] + entry['sheets']
+        self._check_space(local, sum(record['size'] for record in records))
+        copied = []
+        for index, record in enumerate(records):
+            self._check(job)
+            name = record['path']
+            target = local / name
+            if Path(name).name != name or target.is_symlink():
+                raise HTTPException(409, 'NAS 预览缓存路径异常，未下载。')
+            self._progress(job, video_id, 'cache', 5 + 90 * index / len(records),
+                           '正在从 NAS 下载已校验的精简播放缓存。', operation='nas')
+            self._copy_asset(nas / name, target, job['stop'])
+            digest = hashlib.sha256()
+            with target.open('rb') as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b''):
+                    digest.update(block)
+            if digest.hexdigest() != entry['sha256'][name]:
+                target.unlink(missing_ok=True)
+                raise HTTPException(409, 'NAS 预览缓存下载校验失败，请重试。')
+            copied.append(self._file_record(target, local))
+        result = {**entry, 'key': key, 'normal': copied[0], 'fast': copied[1],
+                  'thumbnail': copied[2], 'sheets': copied[3:]}
+        self._write_json(local / (key + '.assets.json'), result)
+        if self._load_entry(local, key, source) is None:
+            raise HTTPException(422, '下载后的本机播放素材校验失败，请重试。')
+        return result
 
     def _nas_playback_directory(self, project: dict, source: dict, *, create: bool = False) -> Path | None:
         """Use source-adjacent NAS storage only for the configured intranet tree."""
@@ -196,8 +297,10 @@ class SessionCache:
                     temporary.unlink(missing_ok=True)
                 published.append(self._file_record(target, directory))
                 hashes[name] = digest.hexdigest()
+            root = Path(os.environ['DATAMARK_SOURCE_ROOT']).resolve(strict=True)
             fresh = {**entry, 'normal': published[0], 'fast': published[1],
                      'thumbnail': published[2], 'sheets': published[3:], 'sha256': hashes}
+            fresh['source_identity'] = self._portable_source_identity(source, Path(source['path']), root)
             self._write_json(directory / (key + '.assets.json'), fresh)
             if self._nas_entry(directory, key, source) is None:
                 raise HTTPException(422, 'NAS 预览缓存读回校验失败，Ubuntu 副本已保留。')
@@ -700,10 +803,21 @@ class SessionCache:
         source = project['_sources'][video_id]
         key = self._source_key(source)
         try:
+            entry = self._load_entry(directory, key, source)
+            if entry is None:
+                found = self._local_nas_entry(source)
+                if found is not None:
+                    cached, cached_directory = found
+                    entry = self._download_local_nas_entry(job, video_id, source, cached,
+                                                           cached_directory, directory, key)
+                    with self._condition:
+                        item = next(item for item in job['status']['items'] if item['video_id'] == video_id)
+                        item.update(state='ready', progress=100, detail=None)
+                        self._counts(job)
+                    return entry, directory
             remote = getattr(self.service, 'remote', None)
             if remote is not None and remote.map_path(source['path']) is not None:
                 # Ready local playback never needs a NAS or server connection.
-                entry = self._load_entry(directory, key, source)
                 if entry is None:
                     entry = remote.prepare(source, directory, key,
                         lambda operation, value, detail: self._progress(job, video_id,

@@ -90,6 +90,10 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 现有 Windows 草稿数据库记录了 Windows 原视频绝对路径，不能直接复制到 Ubuntu 使用。**所有用户先保存浏览器中的未提交编辑，停止旧平台并禁止继续编辑**，再在旧机器项目目录运行 `.venv\Scripts\python.exe -m deploy.migrate_projects export --state .local --output <仓库外的安全迁移包目录>`；脚本通过 SQLite 快照备份标注库及已有账号库，并逐个读取原视频计算完整 SHA-256。将整个迁移包经批准的内网传输方式送到 Ubuntu，限制目录权限为仅部署账号可读。按实际 NAS 挂载修改 `deploy/intranet-paths.example.json` 并另存为被 Git 忽略的 `deploy/intranet-paths.json`，补齐其它原视频路径映射。保持 Ubuntu `state/` 不存在，运行 `python3 -m deploy.migrate_projects apply --bundle <迁移包目录> --state <DATAMARK_HOME>/state --mappings deploy/intranet-paths.json`。迁移会逐段比对完整 SHA-256、核对原 `timeline/` 文件，保留项目 ID、已保存草稿、编辑历史、已有账号与分配并使旧登录失效；任一文件不一致就不创建目标状态目录。若旧平台没有账号库，迁移输出会明确提示，随后使用上文交互命令创建首位管理员。迁移不复制可再生成的本机播放缓存，Ubuntu 首次打开项目时需要重新准备或复用 NAS 缓存。迁移完成并创建管理员后再运行上面的 `up -d`，逐项目验收。迁移包含账号和个人数据，确认 Ubuntu 验收和备份后按公司规则保管或清理。本机服务在 Windows 和 macOS 均可点选视频文件或原视频目录；Ubuntu 服务仅以完整 NAS 采集目录作为新项目领取单位，支持目录浏览或填写 NAS 完整路径。访问者电脑上的本地文件不会自动出现在 Ubuntu 服务器上，需要通过本机服务同步进度和最终 JSON。
 
+本机测试已挂载的 NAS 时，macOS 可在启动进程设置 `DATAMARK_LOCAL_NAS_ROOT=/Volumes/homes/datacollection`，再运行 `.venv/bin/python launch.py --no-browser`。Windows 使用标准共享目录 `\\Relty\homes\datacollection` 时，现有 **启动标注平台.lnk** 会自动按该目录只读查找缓存；打开该共享目录中的原视频或采集目录即可。若 Windows 使用映射盘或其他共享路径，在同一个 PowerShell 窗口运行 `$env:DATAMARK_LOCAL_NAS_ROOT='X:\datacollection'; .\.venv\Scripts\python.exe .\launch.py`，将路径改为实际挂载的采集根目录；这不修改系统环境变量。本机项目使用独立账号和项目 ID，预览只写入本项目的 `.local/`；不会认领或改写 NAS 上现有的 `.datamark-cache` 所有权标记。
+
+若 NAS 上有内网服务完整且校验通过的 `.datamark-cache/ubuntu-playback-v1/<项目ID>/` 精简播放缓存，本机会复制普通与倍速视频及图片到本机播放目录，校验后供浏览器下载；已配置 Windows NAS 处理服务时也先复用有效的挂载缓存，缺失或损坏时继续原有准备流程。旧缓存若由不同的 Ubuntu 路径生成，可用 `DATAMARK_LOCAL_NAS_SERVER_ROOT` 指定其采集根目录，默认 `/mnt/nas/homes/datacollection`。此设置只影响本机读缓存；NAS 写回仍按项目原有的目录与权限规则执行。更新代码后须先退出正在运行的旧本机服务，再启动快捷方式；启动器会复用仍在运行的旧进程。
+
 ## Windows 本机模式的服务器准备 NAS 素材
 
 NAS 素材可以由 `relty-server` 读取、生成播放缓存并打包，再下载到本机。服务器通过有线网络读取 `/mnt/nas/`；电脑继续使用 Wi-Fi，无需接网线。原视频不上传到服务器，也不下载到本机。标注页面仍读取 `.local/projects/<项目ID>/playback/` 中的普通预览、倍速视频、封面和悬停图，本机草稿及四轴标注流程不变。
