@@ -23,6 +23,7 @@ services:
       DATAMARK_PUBLIC_ORIGIN: ${DATAMARK_PUBLIC_ORIGIN:-}
       DATAMARK_PUBLIC_API_ORIGIN: ${DATAMARK_PUBLIC_API_ORIGIN:-}
       DATAMARK_BIND_IP: ${DATAMARK_BIND_IP:?Internal interface IP is required}
+      DATAMARK_STORAGE_BACKEND: nas
       DATAMARK_SOURCE_ROOT: /mnt/nas/homes/datacollection
       FFMPEG_PATH: /usr/bin/ffmpeg
       FFPROBE_PATH: /usr/bin/ffprobe
