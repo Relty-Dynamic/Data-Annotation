@@ -77,7 +77,6 @@ class FixedTrackRequest(BaseModel):
 
 class TrackLabelsRequest(BaseModel):
     labels: list[str]
-    renames: dict[str, str] = Field(default_factory=dict)
     expected_revision: int = Field(ge=0, strict=True)
 
 
@@ -857,7 +856,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.put("/api/projects/{project_id}/tracks/{track_id}/labels")
     def set_track_labels(project_id: str, track_id: str, body: TrackLabelsRequest, request: Request):
         return service.set_track_labels(project_id, track_id, body.labels, body.expected_revision,
-                                        actor=request.state.user if auth_required else None, renames=body.renames)
+                                        actor=request.state.user if auth_required else None)
 
     @app.delete("/api/projects/{project_id}/custom-tracks/{track_id}")
     def delete_custom_track(project_id: str, track_id: str, body: DeleteProjectRequest):

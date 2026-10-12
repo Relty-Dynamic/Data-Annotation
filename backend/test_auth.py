@@ -149,6 +149,10 @@ class AccountAccessTests(unittest.TestCase):
         created = self.client.put(path, json=body, headers={"X-CSRF-Token": csrf})
         self.assertEqual(created.status_code, 200, created.text)
         self.assertEqual(self.client.get(path).json(), [body])
+        for remaining in (["未进食"], []):
+            updated = self.client.put(path, json={**body, "labels": remaining}, headers={"X-CSRF-Token": csrf})
+            self.assertEqual(updated.status_code, 200, updated.text)
+            self.assertEqual(self.client.get(path).json()[0]["labels"], remaining)
         invalid = {**body, "labels": ["进食\n伪造"]}
         self.assertEqual(self.client.put(path, json=invalid, headers={"X-CSRF-Token": csrf}).status_code, 422)
         self.client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})

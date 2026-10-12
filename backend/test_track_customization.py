@@ -48,11 +48,11 @@ class TrackCustomizationTests(unittest.TestCase):
         annotations = empty_annotations()
         annotations["scene"] = [{"id": "scene", "label": "室内", "start_ms": 0, "end_ms": 1000}]
         annotations["posture"] = [{"id": "posture", "label": "坐", "start_ms": 0, "end_ms": 1000}]
-        annotations["food"] = [{"id": "meal", "label": "进食", "start_ms": 100, "end_ms": 300}]
+        annotations["food"] = [{"id": "meal", "label": "进食（午餐）", "start_ms": 100, "end_ms": 300}]
         saved = self.service.update_draft(project["id"], annotations, created["revision"])
         self.service.writeback(project["id"])
         path = self.source / "timeline" / "food.timeline.json"
-        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["segments"][0]["label"], "进食")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["segments"][0]["label"], "进食（午餐）")
         fresh = ProjectService(self.root / "other-app")
         fresh.probe = self.service.probe
         try:
@@ -63,21 +63,33 @@ class TrackCustomizationTests(unittest.TestCase):
             fresh.sessions.close()
             fresh.previews.close()
 
-    def test_label_note_renames_existing_segments_and_json_without_new_field(self):
+    def test_note_changes_only_selected_segment_and_json_label(self):
         project = self.service.open_path(str(self.source))
         annotations = empty_annotations()
-        annotations["scene"] = [{"id": "scene", "label": "室内", "start_ms": 0, "end_ms": 1000}]
+        annotations["scene"] = [{"id": "first", "label": "室内（餐厅）", "start_ms": 0, "end_ms": 400},
+                                {"id": "middle", "label": "室外", "start_ms": 400, "end_ms": 600},
+                                {"id": "last", "label": "室内", "start_ms": 600, "end_ms": 1000}]
         annotations["posture"] = [{"id": "posture", "label": "坐", "start_ms": 0, "end_ms": 1000}]
         saved = self.service.update_draft(project["id"], annotations, 0)
-        updated = self.service.set_track_labels(project["id"], "scene", ["室内（教室）", "室外"], saved["revision"], renames={"室内": "室内（教室）"})
-        self.assertEqual(updated["annotations"]["scene"][0]["label"], "室内（教室）")
+        self.assertEqual([item["label"] for item in saved["annotations"]["scene"]],
+                         ["室内（餐厅）", "室外", "室内"])
         self.service.writeback(project["id"])
         document = json.loads((self.source / "timeline" / "scene.timeline.json").read_text(encoding="utf-8"))
         segment = document["segments"][0]
-        self.assertEqual(segment["label"], "室内（教室）")
+        self.assertEqual(segment["label"], "室内（餐厅）")
         self.assertNotIn("note", segment)
-        self.assertEqual([item["name"] for item in document["labels"]], ["室内（教室）", "室外"])
-        self.assertEqual(self.service.open_path(str(self.source))["annotations"]["scene"][0]["label"], "室内（教室）")
+        self.assertIn("室内（餐厅）", [item["name"] for item in document["labels"]])
+        self.assertEqual([item["label"] for item in self.service.open_path(str(self.source))["annotations"]["scene"]],
+                         ["室内（餐厅）", "室外", "室内"])
+
+    def test_deleting_base_label_also_removes_segments_with_notes(self):
+        project = self.service.open_path(str(self.source))
+        annotations = empty_annotations()
+        annotations["scene"] = [{"id": "noted", "label": "室内（餐厅）", "start_ms": 0, "end_ms": 400},
+                                {"id": "plain", "label": "室内", "start_ms": 600, "end_ms": 1000}]
+        saved = self.service.update_draft(project["id"], annotations, 0)
+        updated = self.service.set_track_labels(project["id"], "scene", ["室外"], saved["revision"])
+        self.assertEqual(updated["annotations"]["scene"], [])
 
     def test_named_json_rejects_reserved_and_path_names(self):
         project = self.service.open_path(str(self.source))

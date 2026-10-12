@@ -136,6 +136,22 @@ export function isSegmentDraftDirty(segment: Segment | undefined, draft: {
     (draft.kind !== 'point' && (Boolean(draft.end.trim() && end === null) || end !== segment.end_ms));
 }
 
+export function splitAnnotationLabel(label: string, options: string[]): {base: string; note: string} {
+  if (options.includes(label)) return {base: label, note: ''};
+  if (options.length === 0) {
+    const match = /^(.*)（([^（）]+)）$/u.exec(label);
+    return match ? {base: match[1], note: match[2]} : {base: label, note: ''};
+  }
+  const base = [...options].sort((left, right) => right.length - left.length)
+    .find(option => label.startsWith(`${option}（`) && label.endsWith('）'));
+  if (!base) return {base: label, note: ''};
+  return {base, note: label.slice(base.length + 1, -1)};
+}
+
+export function annotationLabel(base: string, note: string): string {
+  return note.trim() ? `${base}（${note.trim()}）` : base;
+}
+
 export function locateVideo(videos: Video[], time: number): Video | undefined {
   if (!videos.length || !Number.isFinite(time)) return undefined;
   const last = videos[videos.length - 1];

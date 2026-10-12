@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { annotationsEqual, applyAnnotationRange, arrangeLanes, formatTime, isPointSegment, locateVideo, normalizeStateSeams, parseTime, projectTracks, projectTrackLabels, switchState, trackName } from '../src/domain.ts';
+import { annotationLabel, annotationsEqual, applyAnnotationRange, arrangeLanes, formatTime, isPointSegment, locateVideo, normalizeStateSeams, parseTime, projectTracks, projectTrackLabels, splitAnnotationLabel, switchState, trackName } from '../src/domain.ts';
 
 const segment = (id, label, start_ms, end_ms) => ({ id, label, start_ms, end_ms });
 const compact = (segments) => segments.map(({ label, start_ms, end_ms }) => [label, start_ms, end_ms]);
+
+test('a segment note composes into the same label and can be edited or removed',()=>{
+  const choices=['室内','室外'];
+  assert.equal(annotationLabel('室内',' 餐厅 '),'室内（餐厅）');
+  assert.deepEqual(splitAnnotationLabel('室内（餐厅）',choices),{base:'室内',note:'餐厅'});
+  assert.deepEqual(splitAnnotationLabel('室内',choices),{base:'室内',note:''});
+  assert.deepEqual(splitAnnotationLabel('喝咖啡（餐厅）',[]),{base:'喝咖啡',note:'餐厅'});
+  assert.equal(annotationLabel('室内',''),'室内');
+});
 
 test('project label choices use saved labels and old projects keep defaults',()=>{
   const axis='custom_'+'a'.repeat(32);

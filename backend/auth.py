@@ -154,7 +154,7 @@ class AuthStore:
         if (not isinstance(json_name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", json_name)
                 or json_name in {"scene", "posture", "category", "habit"} or json_name.startswith("custom_")
                 or not isinstance(name, str)
-                or not isinstance(labels, list) or not 1 <= len(labels) <= 32
+                or not isinstance(labels, list) or len(labels) > 32
                 or any(not isinstance(label, str) for label in labels)):
             raise HTTPException(422, "个人时间轴模板格式不正确。")
         name = validate_project_name(name)

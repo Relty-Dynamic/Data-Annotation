@@ -3,7 +3,7 @@ import {TRACK_LABELS, type FixedTrack} from './domain';
 
 export type TrackTemplate = {name:string; json_name:string; labels:string[]};
 
-export default function CustomTrackDialog({availableFixed,templates,canRemember,onAddFixed,onCancel,onCreate,onAddTemplate,onDeleteTemplate}: {
+export default function CustomTrackDialog({availableFixed,templates,canRemember,onAddFixed,onCancel,onCreate,onAddTemplate,onDeleteTemplate,onDeleteTemplateLabel}: {
   availableFixed: FixedTrack[];
   templates: TrackTemplate[];
   canRemember: boolean;
@@ -12,6 +12,7 @@ export default function CustomTrackDialog({availableFixed,templates,canRemember,
   onCreate:(name:string,jsonName:string,labels:string[],remember:boolean)=>Promise<void>;
   onAddTemplate:(template:TrackTemplate)=>Promise<void>;
   onDeleteTemplate:(jsonName:string)=>Promise<void>;
+  onDeleteTemplateLabel:(template:TrackTemplate,label:string)=>Promise<void>;
 }) {
   const dialog=useRef<HTMLDialogElement>(null);
   const [name,setName]=useState(''),[jsonName,setJsonName]=useState('');
@@ -34,7 +35,7 @@ export default function CustomTrackDialog({availableFixed,templates,canRemember,
       <h2 id="custom-track-title">添加时间轴</h2>
       <p>新建自定义时间轴采用互斥标注；同一时刻只有一种状态。</p>
       {availableFixed.length>0&&<div className="restore-fixed-tracks"><strong>添加固定时间轴</strong><div>{availableFixed.map(track=><button type="button" className="secondary" key={track} disabled={saving} onClick={()=>void run(()=>onAddFixed(track))}>{TRACK_LABELS[track]}</button>)}</div></div>}
-      {canRemember&&templates.length>0&&<div className="restore-fixed-tracks"><strong>我的时间轴历史</strong><div>{templates.map(template=><span className="template-item" key={template.json_name}><button type="button" className="secondary" disabled={saving} title={`${template.json_name}.timeline.json · ${template.labels.join('、')}`} onClick={()=>void run(()=>onAddTemplate(template))}>{template.name} · {template.json_name}</button><button type="button" className="text-button" disabled={saving} aria-label={`删除时间轴历史 ${template.name}`} onClick={()=>void run(()=>onDeleteTemplate(template.json_name))}>移除历史</button></span>)}</div></div>}
+      {canRemember&&templates.length>0&&<div className="restore-fixed-tracks"><strong>我的时间轴历史</strong><div>{templates.map(template=><div className="template-item" key={template.json_name}><div className="template-item-heading"><button type="button" className="secondary" disabled={saving} title={`${template.json_name}.timeline.json`} onClick={()=>void run(()=>onAddTemplate(template))}>{template.name} · {template.json_name}</button><button type="button" className="text-button" disabled={saving} aria-label={`删除时间轴历史 ${template.name}`} onClick={()=>void run(()=>onDeleteTemplate(template.json_name))}>移除历史</button></div><div className="template-labels">{template.labels.map(value=><span className="template-label" key={value}>{value}<button type="button" disabled={saving} aria-label={`从${template.name}历史中删除标签 ${value}`} onClick={()=>void run(()=>onDeleteTemplateLabel(template,value))}>×</button></span>)}{template.labels.length===0&&<small>暂无标签；加入项目后可用“管理标签”添加。</small>}</div></div>)}</div></div>}
       <strong>新建自定义时间轴</strong>
       <label>时间轴名称<input autoFocus maxLength={80} value={name} onChange={event=>setName(event.target.value)} placeholder="例如：饮食"/></label>
       <label>JSON 文件名<input maxLength={64} value={jsonName} onChange={event=>setJsonName(event.target.value)} placeholder="food"/><small>例如输入 food，写回时生成 food.timeline.json。</small></label>

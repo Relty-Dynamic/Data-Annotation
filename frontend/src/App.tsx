@@ -32,7 +32,7 @@ import PreparePanel from './PreparePanel';
 import { sessionAssetUrl } from './sessionAssets';
 import { readProjectPreference, readRestorableProjectPreference, writeProjectPreference } from './projectPreferences';
 import { advanceVideoTime, playbackProfile, seekMediaTime, sourceTime } from './playback';
-import { formatTime, parseTime, switchCoveredState, applyAnnotationRange, deleteAnnotation, uncoveredSpans, TRACKS, projectTracks, projectTrackLabels, customTrack, trackName, isEventTrack, isExclusiveTrack, locateVideo, annotationsEqual, normalizeStateSeams, anchorVideoTime, restoreVideoTime, isSegmentDraftDirty } from './domain';
+import { formatTime, parseTime, switchCoveredState, applyAnnotationRange, deleteAnnotation, uncoveredSpans, TRACKS, projectTracks, projectTrackLabels, customTrack, trackName, isEventTrack, isExclusiveTrack, locateVideo, annotationsEqual, normalizeStateSeams, anchorVideoTime, restoreVideoTime, isSegmentDraftDirty, splitAnnotationLabel, annotationLabel } from './domain';
 import { POSTURE_SHORTCUTS, postureShortcutLabel } from './postureShortcuts';
 import type { FixedTrack, Project, Segment, Track, VideoTimeAnchor } from './domain';
 import CustomTrackDialog from './CustomTrackDialog';
@@ -131,6 +131,8 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  useEffect(()=>{if(!sharedServer)void api<{connected:boolean}>('/api/cloud/status').then(status=>setCloudConnected(status.connected)).catch(()=>setCloudConnected(false));},[sharedServer]);
  useEffect(()=>{void api<{capabilities:string[];storage_backend?:'s3-mock'|'nas'}>('/api/health').then(health=>{setMockMode(health.capabilities.includes('s3-mock'));setMockCatalogAvailable(health.capabilities.includes('s3-mock-catalog'));setMockNasAvailable(health.capabilities.includes('s3-mock')&&health.capabilities.includes('nas-source-browser'));setActiveStorage(health.storage_backend??(health.capabilities.includes('s3-mock')?'s3-mock':'nas'));}).catch(()=>{});},[]);
  const [selectedId,setSelectedId]=useState<string|null>(null),[label,setLabel]=useState(''),[startText,setStartText]=useState(''),[endText,setEndText]=useState(''),[manual,setManual]=useState(false);
+ const segmentEditorRef=useRef<HTMLDivElement>(null);
+ useEffect(()=>{if(manual&&selectedId)segmentEditorRef.current?.scrollIntoView({block:'nearest'});},[manual,selectedId]);
  const [anchors,setAnchors]=useState<number[]>([]),[selectedRange,setSelectedRange]=useState<{start_ms:number;end_ms:number}|null>(null);
  const [behaviorKind,setBehaviorKind]=useState<'point'|'interval'>('interval');
  const [history,setHistory]=useState<Project['annotations'][]>([]),[redoHistory,setRedoHistory]=useState<Project['annotations'][]>([]),[help,setHelp]=useState(false);
@@ -574,6 +576,11 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   setCustomTrackOpen(false);setNotice(`已添加「${name}」时间轴，写回文件为 ${jsonName}.timeline.json${templateError}`);
  }
  async function deleteTrackTemplate(jsonName:string){await api(`/api/account/track-templates/${encodeURIComponent(jsonName)}`,json('DELETE',{}));setTrackTemplates(items=>items.filter(item=>item.json_name!==jsonName));}
+ async function deleteTemplateLabel(template:TrackTemplate,labelToRemove:string){
+  const labels=template.labels.filter(value=>value!==labelToRemove);
+  const updated=await api<TrackTemplate>('/api/account/track-templates',json('PUT',{name:template.name,json_name:template.json_name,labels}));
+  setTrackTemplates(items=>items.map(item=>item.json_name===updated.json_name?updated:item));
+ }
  async function addFixedTrack(track:FixedTrack){
   const current=projectRef.current;if(!current)return;
   await flush();
@@ -581,15 +588,13 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   serverRevision.current=updated.revision;projectRef.current=updated;setProject(updated);setActiveTrack(track);setTrackRevealVersion(value=>value+1);resetEditorFields();setSelectedRange(null);updateHistory([],[]);
   queueCloudSync(updated.id);setCustomTrackOpen(false);setNotice(`已添加「${names[track]}」时间轴`);
  }
- async function saveTrackLabels(labels:string[],renames:Record<string,string>){
+ async function saveTrackLabels(labels:string[]){
   const current=projectRef.current;if(!current)return;
-  const removed=projectTrackLabels(current,activeTrack).filter(value=>!labels.includes(value)&&!(value in renames));
   await flush();
-  const updated=await api<Project>(`/api/projects/${current.id}/tracks/${activeTrack}/labels`,json('PUT',{labels,renames,expected_revision:serverRevision.current}));
+  const updated=await api<Project>(`/api/projects/${current.id}/tracks/${activeTrack}/labels`,json('PUT',{labels,expected_revision:serverRevision.current}));
   serverRevision.current=updated.revision;projectRef.current=updated;setProject(updated);
   if(selectedId&&!updated.annotations[activeTrack].some(item=>item.id===selectedId))resetEditorFields();
-  else if(removed.includes(label))setLabel('');
-  else if(label in renames)setLabel(renames[label]);
+  else if(!isEventTrack(updated,activeTrack)&&!labels.includes(splitAnnotationLabel(label,projectTrackLabels(current,activeTrack)).base))setLabel('');
   updateHistory([],[]);queueCloudSync(updated.id);
   setLabelsOpen(false);setNotice(`已更新「${trackName(updated,activeTrack)}」的标签按钮。`);
  }
@@ -662,9 +667,14 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(!project)return;const point=eventTrack&&behaviorKind==='point';const a=parseTime(startText),b=point?a:(endText.trim()?parseTime(endText):null);
   if(a===null||a<0||a>project.duration_ms||(!point&&(b===null||b<=a||b>project.duration_ms))){setError(point?'请填写有效发生时间（秒数或 HH:MM:SS.mmm）。':'请填写有效时间：0 ≤ 开始 < 结束 ≤ 时间线总时长。');return;}
   if(!label.trim()){setError('请选择或填写标注内容。');return;}
+  if(!splitAnnotationLabel(label,eventTrack?[]:fixedLabels).base.trim()){setError('请先填写标注内容，再添加备注。');return;}
+  if(!eventTrack&&label.length>80){setError('标签和备注合计不能超过 80 个字符。');return;}
   if(point&&!spans.some(v=>a>=v.start_ms&&a<=v.end_ms)){setError('这个时间位于录制间隔，请在有视频的位置标注。');return;}
   if(!point&&!spans.some(v=>Math.max(a,v.start_ms)<Math.min(b!,v.end_ms))){setError('这个时间段没有视频，请重新选择。');return;}
-  const next=point?[...project.annotations[activeTrack].filter(x=>x.id!==selectedId),{id:selectedId??crypto.randomUUID(),label:label.trim(),start_ms:a,end_ms:a,kind:'point' as const}].sort((x,y)=>x.start_ms-y.start_ms):applyAnnotationRange(project.annotations[activeTrack],a,b!,label.trim(),spans,activeTrack,selectedId??undefined,isExclusiveTrack(project,activeTrack));
+  const noteOnly=selected&&selected.start_ms===a&&selected.end_ms===b&&(selected.kind??'interval')===(point?'point':'interval');
+  const next=noteOnly?project.annotations[activeTrack].map(item=>item.id===selected.id?{...item,label:label.trim()}:item)
+   :point?[...project.annotations[activeTrack].filter(x=>x.id!==selectedId),{id:selectedId??crypto.randomUUID(),label:label.trim(),start_ms:a,end_ms:a,kind:'point' as const}].sort((x,y)=>x.start_ms-y.start_ms)
+   :applyAnnotationRange(project.annotations[activeTrack],a,b!,label.trim(),spans,activeTrack,selectedId??undefined,isExclusiveTrack(project,activeTrack));
   if(!commit({...project.annotations,[activeTrack]:next}))return;
   clearAfterAnnotation();
   setNotice('标注已保存，录制断档保持留空');
@@ -768,7 +778,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   {adminOpen&&<AdminPanel projects={projects} mockMode={mockMode} onClose={()=>setAdminOpen(false)}/>}
   {passwordOpen&&<PasswordDialog onClose={()=>setPasswordOpen(false)} onChanged={logoutNow}/>}
   {auditOpen&&project&&<HistoryPanel projectId={project.id} onClose={()=>setAuditOpen(false)}/>}
-  {customTrackOpen&&project&&<CustomTrackDialog availableFixed={TRACKS.filter(track=>!projectTracks(project).includes(track))} templates={trackTemplates} canRemember={sharedServer||mockMode} onAddFixed={addFixedTrack} onCancel={()=>setCustomTrackOpen(false)} onCreate={addCustomTrack} onAddTemplate={template=>addCustomTrack(template.name,template.json_name,template.labels,false)} onDeleteTemplate={deleteTrackTemplate}/>}
+  {customTrackOpen&&project&&<CustomTrackDialog availableFixed={TRACKS.filter(track=>!projectTracks(project).includes(track))} templates={trackTemplates} canRemember={sharedServer||mockMode} onAddFixed={addFixedTrack} onCancel={()=>setCustomTrackOpen(false)} onCreate={addCustomTrack} onAddTemplate={template=>addCustomTrack(template.name,template.json_name,template.labels,false)} onDeleteTemplate={deleteTrackTemplate} onDeleteTemplateLabel={deleteTemplateLabel}/>}
   {deleteTrack&&project&&<DeleteCustomTrackDialog track={deleteTrack} count={project.annotations[deleteTrack.id]?.length??0} deleting={deletingTrack} error={deleteTrackError} onCancel={()=>{setDeleteTrack(null);setDeleteTrackError('');}} onConfirm={confirmDeleteTrack}/>}
   {labelsOpen&&project&&<TrackLabelsDialog trackName={trackName(project,activeTrack)} initial={projectTrackLabels(project,activeTrack)} annotations={project.annotations[activeTrack]??[]} onCancel={()=>setLabelsOpen(false)} onSave={saveTrackLabels}/>}
   {timelineImportOpen&&project&&<TimelineImportDialog project={project} initialTrack={comparison?.track??activeTrack} onCancel={()=>{setTimelineImportOpen(false);if(!comparisonOpen)queueMicrotask(()=>comparisonTrigger.current?.focus());}} onOpen={value=>{setComparison(value);setTimelineImportOpen(false);setComparisonOpen(true);}}/>}
@@ -786,7 +796,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   {error&&<div className="message error" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={()=>setError('')}><X size={16}/></button></div>}
   {notice&&<div className="message success" role="status"><Check size={16}/><span>{notice}</span><button aria-label="关闭提示" onClick={()=>setNotice('')}><X size={16}/></button></div>}
   {project?.needs_source_relink&&user.role==='admin'&&<div className="source-relink-notice" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen}><FolderOpen size={16}/><span>此项目仍使用平台内的视频副本。关联原目录后，缓存会移到原视频旁，释放重复存储。</span><button className="secondary" disabled={!!busy||project.deletion_pending} onClick={()=>beginImport('relink')}>关联原目录</button></div>}
-  {help&&<div className="help-panel"><Keyboard size={18}/><span>顶部全屏按钮 进入工作台全屏，Esc 退出</span><span>空格 播放／暂停</span><span>Ctrl + 空格 添加锚点</span><span>← → 前后 {seekSettings.arrowMs/1000} 秒</span><span>Shift + ← → 前后 {seekSettings.shiftArrowMs/1000} 秒</span><span>Ctrl + ← → 前后 {seekSettings.ctrlArrowMs/1000} 秒</span><span>Ctrl + Alt + 滚轮 上退下进，每次 {seekSettings.wheelMs/1000} 秒</span><span>Shift + 滚轮 上退下进，每次 {seekSettings.shiftWheelMs/1000} 秒</span><span>右上角设置按钮 可调整移动步长</span><span>调整视频进度会暂停，松开后保持暂停</span><span>Ctrl + 滚轮 缩放时间轴（最细每屏5分钟）</span><span>Ctrl + + / - / 0 已禁用浏览器缩放</span><span>轴的条带上滚轮 左右浏览时间轴</span><span>重叠轴内 Alt + 滚轮 查看其它层</span><span>拖动蓝色光标定位视频</span><span>Delete 删除选中色块</span><span>Z 动 / X 坐 / C 站 / V 躺：从当前播放位置向后切换姿势</span><span>Ctrl + Z 撤销</span><span>Ctrl + Shift + Z 恢复</span><span>点击轴名或右侧类型切换；点击色块可编辑。左右键和空格固定控制视频。</span></div>}
+  {help&&<div className="help-panel"><Keyboard size={18}/><span>顶部全屏按钮 进入工作台全屏，Esc 退出</span><span>空格 播放／暂停</span><span>Ctrl + 空格 添加锚点</span><span>← → 前后 {seekSettings.arrowMs/1000} 秒</span><span>Shift + ← → 前后 {seekSettings.shiftArrowMs/1000} 秒</span><span>Ctrl + ← → 前后 {seekSettings.ctrlArrowMs/1000} 秒</span><span>Ctrl + Alt + 滚轮 上退下进，每次 {seekSettings.wheelMs/1000} 秒</span><span>Shift + 滚轮 上退下进，每次 {seekSettings.shiftWheelMs/1000} 秒</span><span>右上角设置按钮 可调整移动步长</span><span>调整视频进度会暂停，松开后保持暂停</span><span>Ctrl + 滚轮 缩放时间轴（最细每屏5分钟）</span><span>Ctrl + + / - / 0 已禁用浏览器缩放</span><span>普通滚轮 上下滚动，重叠轴内查看其它层</span><span>Alt + 滚轮 左右浏览时间轴</span><span>拖动蓝色光标定位视频</span><span>Delete 删除选中色块</span><span>Z 动 / X 坐 / C 站 / V 躺：从当前播放位置向后切换姿势</span><span>Ctrl + Z 撤销</span><span>Ctrl + Shift + Z 恢复</span><span>点击轴名或右侧类型切换；点击色块可编辑备注。左右键和空格固定控制视频。</span></div>}
   <main ref={comparisonRef} tabIndex={comparisonOpen?-1:undefined} role={comparisonOpen?"dialog":undefined} aria-modal={comparisonOpen?true:undefined} aria-label={comparisonOpen?"时间轴对照查看":undefined} className={"editor-grid"+(comparisonOpen?" comparison-view":"")} inert={timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||prepareOpen||settingsOpen}>
   {comparisonOpen&&comparison&&project&&<header className="comparison-heading"><div><h2>时间轴对照 · {trackName(project,comparison.track)}</h2><p title={[comparison.name,comparison.alignment,...comparison.warnings].join(' · ')}>{comparison.name} · {comparison.alignment}{comparison.warnings.length>0?' · '+comparison.warnings.join(' '):''}</p></div><button className="secondary" onClick={()=>{pausePlayback();setTimelineImportOpen(true);}}>更换时间轴</button><button className="icon-button" aria-label="进度快捷键设置" onClick={()=>{pausePlayback();setSettingsOpen(true);}}><Settings size={16}/></button><button className="secondary" onClick={closeComparison}><X size={16}/>关闭查看</button></header>}
   {project&&!sessionEntered?<section className="session-start-screen"><Film size={34}/><h2>{clearedPreviewId===project.id?'本机预览已清理':restoreOnReady.current===project.id?'正在载入项目':'预览尚未就绪'}</h2><p>{clearedPreviewId===project.id?'项目和标注草稿仍在。需要继续这个项目时，再主动准备预览；也可以从右侧新建项目选择新素材。':restoreOnReady.current===project.id?(preparation.status?.detail||'正在检查已有播放素材。'):'需要先准备视频、封面和悬停图片，才能进入标注工作台。'}</p><button className="primary" onClick={openPreparation}>{clearedPreviewId===project.id?'重新准备此项目预览':'查看素材准备'}<ArrowRight size={16}/></button></section>:<section className="left-column"><div className="preview-panel"><div className="panel-heading"><div><Film size={16}/><h2>视频预览</h2></div><span className="muted-text">{activeVideo?`${project!.videos.findIndex(v=>v.id===videoId)+1} / ${project!.videos.length} · ${activeVideo.name}`:'等待选择素材'}</span></div>
@@ -812,7 +822,12 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
      {activeTrack==='habit'&&running.length>0&&<div className="ongoing-list"><div className="field-label">正在标注 <span>{running.length}</span></div>{running.map(s=><div className="ongoing" key={s.id}><div><strong><i/>{s.label}</strong><small>{formatTime(s.start_ms)} 开始</small></div><button disabled={time<=s.start_ms} onClick={()=>finishBehavior(s)}>结束</button></div>)}</div>}
     </>}
     {selected&&<div className="annotation-author" role="status">创建人 {selected.created_by_name??'未知（旧标注）'}{selected.updated_by_name&&<> · 最近编辑 {selected.updated_by_name}</>}</div>}
-    {manual&&<div className="segment-editor"><div className="section-caption"><span>编辑标注</span><button className="icon-button" aria-label="取消编辑" onClick={clearEditor}><X size={15}/></button></div><label className="field-label">标注内容</label>{eventTrack?<input aria-label="编辑标注内容" value={label} maxLength={500} onChange={e=>setLabel(e.target.value)}/>:<select aria-label="编辑状态内容" value={label} onChange={e=>setLabel(e.target.value)}>{!fixedLabels.includes(label)&&label&&<option value={label} disabled>{label}</option>}{fixedLabels.map(s=><option key={s}>{s}</option>)}</select>}<div className="time-fields"><label>开始时间<input aria-label="开始时间" value={startText} onChange={e=>editStart(e.target.value)}/><button onClick={()=>editStart(formatTime(time))}>使用当前时间</button></label><label>{behaviorKind==='point'&&eventTrack?'瞬时事件（同一时刻）':'结束时间'}<input disabled={behaviorKind==='point'&&eventTrack} aria-label="结束时间" placeholder="进行中" value={behaviorKind==='point'&&eventTrack?startText:endText} onChange={e=>editEnd(e.target.value)}/><button disabled={behaviorKind==='point'&&eventTrack} onClick={()=>editEnd(formatTime(time))}>使用当前时间</button></label></div><div className="edit-actions"><button className="primary" onClick={saveSegment}><Check size={15}/>保存标注</button>{selected&&<button className="danger-icon" aria-label="删除此标注" onClick={remove}><Trash2 size={16}/></button>}</div></div>}
+    {manual&&<div className="segment-editor" ref={segmentEditorRef}><div className="section-caption"><span>编辑标注</span><button className="icon-button" aria-label="取消编辑" onClick={clearEditor}><X size={15}/></button></div>
+     <label className="field-label">标注内容</label>
+     {eventTrack?<input aria-label="编辑标注内容" value={splitAnnotationLabel(label,[]).base} maxLength={500} onChange={e=>setLabel(annotationLabel(e.target.value,splitAnnotationLabel(label,[]).note))}/>
+      :<select aria-label="编辑状态内容" value={splitAnnotationLabel(label,fixedLabels).base} onChange={e=>setLabel(annotationLabel(e.target.value,splitAnnotationLabel(label,fixedLabels).note))}>{!fixedLabels.includes(splitAnnotationLabel(label,fixedLabels).base)&&label&&<option value={label} disabled>{label}</option>}{fixedLabels.map(s=><option key={s}>{s}</option>)}</select>}
+     <label className="field-label" htmlFor="segment-note">这段标注的备注</label><input id="segment-note" aria-label="这段标注的备注" placeholder="例如：餐厅；留空则只显示标签" maxLength={80} value={splitAnnotationLabel(label,eventTrack?[]:fixedLabels).note} onChange={e=>setLabel(annotationLabel(splitAnnotationLabel(label,eventTrack?[]:fixedLabels).base,e.target.value))}/><p className="input-hint">仅修改当前选中的色块，保存后显示为“标签（备注）”。</p>
+     <div className="time-fields"><label>开始时间<input aria-label="开始时间" value={startText} onChange={e=>editStart(e.target.value)}/><button onClick={()=>editStart(formatTime(time))}>使用当前时间</button></label><label>{behaviorKind==='point'&&eventTrack?'瞬时事件（同一时刻）':'结束时间'}<input disabled={behaviorKind==='point'&&eventTrack} aria-label="结束时间" placeholder="进行中" value={behaviorKind==='point'&&eventTrack?startText:endText} onChange={e=>editEnd(e.target.value)}/><button disabled={behaviorKind==='point'&&eventTrack} onClick={()=>editEnd(formatTime(time))}>使用当前时间</button></label></div><div className="edit-actions"><button className="primary" onClick={saveSegment}><Check size={15}/>保存标注</button>{selected&&<button className="danger-icon" aria-label="删除此标注" onClick={remove}><Trash2 size={16}/></button>}</div></div>}
    </div><div className="annotation-footer"><button className="secondary" disabled={!history.length||!!busy} onClick={undo} title="Ctrl + Z"><RotateCcw size={14}/>撤销</button><button className="secondary" disabled={!redoHistory.length||!!busy} onClick={redo} title="Ctrl + Shift + Z"><RotateCw size={14}/>恢复</button></div>
   </section>}{sessionEntered&&project&&projectTracks(project).length===0&&<section className="annotation-panel"><div className="panel-heading"><h2>标注面板</h2></div><p className="instruction">此项目还没有时间轴。添加固定轴或自定义轴后开始标注。</p><button className="primary wide" disabled={!!busy||pendingSaves.current>0||saveFailed} onClick={()=>setCustomTrackOpen(true)}><Plus size={15}/>添加时间轴</button></section>}</aside></main>
   {saveFailed&&<div className="save-recovery" role="alert" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen}><span>{saveState}</span><button className="text-button" disabled={!!busy} onClick={retrySave}>重试保存</button><button className="text-button" disabled={!!busy} title="先下载包含本页未保存改动的恢复 JSON，再读取服务器草稿" onClick={recoverAndReload}>保存恢复副本并重新载入</button></div>}

@@ -248,9 +248,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     const scroller = scrollRef.current;
     if (!scroller) return;
     const target = event.target instanceof Element ? event.target : null;
-    const strip = target?.closest<HTMLElement>('.tl-track-surface');
-    const overlap = target?.closest<HTMLElement>('.tl-overlap-viewport');
-    const action = timelineWheelAction(event.ctrlKey, event.altKey, !!strip, !!overlap && overlap.scrollHeight > overlap.clientHeight);
+    const action = timelineWheelAction(event.ctrlKey, event.altKey);
     if (action === 'zoom') {
       // The workspace also cancels browser zoom; this still runs when it has already done so.
       event.preventDefault();
@@ -260,12 +258,6 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
       const delta = Math.max(-400, Math.min(400, event.deltaY * unit));
       if (delta) changeWindow(before * Math.pow(1.25, delta / 100), event.clientX);
-      return;
-    }
-    if (action === 'layers' && overlap) {
-      event.preventDefault(); event.stopPropagation();
-      overlap.scrollTop += event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? overlap.clientHeight : 1);
-      setHoverTime(null);
       return;
     }
     if (action === 'native') {
@@ -525,7 +517,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
           <button type="button" className="tl-return-cursor" aria-label="回到光标" title={`回到播放光标 ${formatTime(currentTime)}`} onClick={centerOnCursor}>回到光标</button>
           <button type="button" className="tl-reset-zoom" aria-label="重置时间轴为每屏1小时" title="重置为每屏1小时；不足1小时则显示全程" onClick={() => changeWindow(DEFAULT_WINDOW_MS)}>1小时</button>
         </div>
-        <span className="tl-screen-duration" title={`每屏 ${formatTime(visibleDuration)}；轴上滚轮横移，Ctrl + 滚轮缩放`}>每屏 {Math.abs(visibleDuration - HOUR_MS) < 1 ? '1小时' : rulerTime(visibleDuration)}</span>
+        <span className="tl-screen-duration" title={`每屏 ${formatTime(visibleDuration)}；普通滚轮上下滚动，Alt + 滚轮左右浏览，Ctrl + 滚轮缩放`}>每屏 {Math.abs(visibleDuration - HOUR_MS) < 1 ? '1小时' : rulerTime(visibleDuration)}</span>
       </header>
       <div className="tl-scroll" ref={scrollRef} onPointerDownCapture={(event) => {
         // Capture runs before scrub/segment handlers; toolbar buttons live outside this surface.
@@ -579,7 +571,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
                 return <div className={`tl-row tl-track-row tl-track-${customTrack(project,track)?'custom':track}${external ? ' tl-external-row' : ''}${active ? ' tl-track-active' : ''}`} key={key}>
                   <button type="button" className="tl-gutter tl-track-select" aria-pressed={active} onClick={() => { if (!comparison) onTrackSelect(track); }} aria-label={`${comparison ? (external ? '外部' : '项目') : '选择'}${trackName(project,track)}标注轴`}>
                     <span className="tl-track-title"><span className={`tl-row-dot tl-dot-${customTrack(project,track)?'custom':track}`} /><span>{comparison ? (external ? '外部 · ' : '项目 · ') : ''}{trackName(project,track)}</span><span className="tl-count">{segments.length}</span>
-                    {overlapping && laneCount > 1 && <span className="tl-lane-hint" title="Alt + 滚轮查看重叠层">{laneCount}层</span>}</span>
+                    {overlapping && laneCount > 1 && <span className="tl-lane-hint" title="普通滚轮上下查看重叠层">{laneCount}层</span>}</span>
                   </button>
                   <div className={overlapping ? 'tl-overlap-viewport' : 'tl-state-viewport'}
                     ref={(element) => { if (overlapping && !external) overlapViewportRefs.current[track] = element; }}
@@ -645,6 +637,4 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     </section>
   );
 }
-
-
 

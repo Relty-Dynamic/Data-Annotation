@@ -89,6 +89,19 @@ def validate_track_labels(value: Any) -> dict[str, list[str]]:
 
 def track_labels(project: dict) -> dict[str, list[str]]:
     return validate_track_labels(project.get("track_labels", DEFAULT_TRACK_LABELS))
+
+
+def annotation_label_base(label: str, options: list[str]) -> str | None:
+    if label in options:
+        return label
+    if len(label) > 80 or any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F
+                              or 0xD800 <= ord(char) <= 0xDFFF for char in label):
+        return None
+    for option in sorted(options, key=len, reverse=True):
+        prefix = option + "（"
+        if label.startswith(prefix) and label.endswith("）") and label[len(prefix):-1].strip():
+            return option
+    return None
 # Inclusive overlap/offset limits; real nominal gaps keep the stricter seam rule.
 MAX_CAMERA_OVERLAP_MS = 3000
 MAX_CAMERA_ALIGNMENT_MS = 3000
@@ -302,9 +315,9 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
             if not isinstance(label, str) or not label.strip() or len(label) > 500:
                 raise HTTPException(422, "标注内容不能为空，且不能超过 500 字。")
             label = label.strip()
-            if axis in FIXED_LABELS and label not in label_options[axis] and not (axis == "scene" and label in ("车内", "其他")):
+            if axis in FIXED_LABELS and annotation_label_base(label, label_options[axis]) is None and not (axis == "scene" and label in ("车内", "其他")):
                 raise HTTPException(422, "场景、姿势或大类标签不在允许范围内。")
-            if axis in custom and custom[axis]["mode"] == "state" and label not in custom[axis]["labels"]:
+            if axis in custom and custom[axis]["mode"] == "state" and annotation_label_base(label, custom[axis]["labels"]) is None:
                 raise HTTPException(422, "自定义状态标签不在该时间轴的选项中。")
             if type(start) is not int or not 0 <= start <= duration_ms:
                 raise HTTPException(422, "开始时间须为视频范围内的整数毫秒。")
@@ -1597,7 +1610,7 @@ class ProjectService:
             return self.public(project)
 
     def set_track_labels(self, ident: str, track_id: str, labels: list[str], expected_revision: int,
-                         *, actor: dict | None = None, renames: dict[str, str] | None = None) -> dict:
+                         *, actor: dict | None = None) -> dict:
         with self.lock:
             project = self.load(ident)
             if project["revision"] != expected_revision:
@@ -1617,13 +1630,7 @@ class ProjectService:
             cleaned = [validate_project_name(label) for label in labels]
             if len(set(cleaned)) != len(cleaned):
                 raise HTTPException(422, "同一时间轴不能有重复标签。")
-            renames = renames or {}
-            if (not isinstance(renames, dict) or any(not isinstance(old, str) or not isinstance(new, str)
-                    or old not in current or new not in cleaned or old == new for old, new in renames.items())
-                    or len(set(renames.values())) != len(renames)
-                    or any(new in current and new not in renames for new in renames.values())):
-                raise HTTPException(422, "标签备注更改与当前标签不匹配，请重新打开后保存。")
-            if cleaned == current and not renames:
+            if cleaned == current:
                 return self.public(project)
             if track_id in AXES:
                 options = copy.deepcopy(track_labels(project))
@@ -1633,12 +1640,11 @@ class ProjectService:
                 project["custom_tracks"] = validate_custom_tracks([
                     {**item, "labels": cleaned} if item["id"] == track_id else item
                     for item in project["custom_tracks"]])
-            removed = set(current) - set(cleaned) - set(renames)
-            deleted = [item for item in project["annotations"][track_id] if item["label"] in removed]
-            renamed = [(item, {**item, "label": renames[item["label"]]}) for item in project["annotations"][track_id]
-                       if item["label"] in renames]
-            project["annotations"][track_id] = [{**item, "label": renames[item["label"]]} if item["label"] in renames else item
-                                                  for item in project["annotations"][track_id] if item["label"] not in removed]
+            removed = set(current) - set(cleaned)
+            deleted = [item for item in project["annotations"][track_id]
+                       if annotation_label_base(item["label"], current) in removed]
+            project["annotations"][track_id] = [item for item in project["annotations"][track_id]
+                                                  if annotation_label_base(item["label"], current) not in removed]
             project["revision"] += 1
             project["updated_at"] = now()
             project["draft_dirty"] = True
@@ -1650,11 +1656,7 @@ class ProjectService:
                     con.executemany("INSERT INTO edit_events VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
                         (uuid.uuid4().hex, ident, project["revision"], track_id, item["id"], "delete",
                          actor["id"], actor["display_name"], project["updated_at"],
-                         json.dumps(item, ensure_ascii=False), None) for item in deleted] + [
-                        (uuid.uuid4().hex, ident, project["revision"], track_id, before["id"], "update",
-                         actor["id"], actor["display_name"], project["updated_at"],
-                         json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False))
-                        for before, after in renamed])
+                         json.dumps(item, ensure_ascii=False), None) for item in deleted])
             return self.public(project)
 
     def delete_custom_track(self, ident: str, track_id: str, expected_revision: int) -> dict:

@@ -1,10 +1,9 @@
 export const DEFAULT_WINDOW_MS = 3_600_000;
 export const MIN_WINDOW_MS = 300_000;
 
-export function timelineWheelAction(ctrl: boolean, alt: boolean, onAxisStrip: boolean, hasOverlapLayers: boolean): 'zoom' | 'layers' | 'pan' | 'native' {
+export function timelineWheelAction(ctrl: boolean, alt: boolean): 'zoom' | 'pan' | 'native' {
   if (ctrl) return 'zoom';
-  if (alt && hasOverlapLayers) return 'layers';
-  return alt || onAxisStrip ? 'pan' : 'native';
+  return alt ? 'pan' : 'native';
 }
 
 /** A short recording always fits; longer recordings can zoom down to five minutes. */
