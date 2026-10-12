@@ -72,6 +72,13 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
                 publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
                   detail: '正在下载精简视频到此电脑 ' + ready + ' / ' + total});
               });
+              const confirmed = await authFetch('/api/projects/' + id + '/session/browser-ready', {
+                method: 'POST', cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]),
+              });
+              if (!confirmed.ok) {
+                const body = await confirmed.json().catch(() => ({}));
+                throw new Error(typeof body.detail === 'string' ? body.detail : 'Ubuntu 临时预览清理尚未确认，请重试。');
+              }
             } catch (error) { localCacheFailed = true; throw error; }
           }
           if (!stopped) publish({...status, state: 'ready', checking: false, stage: 'ready', progress: 100}, manifest);

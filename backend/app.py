@@ -62,10 +62,6 @@ class WritebackRequest(BaseModel):
     expected_revision: int = Field(ge=0, strict=True)
 
 
-class SubmittedCacheRequest(WritebackRequest):
-    save_id: str = Field(min_length=1, max_length=128)
-
-
 class EditingSessionRequest(BaseModel):
     tab_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
 
@@ -324,7 +320,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 if not auth.allowed(user, project_id):
                     return JSONResponse(status_code=403, content={"detail": "未获分配此项目。"})
                 suffix = path[len("/api/projects/" + project_id):] if path.startswith("/api/projects/") else ""
-                if suffix in {"/name", "/preview-cache/clear", "/assignment"} or suffix.startswith("/sources/") or (suffix == "" and path.startswith("/api/projects/") and request.method == "DELETE"):
+                if suffix in {"/name", "/assignment"} or suffix.startswith("/sources/") or (suffix == "" and path.startswith("/api/projects/") and request.method == "DELETE"):
                     admin_only = True
             if admin_only and user["role"] != "admin":
                 return JSONResponse(status_code=403, content={"detail": "此操作仅管理员可执行。"})
@@ -799,10 +795,6 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             return service.writeback(project_id)
         return service.writeback(project_id, expected_revision=body.expected_revision)
 
-    @app.post("/api/projects/{project_id}/submitted-cache/clear")
-    def clear_submitted_cache(project_id: str, body: SubmittedCacheRequest):
-        return service.clear_submitted_server_cache(project_id, body.expected_revision, body.save_id)
-
     @app.get("/api/projects/{project_id}/prepare")
     def preparation_status(project_id: str):
         return service.preparation_status(project_id)
@@ -835,6 +827,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             origin = f"{request.url.scheme}://{request.headers['host']}"
             return mock_s3.media_manifest(service, manifest, origin)
         return manifest
+
+    @app.post("/api/projects/{project_id}/session/browser-ready")
+    def session_browser_ready(project_id: str):
+        return service.sessions.browser_ready(project_id)
 
     @app.api_route("/mock-objects/{key:path}", methods=["GET", "HEAD"])
     def mock_object(key: str, expires: int, signature: str):

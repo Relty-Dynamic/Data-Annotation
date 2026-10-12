@@ -58,6 +58,16 @@ class AccountAccessTests(unittest.TestCase):
         with patch.object(self.app.state.service, "writeback", return_value={"ok": True}) as writeback:
             self.assertEqual(self.client.post(f"/api/projects/{project_id}/writeback", headers={"X-CSRF-Token": csrf}).status_code, 200)
             writeback.assert_called_once_with(project_id)
+        with patch.object(self.app.state.service, 'clear_local_previews', return_value={'cleared': project_id}) as clear:
+            path = f'/api/projects/{project_id}/preview-cache/clear'
+            self.assertEqual(self.client.post(path, json={'confirmed': True, 'expected_revision': 0}).status_code, 403)
+            self.assertEqual(self.client.post(path, json={'confirmed': True, 'expected_revision': 0},
+                                              headers={'X-CSRF-Token': csrf}).status_code, 200)
+            clear.assert_called_once_with(project_id, 0)
+        with patch.object(self.app.state.service.sessions, 'browser_ready', return_value={'released': True}) as ready:
+            response = self.client.post(f'/api/projects/{project_id}/session/browser-ready', headers={'X-CSRF-Token': csrf})
+            self.assertEqual(response.status_code, 200, response.text)
+            ready.assert_called_once_with(project_id)
         with patch.object(self.app.state.service, "skip_failed_videos", return_value={"ok": True}) as skip:
             response = self.client.post(f"/api/projects/{project_id}/session/skip-failed", json={"confirmed": True, "expected_revision": 0, "video_ids": ["v0001"]}, headers={"X-CSRF-Token": csrf})
             self.assertEqual(response.status_code, 200, response.text)

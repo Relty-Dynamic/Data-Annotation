@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import errno
 import json
+import os
 import tempfile
 import threading
 import time
@@ -159,8 +160,50 @@ class PlaybackSessionTests(unittest.TestCase):
                 self.assertIsInstance(path, Path)
                 self.assertTrue(path.is_relative_to(local))
                 self.assertTrue(path.is_file())
+        self.assertEqual(self.service.sessions.browser_ready(self.ident), {'released': False})
+        self.assertTrue(local.is_dir())
         self.assertEqual(self.service.load(self.ident)["_sources"], self.project["_sources"])
         self.assertEqual(self.service.load(self.ident)["annotations"], self.project["annotations"])
+
+    def test_intranet_nas_cache_reopens_after_ubuntu_preview_cleanup_without_encoding(self):
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                          'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            (self.source / '.datamark-cache' / 'remote-v1').mkdir(parents=True)
+            manifest = self.prepare()
+            local = self.service.storage.directory(self.ident) / 'playback'
+            self.assertTrue(local.exists(), 'Ubuntu copy stays until the browser confirms its download')
+            first = self.asset('normal', version=manifest['version'])
+            self.assertIn('.datamark-cache', first.parts)
+            self.assertEqual(first.read_bytes(), MEDIA)
+            self.assertEqual(self.service.sessions.browser_ready(self.ident), {'released': True})
+            self.assertFalse(local.exists(), 'browser confirmation releases Ubuntu playback files')
+            self.service.clear_local_previews(self.ident, self.project['revision'])
+            with patch('backend.session_cache.run_ffmpeg', side_effect=AssertionError('must reuse NAS cache')):
+                self.service.sessions.start(self.ident)
+                self.wait_ready()
+            self.assertEqual(self.asset('normal', version=manifest['version']).read_bytes(), MEDIA)
+            self.assertEqual(self.service.sessions.browser_ready(self.ident), {'released': True})
+            self.assertFalse(local.exists())
+            restarted = ProjectService(self.app_root)
+            restarted.probe = self.probe
+            self.services.append(restarted)
+            with patch('backend.session_cache.run_ffmpeg', side_effect=AssertionError('must reuse NAS after restart')):
+                restarted.sessions.start(self.ident)
+                self.wait_ready(restarted)
+            self.assertEqual(self.asset('normal', version=manifest['version'], service=restarted).read_bytes(), MEDIA)
+
+    def test_nas_publication_failure_keeps_ubuntu_playback_for_retry(self):
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                          'DATAMARK_SOURCE_ROOT': str(self.root)}), \
+             patch.object(self.service.sessions, '_publish_nas_entry',
+                          side_effect=HTTPException(503, 'NAS temporarily unavailable')), \
+             patch('backend.session_cache.run_ffmpeg', side_effect=self.encode):
+            self.service.sessions.start(self.ident)
+            deadline = time.monotonic() + 5
+            while self.service.sessions.status(self.ident)['state'] == 'running' and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertEqual(self.service.sessions.status(self.ident)['state'], 'partial')
+            self.assertTrue((self.service.storage.directory(self.ident) / 'playback').is_dir())
 
     def test_restart_reuses_completed_local_cache_without_encoding_when_originals_are_offline(self):
         manifest = self.prepare()

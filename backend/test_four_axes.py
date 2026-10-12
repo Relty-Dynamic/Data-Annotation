@@ -639,6 +639,23 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual({p.name for p in (self.source / "timeline").iterdir()}, set(FILENAMES.values()))
         self.assertFalse(any((self.source / name).exists() for name in FILENAMES.values()))
 
+    def test_reopen_after_deleting_timeline_json_does_not_revive_legacy_or_saved_scene(self):
+        project = self.legacy_files(self.annotated_project())
+        self.service.writeback(project['id'])
+        for name in FILENAMES.values():
+            (self.source / 'timeline' / name).unlink()
+        reopened = self.service.open_path(str(self.source))
+        self.assertEqual(reopened['id'], project['id'])
+        self.assertEqual(reopened['annotations'], empty_annotations())
+        self.assertEqual(self.service.expected_external_hashes(self.service.load(project['id'])),
+                         {axis: None for axis in AXES})
+        changed = self.service.update_draft(project['id'],
+            {**reopened['annotations'], 'scene': [interval('new-scene', '室外', 0, reopened['duration_ms'])]},
+            reopened['revision'])
+        self.service.writeback(project['id'])
+        self.assertEqual(self.service.open_path(str(self.source))['annotations']['scene'], changed['annotations']['scene'])
+        self.assertTrue((self.source / FILENAMES['scene']).exists(), 'legacy root files remain untouched')
+
     def test_failed_first_subfolder_write_preserves_legacy_files_and_can_retry(self):
         stored = self.legacy_files(self.annotated_project())
         originals = {axis: (self.source / FILENAMES[axis]).read_bytes() for axis in LEGACY_AXES}
@@ -654,7 +671,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         with patch("backend.service.os.replace", side_effect=fail_second), self.assertRaises(HTTPException):
             self.service.writeback(stored["id"])
         self.assertEqual(originals, {axis: (self.source / FILENAMES[axis]).read_bytes() for axis in LEGACY_AXES})
-        self.assertEqual(list((self.source / "timeline").iterdir()), [])
+        self.assertFalse((self.source / "timeline").exists())
         self.assertEqual(self.service.current_external_hashes(self.source), self.service.expected_external_hashes(stored))
         self.service.writeback(stored["id"])
         self.assertEqual(originals, {axis: (self.source / FILENAMES[axis]).read_bytes() for axis in LEGACY_AXES})

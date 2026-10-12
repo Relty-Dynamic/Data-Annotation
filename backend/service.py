@@ -849,14 +849,6 @@ class ProjectService:
                 self._clearing_playback.discard(ident)
         return {"cleared": ident, "playback_generation": self._playback_generations[ident]}
 
-    def clear_submitted_server_cache(self, ident: str, expected_revision: int, save_id: str) -> dict:
-        with self.lock:
-            project = self.load(ident)
-            if (project["revision"] != expected_revision or project.get("draft_dirty")
-                    or (project.get("last_writeback") or {}).get("save_id") != save_id):
-                raise HTTPException(409, "项目在提交后已有变化，未清理 Ubuntu 播放缓存。")
-            return self.clear_local_previews(ident, expected_revision)
-
     def tool(self, name: str) -> Path | None:
         explicit = os.getenv(name.upper() + "_PATH")
         if explicit and Path(explicit).is_file():
@@ -1659,14 +1651,22 @@ class ProjectService:
         try:
             if directory.exists() and not directory.is_dir():
                 raise HTTPException(409, "原目录的 timeline 已存在且不是文件夹，请先处理同名文件。")
-            # Choose one complete location; never mix new and legacy batches.
-            return directory if any((directory / name).exists() for name in FILENAMES.values()) else source
+            # Once timeline/ exists it is authoritative, even when its JSONs
+            # were intentionally removed. Falling back to root resurrects an
+            # older legacy batch after the user clears the current batch.
+            return directory if directory.is_dir() else source
         except OSError:
             raise HTTPException(409, "无法检查 timeline 文件夹，请检查共享网络和权限。")
 
     def current_external_hashes(self, source: Path) -> dict:
         try:
-            directory = self.external_directory(source)
+            return self._hashes_in_directory(self.external_directory(source))
+        except OSError:
+            raise HTTPException(409, "无法检查原目录已有 JSON，未进行写回。请检查共享网络和权限。")
+
+    @staticmethod
+    def _hashes_in_directory(directory: Path) -> dict:
+        try:
             hashes = {axis: digest((directory / FILENAMES[axis]).read_bytes()) if (directory / FILENAMES[axis]).exists() else None for axis in AXES}
             for path in directory.glob("custom_*.timeline.json"):
                 axis = path.name.removesuffix(".timeline.json")
@@ -1707,7 +1707,9 @@ class ProjectService:
             if self.current_external_hashes(source) != expected:
                 raise HTTPException(409, "原目录 JSON 已被其他程序修改。为保护外部结果，本次没有写回；本机草稿保留，可下载 JSON。")
             destination = source / "timeline"
-            target_expected = expected if self.external_directory(source) == destination else {axis: None for axis in documents}
+            external_directory = self.external_directory(source)
+            target_expected = expected if external_directory == destination else {axis: None for axis in documents}
+            created_destination = not destination.exists()
             retired = [axis for axis, value in target_expected.items()
                        if axis.startswith("custom_") and axis not in documents and value is not None]
             temporary, backups, replaced, removed = {}, {}, [], []
@@ -1734,7 +1736,12 @@ class ProjectService:
                     backup = backup_dir / filename
                     shutil.copy2(destination / filename, backup)
                     backups[axis] = backup
-                if self.current_external_hashes(source) != expected:
+                # Creating timeline/ changes which batch a new reader would
+                # choose. During legacy migration, compare the original root
+                # batch until all new files are committed.
+                current = (self.current_external_hashes(source) if external_directory == destination
+                           else self._hashes_in_directory(external_directory))
+                if current != expected:
                     raise HTTPException(409, "准备写回时发现原目录 JSON 有变化，已停止写回。")
                 for axis in documents:
                     # Check each target immediately before replacing. A network share
@@ -1785,6 +1792,18 @@ class ProjectService:
                     project["warnings"] = ["写回中断且部分文件未能恢复：" + "、".join(rollback_failed) + "。本机草稿保留；请检查原目录和 .annotation-backups。"]
                     self.save(project)
                     raise HTTPException(500, project["warnings"][0])
+                if created_destination:
+                    for temp in temporary.values():
+                        try:
+                            temp.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    try:
+                        destination.rmdir()
+                    except OSError:
+                        # A concurrent writer may have added content. Leave it
+                        # untouched; the next attempt will detect the change.
+                        pass
                 if isinstance(exc, HTTPException):
                     raise
                 raise HTTPException(500, "写回失败，已恢复本次替换的文件。本机草稿已保留，请检查共享目录写入权限和网络后重试。")

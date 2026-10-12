@@ -527,10 +527,11 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   pauseClearedPreviews(target.id);
   try{
    await api(`/api/projects/${target.id}/preview-cache/clear`,json('POST',{confirmed:true,expected_revision:target.revision}));
+   await clearBrowserVideoCache(target.id);
    writeProjectPreference(previewsClearedKey,JSON.stringify({id:target.id,at:Date.now()}));
    if(readProjectPreference(lastProjectKey)===target.id)writeProjectPreference(lastProjectKey,null);
    setDeleteProject(null);
-   setNotice(`已清理「${target.name}」的本机预览。重新打开页面将等待选择素材；${target.storage_mode==='s3-mock'?'模拟项目、草稿和测试视频':'项目、草稿、原视频和 NAS 缓存包'}均保留。`);
+   setNotice(`已清理「${target.name}」在此电脑浏览器及服务上的播放预览。重新选择项目时将从${target.storage_mode==='s3-mock'?'模拟存储':'NAS 缓存'}重新准备；项目、草稿和原视频均保留。`);
    await refresh();
   }catch(e){setDeleteError((e as Error).message);}finally{setDeleting(false);}
  }
@@ -646,11 +647,11 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  function undo(){if(busyRef.current)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再撤销；当前输入已保留。');return;}const past=historyRef.current,p=projectRef.current;if(!past.length||!p)return;updateHistory(past.slice(0,-1),[...redoRef.current.slice(-49),p.annotations]);commit(past[past.length-1],false);clearEditor();}
  function redo(){if(busyRef.current)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再恢复；当前输入已保留。');return;}const future=redoRef.current,p=projectRef.current;if(!future.length||!p)return;updateHistory([...historyRef.current.slice(-49),p.annotations],future.slice(0,-1));commit(future[future.length-1],false);clearEditor();}
  async function exportFiles(){if(!project)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再导出；当前输入尚未写入结果。');return;}await doBusy('正在生成时间轴文件…',async()=>{await flush();const r=await authFetch(`/api/projects/${project.id}/export`);if(!r.ok){const j=await r.json();throw new Error(j.detail);}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${projectDownloadName(project.name)}-timelines.zip`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);setNotice(`已导出 ZIP，内含 ${projectTracks(project).length} 个独立时间轴 JSON`);});}
- async function writeback(clearServer:boolean,clearComputer:boolean){
+ async function writeback(){
   const current=projectRef.current;if(!current)return;
   await doBusy(current.storage_mode==='s3-mock'?'正在保存到 S3 mock…':'正在写回 timeline 文件夹…',async()=>{
    await flush();
-   const result=await api<{save_id:string}>(`/api/projects/${current.id}/writeback`,json('POST',{expected_revision:serverRevision.current}));
+   await api(`/api/projects/${current.id}/writeback`,json('POST',{expected_revision:serverRevision.current}));
    setSubmitOpen(false);
    const savedProject=await api<Project>(`/api/projects/${current.id}`);
    if(projectRef.current?.id===current.id){projectRef.current=savedProject;setProject(savedProject);}
@@ -661,24 +662,13 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
      setCloudSyncError('');
     }catch(error){
      setCloudSyncError(`本机标注文件已写回，但 NAS 写回或同步失败：${(error as Error).message}`);
-     setNotice('标注文件已写回本机采集目录的 timeline 文件夹；缓存尚未清理。');
+     setNotice('标注文件已写回本机采集目录的 timeline 文件夹。');
      return;
     }
    }
-   const failures:string[]=[];
-   if(clearServer){
-    try{await api(`/api/projects/${current.id}/submitted-cache/clear`,json('POST',{expected_revision:serverRevision.current,save_id:result.save_id}));}
-    catch(error){failures.push(`${current.storage_mode==='s3-mock'?'测试服务':sharedServer?'Ubuntu':'本机服务'}缓存清理失败：${(error as Error).message}`);}
-   }
-   if(clearComputer){
-    try{await clearBrowserVideoCache(current.id);}
-    catch(error){failures.push(`本机浏览器缓存清理失败：${(error as Error).message}`);}
-   }
-   if(clearServer||clearComputer){pausePlayback();setSessionEntered(false);setPrepareOpen(false);projectRef.current=null;setProject(null);}
    await refresh();
    setNotice(current.storage_mode==='s3-mock'?`${TRACKS.length+(current.custom_tracks?.length??0)} 个 JSON 已保存到 S3 mock 并读回核验。`:
-    `${TRACKS.length+(current.custom_tracks?.length??0)} 个 JSON 已写回原采集目录的 timeline 文件夹。${!sharedServer?'NAS 副本已写入并读回核验。':''}${clearServer&&!failures.some(item=>item.includes('服务缓存')||item.startsWith('Ubuntu'))?`${sharedServer?'Ubuntu':'本机服务'}播放缓存已清理。`:''}${clearComputer&&!failures.some(item=>item.startsWith('本机浏览器'))?'此电脑的浏览器播放缓存已清理。':''}`);
-   if(failures.length)setError(failures.join(' '));
+    `${TRACKS.length+(current.custom_tracks?.length??0)} 个 JSON 已写回原采集目录的 timeline 文件夹。${!sharedServer?'NAS 副本已写入并读回核验。':''}`);
   });
  }
  useEffect(()=>{
@@ -745,7 +735,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   {comparisonOpen&&<div className="comparison-backdrop"/>}
   {settingsOpen&&<SeekSettingsDialog value={seekSettings} onCancel={()=>setSettingsOpen(false)} onSave={saveSeekSettings}/>}
   {renameProject&&<RenameProjectDialog name={renameProject.name} saving={renaming} error={renameError} onCancel={()=>{setRenameProject(null);setRenameError('');}} onConfirm={confirmRenameProject}/>}
-  {submitOpen&&project&&<SubmitProjectDialog projectName={project.name} submitting={!!busy} remoteProject={sharedServer} mockProject={project.storage_mode==='s3-mock'} onCancel={()=>setSubmitOpen(false)} onConfirm={(clearServer,clearComputer)=>void writeback(clearServer,clearComputer)}/>}
+  {submitOpen&&project&&<SubmitProjectDialog projectName={project.name} submitting={!!busy} remoteProject={sharedServer} mockProject={project.storage_mode==='s3-mock'} onCancel={()=>setSubmitOpen(false)} onConfirm={()=>void writeback()}/>}
   {cloudDialogOpen&&<CloudAccountDialog busy={!!busy} error={cloudDialogError} onCancel={()=>setCloudDialogOpen(false)} onConnect={(username,password)=>void connectCloud(username,password)}/>}
   {deleteProject&&<DeleteProjectDialog project={deleteProject} deleting={deleting} error={deleteError} onCancel={()=>{setDeleteProject(null);setDeleteError('');}} onConfirm={confirmDeleteProject}/>}
   <header className="topbar" inert={comparisonOpen||timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen||adminOpen||passwordOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions"><span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><span>{user.display_name}</span>{!sharedServer&&!mockMode&&<button className='quiet' onClick={()=>{setCloudDialogError('');setCloudDialogOpen(true);}}>{cloudConnected?'Ubuntu 已连接':'连接 Ubuntu 账号'}</button>}{user.role==='admin'&&<button className="quiet" onClick={()=>setAdminOpen(true)}>账号管理</button>}<button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} title="请先保存或取消当前编辑" onClick={()=>setPasswordOpen(true)}>修改密码</button><button className="quiet" onClick={()=>void onLogout()}>退出登录</button><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>
@@ -805,7 +795,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    <p>{importMode==='relink'?<>选择最初的原视频目录，验证匹配后迁移已有缓存并清理平台内的视频副本。<br/>标注、撤销记录和当前输入都会保留。</>:importMode==='supplement'?<>漏掉的视频会按录制时间插入当前时间轴。<br/>保留已有标注和预览缓存，同名视频自动跳过。</>:<>识别文件名中的录制时间，自动排序。<br/>保留视频之间的真实录制间隔。</>}</p>
    <div className="source-storage-note"><strong>原视频保留原目录，不复制</strong><span>预览缓存存放在原目录的 <code>.datamark-cache</code> 子文件夹，并附有 README.md 用途说明。标注草稿保存在平台内。</span><small>{sharedServer||mockMode?'请保持 NAS 挂载可访问。':'使用移动硬盘、SD 卡或共享目录时，请保持该位置可访问。'}</small></div>
    {importError&&<p className="import-error" role="alert">{importError}</p>}
-   <div className="prepare-import-option"><Check size={17}/><span><strong>先准备全部播放素材，再开始标注</strong><small>复用原目录中已有的有效缓存，{sharedServer?'Ubuntu 服务器':'本机'}保存精简播放素材。</small></span></div>
+   <div className="prepare-import-option"><Check size={17}/><span><strong>先准备全部播放素材，再开始标注</strong><small>{sharedServer?'Ubuntu 生成并校验预览，保存到 NAS 后供此电脑下载。':'复用原目录中已有的有效缓存，本机保存精简播放素材。'}</small></span></div>
    <div className={'source-pickers'+(importMode==='relink'?' single':'')}>
     {importMode!=='relink'&&(!sharedServer&&!mockMode||importMode==='supplement')&&<button className="upload-zone" disabled={!!busy||nasLoading} onClick={()=>sharedServer||mockMode?void browseNas('files'):void chooseLocalSources('files')}><Film size={23}/><strong>选择视频文件</strong><span>{sharedServer||mockMode?'向当前项目补入 NAS 视频':'支持一次多选，可导出 JSON'}</span></button>}
     <button className="upload-zone" disabled={!!busy||nasLoading} onClick={()=>sharedServer||mockMode?void browseNas('directory'):void chooseLocalSources('directory')}><FolderOpen size={23}/><strong>选择原视频目录</strong><span>{sharedServer||mockMode?'浏览 NAS，支持写回标注':importMode==='relink'?'匹配已有视频，迁移缓存':'直接读取目录，支持写回标注'}</span></button>

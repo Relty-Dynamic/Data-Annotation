@@ -9,6 +9,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from pathlib import Path
 
@@ -101,6 +102,109 @@ class SessionCache:
                         source.get('cache_identity_stamp', source['stamp']), source['duration_ms'],
                         source.get('media_start_seconds', 0)])[:32]
 
+    def _nas_playback_directory(self, project: dict, source: dict, *, create: bool = False) -> Path | None:
+        """Use source-adjacent NAS storage only for the configured intranet tree."""
+        configured = os.getenv('DATAMARK_SOURCE_ROOT')
+        if not configured or os.getenv('DATAMARK_STORAGE_BACKEND') != 'nas':
+            return None
+        path = Path(source['path'])
+        try:
+            if (path.is_symlink() or path.parent.is_symlink()
+                    or not path.resolve(strict=True).is_relative_to(Path(configured).resolve(strict=True))):
+                return None
+            parent = path.parent
+            root = parent / '.datamark-cache'
+            owned = root / 'ubuntu-playback-v1'
+            for directory in (root, owned):
+                if (directory.is_symlink() or directory.resolve().parent != directory.parent.resolve()
+                        or (directory.exists() and not directory.is_dir())):
+                    raise HTTPException(409, 'NAS 预览缓存目录异常，未读取或写入。')
+                if create:
+                    directory.mkdir(exist_ok=True)
+            if not owned.is_dir():
+                return None
+            directory = checked_tree(owned / project['id'], owned)
+            if create:
+                directory.mkdir(exist_ok=True)
+                readme = owned / 'README.md'
+                try:
+                    with readme.open('x', encoding='utf-8') as handle:
+                        handle.write('DataMark 内网预览缓存：经校验的精简视频、倍速视频和图片。可供标注电脑重新下载；原视频和 timeline 标注不在此目录。\n')
+                except FileExistsError:
+                    if readme.is_symlink() or not readme.is_file():
+                        raise HTTPException(409, 'NAS 预览缓存说明文件异常，未写入。')
+            return directory
+        except OSError as exc:
+            raise HTTPException(503, 'NAS 预览缓存不可访问，请检查共享目录后重试。') from exc
+
+    def _nas_entry(self, directory: Path | None, key: str, source: dict) -> dict | None:
+        if directory is None or not directory.is_dir():
+            return None
+        entry = self._load_entry(directory, key, source)
+        hashes = entry.get('sha256') if entry else None
+        if not isinstance(hashes, dict):
+            return None
+        paths = [entry[kind]['path'] for kind in ('normal', 'fast', 'thumbnail')]
+        paths.extend(record['path'] for record in entry['sheets'])
+        if set(paths) != set(hashes):
+            return None
+        for name in paths:
+            value = hashlib.sha256()
+            try:
+                with (directory / name).open('rb') as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b''):
+                        value.update(block)
+            except OSError:
+                return None
+            if value.hexdigest() != hashes[name]:
+                return None
+        return entry
+
+    def _publish_nas_entry(self, project: dict, source: dict, key: str,
+                           local: Path, entry: dict) -> tuple[dict, Path]:
+        directory = self._nas_playback_directory(project, source, create=True)
+        if directory is None:
+            return entry, local
+        existing = self._nas_entry(directory, key, source)
+        if existing is not None:
+            return existing, directory
+        records = [entry[kind] for kind in ('normal', 'fast', 'thumbnail')] + entry['sheets']
+        hashes = {}
+        published = []
+        try:
+            for record in records:
+                name = record['path']
+                source_file = self._valid_record(local, record, jpeg=name.endswith('.jpg'))
+                if source_file is None or Path(name).name != name:
+                    raise HTTPException(422, 'Ubuntu 预览文件校验失败，未写入 NAS。')
+                target = directory / name
+                if target.is_symlink() or (target.exists() and not target.is_file()):
+                    raise HTTPException(409, 'NAS 预览缓存存在同名异常文件，未覆盖。')
+                temporary = directory / ('.' + name + '.' + uuid.uuid4().hex + '.partial')
+                digest = hashlib.sha256()
+                try:
+                    with source_file.open('rb') as incoming, temporary.open('xb') as outgoing:
+                        for block in iter(lambda: incoming.read(1024 * 1024), b''):
+                            outgoing.write(block)
+                            digest.update(block)
+                        outgoing.flush()
+                        os.fsync(outgoing.fileno())
+                    if temporary.stat().st_size != record['size']:
+                        raise HTTPException(422, 'NAS 预览缓存复制不完整，Ubuntu 副本已保留。')
+                    os.replace(temporary, target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                published.append(self._file_record(target, directory))
+                hashes[name] = digest.hexdigest()
+            fresh = {**entry, 'normal': published[0], 'fast': published[1],
+                     'thumbnail': published[2], 'sheets': published[3:], 'sha256': hashes}
+            self._write_json(directory / (key + '.assets.json'), fresh)
+            if self._nas_entry(directory, key, source) is None:
+                raise HTTPException(422, 'NAS 预览缓存读回校验失败，Ubuntu 副本已保留。')
+            return fresh, directory
+        except OSError as exc:
+            raise HTTPException(503, '写入 NAS 预览缓存失败，Ubuntu 副本已保留，请检查共享目录后重试。') from exc
+
     @staticmethod
     def _initial(project: dict) -> dict:
         return {'project_id': project['id'], 'state': 'idle', 'stage': 'cache', 'operation': 'check',
@@ -180,8 +284,8 @@ class SessionCache:
             self._counts(job)
 
     def _validate_ready(self, job: dict) -> bool:
-        # Only local stat calls: readiness cannot outlive a removed cache file,
-        # and inspecting it must never restart NAS reads or transcoding.
+        # Readiness cannot outlive a removed cache file. This only checks the
+        # published asset locations; it never restarts transcoding.
         with self._condition:
             if job['status']['state'] != 'ready':
                 return False
@@ -213,6 +317,25 @@ class SessionCache:
             if not job or job['status']['state'] != 'ready' or not job['manifest']:
                 raise HTTPException(409, '本机播放素材尚未准备完成，请先完成素材准备。')
             return copy.deepcopy(job['manifest'])
+
+    def browser_ready(self, ident: str) -> dict:
+        """Release Ubuntu's temporary copy after the browser finished downloading."""
+        _, job = self._matching(ident)
+        with self._condition:
+            if not job or job['status']['state'] != 'ready':
+                raise HTTPException(409, '预览尚未就绪，不能清理 Ubuntu 临时缓存。')
+            if not job.get('nas_published'):
+                return {'released': False}
+            if not self._validate_ready(job):
+                raise HTTPException(409, 'NAS 预览缓存已变化，Ubuntu 临时缓存已保留。')
+            parent = self.service.storage.directory(ident)
+            directory = checked_tree(parent / 'playback', parent)
+            try:
+                if directory.exists():
+                    shutil.rmtree(directory)
+            except OSError as exc:
+                raise HTTPException(503, 'Ubuntu 临时预览清理失败；NAS 缓存已保留，请重试。') from exc
+            return {'released': True}
 
     def failed_for_skip(self, ident: str, video_ids: list[str]) -> list[dict]:
         _, job = self._matching(ident)
@@ -567,7 +690,7 @@ class SessionCache:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def _prepare_video(self, job: dict, video: dict, directory: Path) -> dict:
+    def _prepare_video(self, job: dict, video: dict, directory: Path) -> tuple[dict, Path]:
         project = job['project']
         self._check(job)
         clip_started = time.monotonic()
@@ -598,7 +721,16 @@ class SessionCache:
                     item = next(item for item in job['status']['items'] if item['video_id'] == video_id)
                     item.update(state='ready', progress=100, detail=None)
                     self._counts(job)
-                return entry
+                return entry, directory
+            nas_directory = self._nas_playback_directory(project, source)
+            nas_entry = self._nas_entry(nas_directory, key, source)
+            if nas_entry is not None:
+                self._progress(job, video_id, 'cache', 99, '复用 NAS 已保存的精简播放缓存。', operation='nas')
+                with self._condition:
+                    item = next(item for item in job['status']['items'] if item['video_id'] == video_id)
+                    item.update(state='ready', progress=100, detail=None)
+                    self._counts(job)
+                return nas_entry, nas_directory
             self._progress(job, video_id, 'cache', 0, '正在检查原视频身份和本机缓存。', operation='check')
             # An accessible but changed original fails validation. Offline
             # originals do not prevent reuse or repairs from a valid local normal.
@@ -717,14 +849,15 @@ class SessionCache:
                         shutil.rmtree(checked)
             else:
                 self._progress(job, video_id, 'local', 99, '复用已完成的全部本机播放素材。', operation='reuse')
-            LOGGER.info('Local playback ready: %s (%.1fs)', video['name'], time.monotonic() - clip_started)
+            published = self._publish_nas_entry(project, source, key, directory, entry)
+            LOGGER.info('Playback ready: %s (%.1fs)', video['name'], time.monotonic() - clip_started)
             with self._condition:
                 if job['stop'].is_set():
                     raise _Cancelled()
                 item = next(item for item in job['status']['items'] if item['video_id'] == video_id)
                 item.update(state='ready', progress=100, detail=None)
                 self._counts(job)
-            return entry
+            return published
         finally:
             with self._condition:
                 job['_reserved_bytes'].pop(video_id, None)
@@ -733,7 +866,7 @@ class SessionCache:
                 item['timings'] = timings
             LOGGER.info('Playback preparation timing %s: %s', video_id, json.dumps(timings, sort_keys=True))
 
-    def _prepare_videos(self, job: dict, directory: Path) -> list[tuple[str, dict]]:
+    def _prepare_videos(self, job: dict, directory: Path) -> list[tuple[str, tuple[dict, Path]]]:
         videos = job['project']['videos']
         keys = [self._source_key(job['project']['_sources'][video['id']]) for video in videos]
         # Duplicate source identities share output paths, so serialize those jobs.
@@ -834,14 +967,16 @@ class SessionCache:
                     detail = job['status']['items'][0]['detail']
                 job['status'].update(state='partial', detail=detail)
             return
-        version = _digest([job['signature'], entries])[:24]
+        version = _digest([job['signature'], [(video_id, entry) for video_id, (entry, _) in entries]])[:24]
         assets = {}
         videos = []
-        for video_id, entry in entries:
+        all_on_nas = True
+        for video_id, (entry, asset_directory) in entries:
+            all_on_nas = all_on_nas and asset_directory != directory
             for kind in ('normal', 'fast', 'thumbnail'):
-                assets[(kind, video_id, None)] = (directory / entry[kind]['path'], entry[kind])
+                assets[(kind, video_id, None)] = (asset_directory / entry[kind]['path'], entry[kind])
             for index, record in enumerate(entry['sheets']):
-                assets[('sheet', video_id, index)] = (directory / record['path'], record)
+                assets[('sheet', video_id, index)] = (asset_directory / record['path'], record)
             url = f'/api/session-media/{ident}/{version}/{video_id}'
             videos.append({'id': video_id, 'url': url, 'fast_url': url + '?fast=true',
                            'thumbnail_url': f'/api/session-thumbnails/{ident}/{version}/{video_id}',
@@ -853,6 +988,6 @@ class SessionCache:
         with self._condition:
             if job['stop'].is_set():
                 raise _Cancelled()
-            job.update(assets=assets, manifest=manifest)
+            job.update(assets=assets, manifest=manifest, nas_published=all_on_nas)
             job['status'].update(state='ready', stage='local', progress=100, detail='全部本机精简播放素材已就绪。')
             self._counts(job)

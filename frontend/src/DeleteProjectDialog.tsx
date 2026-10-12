@@ -24,8 +24,8 @@ export default function DeleteProjectDialog({ project, deleting, error, onCancel
       <div className="delete-project-icon"><AlertTriangle size={25}/></div>
       <h2 id="delete-project-title">清理本机预览？</h2>
       <div className="delete-project-summary"><strong>{project.name}</strong><span>{project.videos.length} 段视频 · {count} 条标注</span></div>
-      <p>将停止本项目的准备任务，清理本机的播放预览、倍速预览、封面和悬停图片。</p>
-      <p className="delete-project-preserved">项目记录、全部标注草稿、原视频、NAS 缓存包、旧上传副本和已保存结果均保留。</p>
+      <p>将停止本项目的准备任务，清理此电脑浏览器中的视频和服务上的临时播放预览、倍速预览、封面及悬停图片。</p>
+      <p className="delete-project-preserved">项目记录、全部标注草稿、原视频、{project.storage_mode==='s3-mock'?'模拟存储中的视频':'NAS 缓存'}、旧上传副本和已保存结果均保留。再次打开时会从保留的素材重新准备。</p>
       {error && <p className="delete-project-error" role="alert">{error}</p>}
       <div className="delete-project-actions"><button ref={cancel} className="secondary" disabled={deleting} onClick={onCancel}>取消</button>
         <button className="delete-project-confirm" disabled={deleting} onClick={onConfirm}>{deleting?'正在清理本机预览…':'清理本机预览'}</button></div>
