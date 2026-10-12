@@ -274,3 +274,91 @@ class MockS3WorkflowTests(unittest.TestCase):
         self.assertFalse((self.app.state.mock_s3.objects / started.json()["prefix"]).exists())
         self.assertEqual(self.client.request("DELETE", f"/api/mock-s3/uploads/{ident}", headers=self.csrf).status_code, 200)
         self.assertFalse((self.app.state.mock_uploads.staging / ident).exists())
+
+    def test_deployment_switch_keeps_existing_projects_on_their_own_storage(self):
+        nas_root = self.root / "mounted-nas"
+        capture = nas_root / "habit" / "smoking" / "1010worker"
+        fpv = capture / "FPV"
+        fpv.mkdir(parents=True)
+        shutil.copy2(self.video, fpv / self.video.name)
+        mock = self.client.post("/api/mock-s3/projects/open", headers=self.csrf,
+                                json={"path": "daily/1001test/20261010"})
+        self.assertEqual(mock.status_code, 200, mock.text)
+        self.assertEqual(mock.json()["storage_mode"], "s3-mock")
+        with patch.dict(os.environ, {"DATAMARK_MOCK_NAS_ROOT": str(nas_root),
+                                          "DATAMARK_STORAGE_BACKEND": "nas"}):
+            app = create_app(self.root)
+            with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50001)) as client:
+                login = client.post("/api/auth/login", json={"username": "worker", "password": "another long safe password"})
+                self.assertEqual(login.status_code, 200, login.text)
+                csrf = {"X-CSRF-Token": login.json()["csrf"]}
+                health = client.get("/api/health").json()
+                self.assertEqual(health["storage_backend"], "nas")
+                capabilities = health["capabilities"]
+                self.assertIn("nas-source-browser", capabilities)
+                self.assertIn("s3-mock", capabilities)
+                self.assertEqual(client.get("/api/sources/browse").status_code, 200)
+                self.assertEqual(client.get("/api/mock-s3/sources").status_code, 409)
+                self.assertEqual(client.post("/api/mock-s3/projects/open", headers=csrf,
+                    json={"path": "daily/1001test/20261010"}).status_code, 409)
+                self.assertEqual(client.post("/api/projects/open", headers=csrf,
+                    json={"path": str(self.catalog_dir)}).status_code, 403)
+                nas = client.post("/api/projects/open", headers=csrf, json={"path": str(capture)})
+                self.assertEqual(nas.status_code, 200, nas.text)
+                project = nas.json()
+                self.assertEqual(project["storage_mode"], "nas")
+                self.assertEqual(len(client.get("/api/projects").json()), 2)
+                for item, expected_path in ((mock.json(), "/mock-objects/"), (project, "/api/session-media/")):
+                    started = client.post(f"/api/projects/{item['id']}/session/prepare", headers=csrf, json={})
+                    self.assertEqual(started.status_code, 200, started.text)
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        status = client.get(f"/api/projects/{item['id']}/session").json()
+                        if status["state"] in {"ready", "partial", "error"}:
+                            break
+                        time.sleep(.2)
+                    self.assertEqual(status["state"], "ready", status)
+                    manifest = client.get(f"/api/projects/{item['id']}/session/manifest")
+                    self.assertEqual(manifest.status_code, 200, manifest.text)
+                    self.assertIn(expected_path, manifest.json()["videos"][0]["url"])
+                self.assertEqual(client.post(f"/api/projects/{mock.json()['id']}/videos/open", headers=csrf,
+                    json={"path": str(capture), "expected_revision": 0}).status_code, 409)
+                annotations = project["annotations"]
+                annotations["posture"] = [{"id": "p1", "label": "动", "kind": "interval", "start_ms": 0,
+                                           "end_ms": project["duration_ms"]}]
+                saved = client.put(f"/api/projects/{project['id']}/draft", headers=csrf,
+                    json={"annotations": annotations, "expected_revision": 0})
+                self.assertEqual(saved.status_code, 200, saved.text)
+                submitted = client.post(f"/api/projects/{project['id']}/writeback", headers=csrf,
+                    json={"expected_revision": 1})
+                self.assertEqual(submitted.status_code, 200, submitted.text)
+                self.assertTrue((capture / "timeline" / "posture.timeline.json").is_file())
+                self.assertFalse((app.state.mock_s3.objects / "daily/1001test/20261010/timeline").exists())
+                disconnected = self.root / "nas-disconnected"
+                nas_root.rename(disconnected)
+                try:
+                    self.assertEqual(client.get(f"/api/projects/{mock.json()['id']}").status_code, 200)
+                finally:
+                    disconnected.rename(nas_root)
+                with TestClient(app, base_url="http://127.0.0.1", client=("203.0.113.5", 50002)) as remote:
+                    self.assertEqual(remote.post("/api/auth/login", json={"username": "worker",
+                        "password": "another long safe password"}).status_code, 403)
+                    self.assertEqual(remote.get("/api/sources/browse").status_code, 403)
+        with patch.dict(os.environ, {"DATAMARK_MOCK_NAS_ROOT": str(nas_root),
+                                          "DATAMARK_STORAGE_BACKEND": "s3-mock"}):
+            app = create_app(self.root)
+            with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50003)) as client:
+                login = client.post("/api/auth/login", json={"username": "worker",
+                    "password": "another long safe password"})
+                self.assertEqual(login.status_code, 200)
+                csrf = {"X-CSRF-Token": login.json()["csrf"]}
+                self.assertEqual(client.get("/api/health").json()["storage_backend"], "s3-mock")
+                self.assertEqual(client.get("/api/mock-s3/sources").status_code, 200)
+                self.assertEqual(client.post("/api/projects/open", headers=csrf,
+                    json={"path": str(capture)}).status_code, 409)
+                self.assertEqual(client.get(f"/api/projects/{project['id']}").json()["storage_mode"], "nas")
+
+    def test_unavailable_storage_backend_fails_startup(self):
+        with patch.dict(os.environ, {"DATAMARK_STORAGE_BACKEND": "s3"}):
+            with self.assertRaisesRegex(ValueError, "not available"):
+                create_app(self.root)

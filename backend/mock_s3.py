@@ -488,8 +488,9 @@ class MockUploadManager:
 
 
 class MockProjectService(ProjectService):
-    def __init__(self, root: Path, store: MockS3Store):
+    def __init__(self, root: Path, store: MockS3Store, nas_root: Path | None = None):
         self.mock_store = store
+        self.nas_root = nas_root
         super().__init__(root, enable_remote=False)
 
     def public(self, project: dict) -> dict:
@@ -500,14 +501,22 @@ class MockProjectService(ProjectService):
             result["storage_prefix"] = project.get("_mock_s3_key")
             result["cache_directories"] = []
             result["needs_source_relink"] = False
+        elif project.get("source_dir"):
+            result["storage_mode"] = "nas"
         return result
 
     def attach_source_caches(self, project: dict, *, video_ids: set[str] | None = None, migrate: bool = False) -> None:
-        # The desktop test copy is read-only input. Generated media stays under the isolated mock app.
-        project["_storage_version"] = 3
-        project["_cache_warnings"] = []
+        source_dir = project.get("source_dir")
+        if self.nas_root and source_dir and Path(source_dir).is_relative_to(self.nas_root) and not project.get("_mock_s3"):
+            super().attach_source_caches(project, video_ids=video_ids, migrate=migrate)
+        else:
+            # Mock objects and desktop test folders remain read-only inputs.
+            project["_storage_version"] = 3
+            project["_cache_warnings"] = []
 
     def writeback(self, ident: str, *, expected_revision: int | None = None) -> dict:
+        if not self.load(ident).get("_mock_s3"):
+            return super().writeback(ident, expected_revision=expected_revision)
         with self.lock:
             project = self.load(ident)
             if not project.get("_mock_s3"):
