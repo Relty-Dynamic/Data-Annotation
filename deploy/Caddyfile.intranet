@@ -3,7 +3,7 @@
 	skip_install_trust
 }
 
-https://{$DATAMARK_HOST} {
+https://{$DATAMARK_HOST}:{$DATAMARK_HTTPS_PORT} {
 	tls internal
 	reverse_proxy web:8765
 }

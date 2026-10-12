@@ -29,6 +29,10 @@ configured_home="$(sed -n 's/^DATAMARK_HOME=//p' "$env_file" | tail -n 1)"
 host="$(sed -n 's/^DATAMARK_HOST=//p' "$env_file" | tail -n 1)"
 [[ "$configured_home" == "$deploy_home" ]] || die 'DATAMARK_HOME does not match the deployment directory'
 [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'DATAMARK_HOST must be the internal IPv4 address'
+https_port="$(sed -n 's/^DATAMARK_HTTPS_PORT=//p' "$env_file" | tail -n 1)"
+origin_port_suffix="$(sed -n 's/^DATAMARK_ORIGIN_PORT_SUFFIX=//p' "$env_file" | tail -n 1)"
+[[ -z "$https_port" || "$https_port" == 443 ]] || die 'main intranet release must use HTTPS port 443'
+[[ -z "$origin_port_suffix" ]] || die 'main intranet release must not set an origin port suffix'
 for setting in DATAMARK_PUBLIC_ORIGIN DATAMARK_PUBLIC_API_ORIGIN DATAMARK_PUBLIC_BIND_IP; do
     value="$(sed -n "s/^${setting}=//p" "$env_file" | tail -n 1)"
     [[ -z "$value" ]] || die "$setting must be empty for the NAS-only intranet deployment"

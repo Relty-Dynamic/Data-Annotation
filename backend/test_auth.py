@@ -294,6 +294,23 @@ class AccountAccessTests(unittest.TestCase):
                 with TestClient(app, base_url="http://10.20.30.40"):
                     pass
 
+    def test_internal_https_custom_port_uses_exact_origin(self):
+        with tempfile.TemporaryDirectory(prefix="intranet-port-") as folder:
+            root = Path(folder)
+            AuthStore(root).create_user("admin", "管理员", "correct horse battery staple", "admin")
+            with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40:10443",
+                                            "DATAMARK_STORAGE_BACKEND": "nas"}):
+                app = create_app(root)
+            with TestClient(app, base_url="https://10.20.30.40:10443") as client:
+                denied = client.post("/api/auth/login", headers={"Origin": "https://10.20.30.40"},
+                                     json={"username": "admin", "password": "correct horse battery staple"})
+                self.assertEqual(denied.status_code, 403)
+                login = client.post("/api/auth/login", headers={"Origin": "https://10.20.30.40:10443"},
+                                    json={"username": "admin", "password": "correct horse battery staple"})
+                self.assertEqual(login.status_code, 200, login.text)
+                self.assertIn("secure", login.headers["set-cookie"].lower())
+                self.assertEqual(client.get("/api/health").json()["storage_backend"], "nas")
+
     def test_nas_deployment_rejects_public_api_origin(self):
         with tempfile.TemporaryDirectory(prefix="public-auth-") as folder:
             root = Path(folder)

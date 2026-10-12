@@ -70,6 +70,8 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 网关使用内部证书颁发机构自动签发 HTTPS 证书。首次启动后，从持久化的 `caddy-data/caddy/pki/authorities/local/root.crt` 获取公开根证书，按公司设备管理流程导入每台访问设备的受信任根证书库；私钥和整个 `caddy-data` 目录不得分发。浏览器未信任根证书前，不要通过忽略证书警告输入账号密码。持久化备份应覆盖应用 `state/` 中的两个 SQLite 数据库和项目播放缓存，以及 `caddy-data/`；恢复时先停服务，恢复完整目录后再启动并验证登录与项目读写。
 
+内网网关默认使用 443。手动将当前分支作为内网服务部署到 10443 时，在持久配置中同时设置 `DATAMARK_HTTPS_PORT=10443` 和 `DATAMARK_ORIGIN_PORT_SUFFIX=:10443`，并用 `https://<DATAMARK_HOST>:10443` 访问。切换前备份现有配置与两个 SQLite 数据库，然后替换现有 Compose 服务，避免两个实例同时写同一项目与 NAS；账号和项目继续使用原持久目录。关闭路由器上的 10443 端口映射，不能将此 NAS 服务作为公网入口。
+
 ### Jenkins 自动发布
 
 `main` 是 Ubuntu 内网发布分支。当前 `relty-server` 的 Jenkins 任务使用 **Pipeline script from SCM**：仓库地址 `git@github.com:Relty-Dynamic/Data-Annotation.git`，分支指定 `feat/s3-mock`，脚本路径 `Jenkinsfile`，只在同机的 `built-in` 节点运行。这个任务只构建和测试 S3 mock 分支，不部署内网；部署脚本只接受 `origin/main` 提交。Jenkinsfile 保留 `pollSCM('H/2 * * * *')` 轮询配置，但实际轮询日志仍显示检查 `main`，自动触发当前分支尚未验证，须修正任务配置并以新提交验证。S3 模拟模式须在本机明确启用；通过页面上传采集目录时无需预设桌面测试视频路径，也不会随分支构建自动启用。

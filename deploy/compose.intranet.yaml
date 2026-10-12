@@ -19,7 +19,7 @@ services:
       - ALL
     environment:
       DATAMARK_ROOT: /app
-      DATAMARK_ORIGIN: https://${DATAMARK_HOST:?Internal IP or hostname is required}
+      DATAMARK_ORIGIN: https://${DATAMARK_HOST:?Internal IP or hostname is required}${DATAMARK_ORIGIN_PORT_SUFFIX:-}
       DATAMARK_BIND_IP: ${DATAMARK_BIND_IP:?Internal interface IP is required}
       DATAMARK_STORAGE_BACKEND: nas
       DATAMARK_SOURCE_ROOT: /mnt/nas/homes/datacollection
@@ -67,8 +67,9 @@ services:
       - NET_BIND_SERVICE
     environment:
       DATAMARK_HOST: ${DATAMARK_HOST:?Internal IP or hostname is required}
+      DATAMARK_HTTPS_PORT: ${DATAMARK_HTTPS_PORT:-443}
     ports:
-      - "${DATAMARK_BIND_IP:?Internal interface IP is required}:443:443"
+      - "${DATAMARK_BIND_IP:?Internal interface IP is required}:${DATAMARK_HTTPS_PORT:-443}:${DATAMARK_HTTPS_PORT:-443}"
     volumes:
       - type: bind
         source: ./Caddyfile.intranet

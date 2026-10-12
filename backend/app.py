@@ -212,7 +212,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                               ipaddress.ip_network("192.168.0.0/16"))
             if not any(address in network for network in private_ranges):
                 raise ValueError("DATAMARK_BIND_IP must be an RFC1918 LAN address")
-        allowed_hosts.append(validate_https_origin(configured_origin, "DATAMARK_ORIGIN"))
+        allowed_hosts.append(validate_https_origin(configured_origin, "DATAMARK_ORIGIN", allow_port=True))
         allowed_origins.add(configured_origin)
     if public_origin or public_api_origin:
         if not configured_origin or not public_origin or not public_api_origin:
