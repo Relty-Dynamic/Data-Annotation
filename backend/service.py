@@ -1747,11 +1747,15 @@ class ProjectService:
             self.verify_sources(project)
             source = Path(project["source_dir"])
             expected = self.expected_external_hashes(project)
-            if self.current_external_hashes(source) != expected:
+            actual = self.current_external_hashes(source)
+            # A missing timeline file can be recreated from this project's
+            # saved draft. An added or modified file belongs to an external
+            # writer and must still block writeback.
+            if any(value is not None and value != expected.get(axis) for axis, value in actual.items()):
                 raise HTTPException(409, "原目录 JSON 已被其他程序修改。为保护外部结果，本次没有写回；本机草稿保留，可下载 JSON。")
             destination = source / "timeline"
             external_directory = self.external_directory(source)
-            target_expected = expected if external_directory == destination else {axis: None for axis in documents}
+            target_expected = actual if external_directory == destination else {axis: None for axis in documents}
             created_destination = not destination.exists()
             retired = [axis for axis, value in target_expected.items()
                        if axis.startswith("custom_") and axis not in documents and value is not None]
@@ -1784,7 +1788,7 @@ class ProjectService:
                 # batch until all new files are committed.
                 current = (self.current_external_hashes(source) if external_directory == destination
                            else self._hashes_in_directory(external_directory))
-                if current != expected:
+                if current != actual:
                     raise HTTPException(409, "准备写回时发现原目录 JSON 有变化，已停止写回。")
                 for axis in documents:
                     # Check each target immediately before replacing. A network share

@@ -656,7 +656,61 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual(self.service.open_path(str(self.source))['annotations']['scene'], changed['annotations']['scene'])
         self.assertTrue((self.source / FILENAMES['scene']).exists(), 'legacy root files remain untouched')
 
-    def test_deleted_nas_json_with_dirty_draft_requires_explicit_archived_reset(self):
+    def test_writeback_recreates_deleted_json_without_reopening_or_clearing_draft(self):
+        project = self.annotated_project()
+        first = self.service.writeback(project['id'])
+        original = {axis: (self.source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in AXES}
+        for axis in AXES:
+            (self.source / 'timeline' / FILENAMES[axis]).unlink()
+        second = self.service.writeback(project['id'])
+        self.assertNotEqual(first['save_id'], second['save_id'])
+        self.assertEqual(set(second['paths']), {str(self.source / 'timeline' / name) for name in FILENAMES.values()})
+        for axis in AXES:
+            self.assertEqual(json.loads((self.source / 'timeline' / FILENAMES[axis]).read_bytes())['segments'],
+                             json.loads(original[axis])['segments'])
+        self.assertEqual(self.service.open_path(str(self.source))['annotations'], project['annotations'])
+
+    def test_writeback_recreates_only_missing_json_and_backs_up_survivors(self):
+        project = self.annotated_project()
+        self.service.writeback(project['id'])
+        missing = self.source / 'timeline' / FILENAMES['scene']
+        survivor = self.source / 'timeline' / FILENAMES['posture']
+        survivor_bytes = survivor.read_bytes()
+        missing.unlink()
+        result = self.service.writeback(project['id'])
+        self.assertTrue(missing.is_file())
+        self.assertEqual((self.source / '.annotation-backups' / result['save_id'] / survivor.name).read_bytes(), survivor_bytes)
+        self.assertFalse((self.source / '.annotation-backups' / result['save_id'] / missing.name).exists())
+        self.assertEqual(self.service.open_path(str(self.source))['annotations'], project['annotations'])
+
+    def test_writeback_recreates_missing_custom_json_and_accepts_already_removed_retired_axis(self):
+        project = self.annotated_project()
+        added = self.service.add_custom_track(project['id'], '环境', 'event', [], project['revision'])
+        custom = added['custom_tracks'][0]['id']
+        self.service.writeback(project['id'])
+        custom_path = self.source / 'timeline' / filename_for_axis(custom)
+        custom_path.unlink()
+        self.service.writeback(project['id'])
+        self.assertTrue(custom_path.is_file())
+        saved = self.service.load(project['id'])
+        self.service.delete_custom_track(project['id'], custom, saved['revision'])
+        custom_path.unlink()
+        self.service.writeback(project['id'])
+        self.assertFalse(custom_path.exists())
+
+    def test_writeback_still_rejects_changed_survivor_when_another_json_was_deleted(self):
+        project = self.annotated_project()
+        self.service.writeback(project['id'])
+        missing = self.source / 'timeline' / FILENAMES['scene']
+        changed = self.source / 'timeline' / FILENAMES['posture']
+        missing.unlink()
+        changed.write_bytes(changed.read_bytes() + b'\n')
+        with self.assertRaises(HTTPException) as conflict:
+            self.service.writeback(project['id'])
+        self.assertEqual(conflict.exception.status_code, 409)
+        self.assertFalse(missing.exists())
+
+    def test_deleted_nas_json_with_dirty_draft_can_be_archived_and_reset(self):
         project = self.annotated_project()
         self.service.writeback(project['id'])
         stored = self.service.load(project['id'])
@@ -667,9 +721,6 @@ class FourAxisPersistenceTests(unittest.TestCase):
             (self.source / 'timeline' / name).unlink()
         reopened = self.service.open_path(str(self.source))
         self.assertEqual(reopened['annotations']['scene'], dirty['annotations']['scene'])
-        with self.assertRaises(HTTPException) as conflict:
-            self.service.writeback(project['id'])
-        self.assertEqual(conflict.exception.status_code, 409)
         with self.assertRaises(HTTPException) as stale:
             self.service.reset_annotations_from_empty_source(project['id'], reopened['revision'] - 1)
         self.assertEqual(stale.exception.status_code, 409)
