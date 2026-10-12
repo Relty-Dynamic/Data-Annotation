@@ -16,6 +16,7 @@ import DeleteProjectDialog from './DeleteProjectDialog';
 import RenameProjectDialog from './RenameProjectDialog';
 import SubmitProjectDialog from './SubmitProjectDialog';
 import ResetAnnotationsDialog from './ResetAnnotationsDialog';
+import ClaimProjectDialog, {type ClaimInspection, type ClaimMode} from './ClaimProjectDialog';
 import CloudAccountDialog from './CloudAccountDialog';
 import SeekSettingsDialog from './SeekSettingsDialog';
 import { readSeekSettings, writeSeekSettings, wheelSeekDelta } from './seekSettings';
@@ -84,6 +85,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const enterAfterSkip=useRef<string|null>(null);
  const restoreOnReady=useRef<string|null>(null);
  const [importOpen,setImportOpen]=useState(false),[importMode,setImportMode]=useState<ImportMode>('new'),[importError,setImportError]=useState(''),[path,setPath]=useState(''),[busy,setBusy]=useState('');
+ const [pendingClaim,setPendingClaim]=useState<ClaimInspection|null>(null),[claimMode,setClaimMode]=useState<ClaimMode>('keep'),[claimStep,setClaimStep]=useState<1|2>(1);
  const [nasPickerKind,setNasPickerKind]=useState<'files'|'directory'|null>(null),[nasListing,setNasListing]=useState<NasListing|null>(null),[nasSelected,setNasSelected]=useState<string[]>([]),[nasLoading,setNasLoading]=useState(false);
  const busyRef=useRef(false),importDialogRef=useRef<HTMLElement>(null),importTriggerRef=useRef<HTMLElement|null>(null);
  const [newProjectName,setNewProjectName]=useState('');
@@ -317,7 +319,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  async function recoverAndReload(){await doBusy('正在生成恢复副本并重新载入…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);const content=JSON.stringify(local,null,2);const blob=new Blob([content],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=`${local.name.replace(/[<>:"/\\|?*]/g,'_')}-未保存草稿-恢复副本-${Date.now()}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);adopt(remote);setNotice('恢复副本已开始下载，已重新载入服务器草稿。原有未保存改动保留在恢复 JSON 中。');});}
  function adopt(p:Project,restore=false){setComparison(null);setComparisonOpen(false);setTimelineImportOpen(false);setClearedPreviewId('');p={...p,annotations:{...p.annotations,category:p.annotations.category??[]}};if(!projectTracks(p).includes(activeTrack))setActiveTrack(projectTracks(p)[0]??'scene');setAnchors([]);setSelectedRange(null);setCategoryMode('state');restoreOnReady.current=restore?p.id:null;setSessionEntered(false);setPrepareOpen(!restore);if(!restore)preparation.refresh();scrubbingRef.current=false;setScrubbing(false);writeProjectPreference(previewsClearedKey,null);writeProjectPreference(lastProjectKey,p.id);setMediaVersion(v=>v+1);wantsPlay.current=false;setPlaying(false);videoRef.current?.pause();serverRevision.current=p.revision;projectRef.current=p;setProject(p);setCurrent(0);pendingSeek.current=0;activateVideo(p.videos[0]?.id??'');setMediaError('');resetEditorFields();updateHistory([],[]);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setError('');if(activeTrack==='habit'&&projectTracks(p).includes('habit'))restoreComposer(p.id);queueCloudSync(p.id);if((p as Project & {warnings?:string[]}).warnings?.length)setNotice((p as Project & {warnings:string[]}).warnings.join('；'));}
  async function doBusy(message:string,fn:()=>Promise<void>,inImport=false){if(busyRef.current)return;busyRef.current=true;setBusy(message);setError('');if(inImport)setImportError('');try{await fn();}catch(e){if(inImport)setImportError((e as Error).message);else setError((e as Error).message);}finally{busyRef.current=false;setBusy('');}}
- async function finishImport(p:Project){const requestedName=newProjectName.trim();adopt(p);setImportOpen(false);if(requestedName&&p.name!==requestedName)setNotice(`这些素材已有项目，已打开「${p.name}」。可点击名称旁的铅笔重命名。`);await refresh();}
+ async function finishImport(p:Project){const requestedName=newProjectName.trim();adopt(p);setPendingClaim(null);setImportOpen(false);if(requestedName&&p.name!==requestedName)setNotice(`这些素材已有项目，已打开「${p.name}」。可点击名称旁的铅笔重命名。`);await refresh();}
  async function openPreparation(){
   const p=projectRef.current;if(!p||deleting)return;pausePlayback();
   restoreOnReady.current=null;
@@ -339,7 +341,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   await doBusy('正在检查导入功能…',async()=>{
    await requireSourceCapabilities(mode==='supplement');
    if(mockMode){const health=await api<{storage_backend?:'s3-mock'|'nas'}>('/api/health',{cache:'no-store'});setActiveStorage(health.storage_backend??'s3-mock');}
-   setImportMode(mode);setImportError('');setPath('');setNewProjectName('');setNasPickerKind(null);setNasListing(null);setNasSelected([]);setMockListing(null);setImportOpen(true);
+   setImportMode(mode);setImportError('');setPath('');setNewProjectName('');setPendingClaim(null);setNasPickerKind(null);setNasListing(null);setNasSelected([]);setMockListing(null);setImportOpen(true);
   });
  }
  async function changeSkippedVideos(ids?:string[]){
@@ -416,7 +418,23 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(importMode==='relink'){await relinkSources(sourcePath);return;}
   await flush();const context=importMode==='supplement'?captureSupplement():null;
   if(context)await finishSupplement(await api<SupplementResponse>(`/api/projects/${context.project.id}/videos/open`,json('POST',{path:sourcePath,expected_revision:serverRevision.current})),context);
-  else await finishImport(await api<Project>(sharedServer||mockMode?'/api/storage/projects/open':'/api/projects/open',json('POST',{path:sourcePath,name:newProjectName.trim()})));
+  else if(importMode==='new'&&sharedServer&&activeStorage==='nas'){
+   const inspection=await api<ClaimInspection>('/api/source-claims/inspect',json('POST',{path:sourcePath}));
+   if(inspection.requires_choice){setPendingClaim(inspection);setClaimMode(inspection.has_json?'continue':'keep');setClaimStep(1);return;}
+   await finishImport(await api<Project>('/api/storage/projects/open',json('POST',{path:sourcePath,name:newProjectName.trim()})));
+  }else await finishImport(await api<Project>(sharedServer||mockMode?'/api/storage/projects/open':'/api/projects/open',json('POST',{path:sourcePath,name:newProjectName.trim()})));
+ }
+ async function confirmClaim(){
+  const claim=pendingClaim;if(!claim)return;
+  if(claim.requires_takeover&&claimStep===1){setClaimStep(2);return;}
+  await doBusy('正在领取采集目录…',async()=>{
+   await finishImport(await api<Project>('/api/storage/projects/open',json('POST',{
+    path:claim.path,name:newProjectName.trim(),claim_token:claim.claim_token,claim_mode:claimMode,
+    takeover_confirmations:claim.requires_takeover?2:0,
+   })));
+   setPendingClaim(null);
+   setNotice(claim.requires_takeover?'已接管原项目，原认领人不再拥有此项目权限。':claimMode==='restart'?'旧 JSON 已备份到 NAS，当前项目从空白开始。':'已载入 NAS 中的旧 JSON。');
+  },true);
  }
  async function chooseLocalSources(kind:'files'|'directory'){
   pausePlayback();
@@ -476,7 +494,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   await doBusy(importMode==='relink'?'正在验证原视频并迁移缓存…':'正在读取原视频素材…',()=>importSourcePath(path.trim()),true);
  }
  useEffect(()=>{
-  if(!importOpen)return;
+  if(!importOpen||pendingClaim)return;
   const dialog=importDialogRef.current;dialog?.focus();
   const key=(event:KeyboardEvent)=>{
    if(event.key==='Escape'){event.preventDefault();if(!busyRef.current&&!mockUploading)setImportOpen(false);return;}
@@ -488,8 +506,9 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    else if(!event.shiftKey&&(document.activeElement===last||document.activeElement===dialog)){event.preventDefault();first.focus();}
   };
   window.addEventListener('keydown',key,true);
-  return()=>{window.removeEventListener('keydown',key,true);importTriggerRef.current?.focus();};
- },[importOpen,mockUploading]);
+  return()=>window.removeEventListener('keydown',key,true);
+ },[importOpen,mockUploading,pendingClaim]);
+ useEffect(()=>{if(!importOpen)importTriggerRef.current?.focus();},[importOpen]);
  function pauseClearedPreviews(id:string){
   forgetProjectPreviews(id);
   if(projectRef.current?.id!==id)return;
@@ -793,7 +812,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    </div><div className="annotation-footer"><button className="secondary" disabled={!history.length||!!busy} onClick={undo} title="Ctrl + Z"><RotateCcw size={14}/>撤销</button><button className="secondary" disabled={!redoHistory.length||!!busy} onClick={redo} title="Ctrl + Shift + Z"><RotateCw size={14}/>恢复</button></div>
   </section>}{sessionEntered&&project&&projectTracks(project).length===0&&<section className="annotation-panel"><div className="panel-heading"><h2>标注面板</h2></div><p className="instruction">此项目还没有时间轴。添加固定轴或自定义轴后开始标注。</p><button className="primary wide" disabled={!!busy||pendingSaves.current>0||saveFailed} onClick={()=>setCustomTrackOpen(true)}><Plus size={15}/>添加时间轴</button></section>}</aside></main>
   {saveFailed&&<div className="save-recovery" role="alert" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen}><span>{saveState}</span><button className="text-button" disabled={!!busy} onClick={retrySave}>重试保存</button><button className="text-button" disabled={!!busy} title="先下载包含本页未保存改动的恢复 JSON，再读取服务器草稿" onClick={recoverAndReload}>保存恢复副本并重新载入</button></div>}
-  {importOpen&&<div className="modal-backdrop" onClick={()=>!busy&&!mockUploading&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className={'import-modal'+(nasPickerKind||mockListing?' nas-picker-open':'')} onClick={e=>e.stopPropagation()}>
+  {importOpen&&<div className="modal-backdrop" inert={!!pendingClaim} onClick={()=>!busy&&!mockUploading&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className={'import-modal'+(nasPickerKind||mockListing?' nas-picker-open':'')} onClick={e=>e.stopPropagation()}>
    <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy||mockUploading} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
    <h2 id="import-title">{mockMode?'新建采集项目':importMode==='relink'?'关联原视频目录':importMode==='supplement'?'补导入视频':'新建采集项目'}</h2>
    {mockMode&&activeStorage==='s3-mock' ? <>
@@ -826,6 +845,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    <p className="privacy-note"><span className="status-dot"/>直接读取所选路径，不上传或复制原视频</p>
    </>}
   </section></div>}
+  {importOpen&&pendingClaim&&<ClaimProjectDialog claim={pendingClaim} mode={claimMode} step={claimStep} busy={!!busy} error={importError} onMode={setClaimMode} onNext={()=>void confirmClaim()} onBack={()=>setClaimStep(1)} onCancel={()=>{setPendingClaim(null);setImportError('');}}/>}
   {prepareOpen&&project&&<PreparePanel projectName={project.name} status={preparation.status} error={preparation.error} busy={preparation.busy} skippedVideos={project.skipped_videos} onSkipFailed={ids=>changeSkippedVideos(ids)} onRestoreSkipped={()=>changeSkippedVideos()} onRetry={()=>void openPreparation()} onEnter={()=>{if(preparation.status?.state==='ready'&&preparation.manifest&&!preparation.error){setSessionEntered(true);setPrepareOpen(false);}}} onClose={()=>{enterAfterSkip.current=null;setPrepareOpen(false);}}/>}
   {busy&&<div className="busy-overlay" role="status"><LoaderCircle className="spin" size={28}/><strong>{busy}</strong><span>{mockMode?'测试视频处理可能需要一些时间':'大文件或内网素材可能需要一些时间'}</span></div>}
  </div>;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.auth import AuthStore
-from backend.service import ProjectService
+from backend.service import AXES, FILENAMES, ProjectService
 from backend.source_browser import PAGE_SIZE, browse_sources
 from backend.testing_annotations import complete_annotations
 
@@ -105,7 +106,7 @@ class SourceBrowserTests(unittest.TestCase):
                 other_login = client.post("/api/auth/login", json={"username": "other", "password": "correct horse battery staple"})
                 other_csrf = {"X-CSRF-Token": other_login.json()["csrf"]}
                 self.assertEqual(client.get(f'/api/projects/{project["id"]}').status_code, 403)
-                self.assertEqual(client.post("/api/projects/open", json={"path": str(source)}, headers=other_csrf).status_code, 403)
+                self.assertEqual(client.post("/api/projects/open", json={"path": str(source)}, headers=other_csrf).status_code, 409)
                 selected = client.post("/api/projects/files", json={"paths": [str(video)]}, headers=other_csrf)
                 self.assertEqual(selected.status_code, 422, selected.text)
 
@@ -131,7 +132,151 @@ class SourceBrowserTests(unittest.TestCase):
                 self.assertEqual(claimed.json()["id"], project_id)
                 self.assertEqual(auth.assignment(project_id), first["id"])
                 other = client.post("/api/auth/login", json={"username": "second", "password": "correct horse battery staple"})
-                self.assertEqual(client.post("/api/projects/open", json={"path": str(source)}, headers={"X-CSRF-Token": other.json()["csrf"]}).status_code, 403)
+                self.assertEqual(client.post("/api/projects/open", json={"path": str(source)}, headers={"X-CSRF-Token": other.json()["csrf"]}).status_code, 409)
+
+    def test_takeover_requires_two_confirmations_and_revokes_old_owner(self):
+        source = self.nas / "采集"
+        source.mkdir()
+        (source / "A09999_20260917120000_0000.avi").write_bytes(b"fixture video")
+        auth = AuthStore(self.root)
+        auth.create_user("admin", "管理员", "correct horse battery staple", "admin")
+        first = auth.create_user("first", "第一位", "correct horse battery staple", "annotator")
+        second = auth.create_user("second", "第二位", "correct horse battery staple", "annotator")
+        with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40"}), patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
+            app = create_app(self.root, source_root=self.nas)
+            with TestClient(app, base_url="https://10.20.30.40") as client:
+                first_login = client.post("/api/auth/login", json={"username": "first", "password": "correct horse battery staple"})
+                first_csrf = {"X-CSRF-Token": first_login.json()["csrf"]}
+                project = client.post("/api/projects/open", json={"path": str(source)}, headers=first_csrf).json()
+                saved = client.put(f'/api/projects/{project["id"]}/draft', json={"annotations": complete_annotations(project), "expected_revision": project["revision"]}, headers=first_csrf)
+                self.assertEqual(saved.status_code, 200, saved.text)
+                second_login = client.post("/api/auth/login", json={"username": "second", "password": "correct horse battery staple"})
+                second_csrf = {"X-CSRF-Token": second_login.json()["csrf"]}
+                inspection = client.post("/api/source-claims/inspect", json={"path": str(source)}, headers=second_csrf)
+                self.assertEqual(inspection.status_code, 200, inspection.text)
+                claim = inspection.json()
+                self.assertTrue(claim["requires_takeover"])
+                self.assertFalse(claim["has_json"])
+                self.assertEqual(claim["owner_name"], "第一位")
+                body = {"path": str(source), "claim_mode": "keep", "claim_token": claim["claim_token"]}
+                self.assertEqual(client.post("/api/projects/open", json={**body, "takeover_confirmations": 1}, headers=second_csrf).status_code, 409)
+                taken = client.post("/api/projects/open", json={**body, "takeover_confirmations": 2}, headers=second_csrf)
+                self.assertEqual(taken.status_code, 200, taken.text)
+                self.assertEqual(taken.json()["id"], project["id"])
+                self.assertEqual(taken.json()["annotations"], saved.json()["annotations"])
+                self.assertEqual(auth.assignment(project["id"]), second["id"])
+                self.assertNotEqual(first["id"], second["id"])
+                client.post("/api/auth/login", json={"username": "first", "password": "correct horse battery staple"})
+                self.assertEqual(client.get(f'/api/projects/{project["id"]}').status_code, 403)
+
+    def test_existing_nas_json_choice_can_backup_and_start_blank(self):
+        source = self.nas / "采集"
+        source.mkdir()
+        (source / "A09999_20260917120000_0000.avi").write_bytes(b"fixture video")
+        auth = AuthStore(self.root)
+        auth.create_user("admin", "管理员", "correct horse battery staple", "admin")
+        worker = auth.create_user("worker", "标注者", "correct horse battery staple", "annotator")
+        with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40"}), patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
+            app = create_app(self.root, source_root=self.nas)
+            with TestClient(app, base_url="https://10.20.30.40") as client:
+                admin = client.post("/api/auth/login", json={"username": "admin", "password": "correct horse battery staple"})
+                admin_csrf = {"X-CSRF-Token": admin.json()["csrf"]}
+                project = client.post("/api/projects/open", json={"path": str(source)}, headers=admin_csrf).json()
+                annotations = complete_annotations(project)
+                changed = client.put(f'/api/projects/{project["id"]}/draft', json={"annotations": annotations, "expected_revision": project["revision"]}, headers=admin_csrf)
+                self.assertEqual(changed.status_code, 200, changed.text)
+                self.assertEqual(client.post(f'/api/projects/{project["id"]}/writeback', headers=admin_csrf).status_code, 200)
+                old = {axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in AXES}
+                worker_login = client.post("/api/auth/login", json={"username": "worker", "password": "correct horse battery staple"})
+                worker_csrf = {"X-CSRF-Token": worker_login.json()["csrf"]}
+                claim = client.post("/api/source-claims/inspect", json={"path": str(source)}, headers=worker_csrf).json()
+                self.assertTrue(claim["has_json"])
+                self.assertFalse(claim["requires_takeover"])
+                body = {"path": str(source), "claim_mode": "restart", "claim_token": claim["claim_token"]}
+                self.assertEqual(client.post("/api/projects/open", json={"path": str(source)}, headers=worker_csrf).status_code, 409)
+                (source / 'timeline' / FILENAMES['scene']).write_bytes(old['scene'] + b'\n')
+                self.assertEqual(client.post("/api/projects/open", json=body, headers=worker_csrf).status_code, 409)
+                (source / 'timeline' / FILENAMES['scene']).write_bytes(old['scene'])
+                claim = client.post("/api/source-claims/inspect", json={"path": str(source)}, headers=worker_csrf).json()
+                body['claim_token'] = claim['claim_token']
+                opened = client.post("/api/projects/open", json=body, headers=worker_csrf)
+                self.assertEqual(opened.status_code, 200, opened.text)
+                fresh = opened.json()
+                self.assertEqual(fresh['id'], project['id'])
+                self.assertTrue(all(not rows for rows in fresh['annotations'].values()))
+                self.assertEqual(auth.assignment(project['id']), worker['id'])
+                archive = source / '.annotation-backups' / fresh['source_backup_id']
+                self.assertEqual({axis: (archive / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
+                self.assertEqual({axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
+                self.assertEqual(client.post(f'/api/projects/{project["id"]}/writeback', headers=worker_csrf).status_code, 200)
+                self.assertEqual(json.loads((source / 'timeline' / FILENAMES['scene']).read_bytes())['segments'], [])
+
+    def test_first_platform_claim_backs_up_existing_nas_json_before_blank_start(self):
+        source = self.nas / "采集"
+        source.mkdir()
+        (source / "A09999_20260917120000_0000.avi").write_bytes(b"fixture video")
+        with patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
+            writer = ProjectService(self.root / "writer")
+            original = writer.open_path(str(source))
+            writer.update_draft(original["id"], complete_annotations(original), original["revision"])
+            writer.writeback(original["id"])
+            old = {axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES}
+            app_root = self.root / "new-platform"
+            auth = AuthStore(app_root)
+            auth.create_user("admin", "管理员", "correct horse battery staple", "admin")
+            auth.create_user("worker", "标注者", "correct horse battery staple", "annotator")
+            with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40"}):
+                app = create_app(app_root, source_root=self.nas)
+                with TestClient(app, base_url="https://10.20.30.40") as client:
+                    login = client.post("/api/auth/login", json={"username": "worker", "password": "correct horse battery staple"})
+                    csrf = {"X-CSRF-Token": login.json()["csrf"]}
+                    claim = client.post("/api/source-claims/inspect", json={"path": str(source)}, headers=csrf).json()
+                    self.assertTrue(claim["has_json"])
+                    self.assertIsNone(claim["project_name"])
+                    opened = client.post("/api/projects/open", json={"path": str(source), "claim_mode": "restart",
+                        "claim_token": claim["claim_token"]}, headers=csrf)
+                    self.assertEqual(opened.status_code, 200, opened.text)
+                    fresh = opened.json()
+                    self.assertTrue(all(not rows for rows in fresh["annotations"].values()))
+                    backup = source / ".annotation-backups" / fresh["source_backup_id"]
+                    self.assertEqual({axis: (backup / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
+                    self.assertEqual({axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
+
+    def test_takeover_can_continue_nas_json_while_archiving_dirty_platform_draft(self):
+        source = self.nas / "采集"
+        source.mkdir()
+        (source / "A09999_20260917120000_0000.avi").write_bytes(b"fixture video")
+        auth = AuthStore(self.root)
+        auth.create_user("admin", "管理员", "correct horse battery staple", "admin")
+        auth.create_user("first", "第一位", "correct horse battery staple", "annotator")
+        second = auth.create_user("second", "第二位", "correct horse battery staple", "annotator")
+        with patch.dict("os.environ", {"DATAMARK_ORIGIN": "https://10.20.30.40"}), patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
+            app = create_app(self.root, source_root=self.nas)
+            with TestClient(app, base_url="https://10.20.30.40") as client:
+                first = client.post("/api/auth/login", json={"username": "first", "password": "correct horse battery staple"})
+                first_csrf = {"X-CSRF-Token": first.json()["csrf"]}
+                project = client.post("/api/projects/open", json={"path": str(source)}, headers=first_csrf).json()
+                original = complete_annotations(project)
+                saved = client.put(f'/api/projects/{project["id"]}/draft', json={"annotations": original, "expected_revision": project["revision"]}, headers=first_csrf).json()
+                self.assertEqual(client.post(f'/api/projects/{project["id"]}/writeback', headers=first_csrf).status_code, 200)
+                stored_json = (source / 'timeline' / FILENAMES['scene']).read_bytes()
+                dirty = {**saved['annotations'], 'scene': [{**saved['annotations']['scene'][0], 'label': '室外'}]}
+                current = app.state.service.load(project['id'])
+                dirty_response = client.put(f'/api/projects/{project["id"]}/draft', json={"annotations": dirty, "expected_revision": current['revision']}, headers=first_csrf)
+                self.assertEqual(dirty_response.status_code, 200, dirty_response.text)
+                second_login = client.post("/api/auth/login", json={"username": "second", "password": "correct horse battery staple"})
+                second_csrf = {"X-CSRF-Token": second_login.json()["csrf"]}
+                claim = client.post("/api/source-claims/inspect", json={"path": str(source)}, headers=second_csrf).json()
+                self.assertTrue(claim['requires_takeover'] and claim['has_json'] and claim['has_platform_draft'])
+                response = client.post("/api/projects/open", json={"path": str(source), "claim_mode": "continue",
+                    "claim_token": claim['claim_token'], "takeover_confirmations": 2}, headers=second_csrf)
+                self.assertEqual(response.status_code, 200, response.text)
+                continued = response.json()
+                self.assertEqual(continued['annotations']['scene'], saved['annotations']['scene'])
+                self.assertEqual((source / 'timeline' / FILENAMES['scene']).read_bytes(), stored_json)
+                recovery = app.state.service.storage.directory(project['id']) / 'recoveries' / f"{continued['recovery_id']}.json"
+                self.assertEqual(json.loads(recovery.read_text())['annotations']['scene'], dirty_response.json()['annotations']['scene'])
+                self.assertEqual(auth.assignment(project['id']), second['id'])
 
     def test_claimed_video_cannot_be_imported_again_through_directory(self):
         source = self.nas / "采集"

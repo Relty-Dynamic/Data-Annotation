@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import re
 import uuid
@@ -34,6 +35,9 @@ from .mock_s3 import MockProjectService, MockS3Catalog, MockS3Store, MockUploadM
 class OpenRequest(BaseModel):
     path: str = Field(min_length=1, max_length=32767)
     name: str | None = Field(default=None, strict=True)
+    claim_mode: Literal["keep", "continue", "restart"] | None = None
+    claim_token: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    takeover_confirmations: int = Field(default=0, ge=0, le=2, strict=True)
 
 
 class SupplementRequest(OpenRequest):
@@ -470,8 +474,9 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.put("/api/projects/{project_id}/assignment")
     def assign_project(project_id: str, body: AssignmentRequest):
-        service.load(project_id)
-        auth.assign(project_id, body.user_id)
+        with service.lock:
+            service.load(project_id)
+            auth.assign(project_id, body.user_id)
         return {"user_id": body.user_id}
 
     @app.post("/api/projects/{project_id}/editing")
@@ -541,6 +546,32 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         return Response(local_reports.documents(request.state.user, project_id), media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{project_id}-timelines.zip"'})
 
+    def source_claim_snapshot(path: str, user: dict | None) -> tuple[dict, dict]:
+        state = service.inspect_source_claim(path)
+        previous = state["previous"]
+        owner_id = auth.assignment(previous["id"]) if previous else None
+        owner = next((item for item in auth.list_users() if item["id"] == owner_id), None) if owner_id else None
+        takeover = bool(user and user["role"] == "annotator" and owner_id and owner_id != user["id"])
+        payload = {"source": str(state["source"]), "project_id": previous["id"] if previous else None,
+                   "revision": previous["revision"] if previous else None, "owner_id": owner_id,
+                   "hashes": state["hashes"], "user_id": user["id"] if user else None}
+        token = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        public = {"path": str(state["source"]), "project_name": previous["name"] if previous else None,
+                  "owner_name": owner["display_name"] if owner else None, "has_json": state["has_json"],
+                  "requires_takeover": takeover, "requires_choice": state["has_json"] or takeover,
+                  "has_platform_draft": bool(previous and previous.get("draft_dirty")), "claim_token": token}
+        return public, state
+
+    @app.post("/api/source-claims/inspect")
+    def inspect_source_claim(body: OpenRequest, request: Request):
+        require_hybrid_local(request)
+        if active_storage != "nas" or (not configured_origin and not hybrid_nas_root):
+            raise HTTPException(404, "仅 NAS 内网服务提供目录领取检查。")
+        require_nas_source(body.path)
+        with service.lock:
+            public, _ = source_claim_snapshot(body.path, request.state.user if auth_required else None)
+            return public
+
     @app.post("/api/projects/open")
     def open_project(body: OpenRequest, request: Request):
         require_hybrid_local(request)
@@ -550,16 +581,35 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         path = Path(body.path.strip().strip('"')).expanduser()
         user = request.state.user if auth_required else None
         with service.lock:
+            takeover = False
             if path.is_file():
                 if configured_origin or hybrid_nas_root:
                     raise HTTPException(422, "NAS 标注请领取完整采集目录，保证统一写回 timeline 文件夹。")
                 project = service.open_files([str(path)], name=body.name, source_writeback=not configured_origin)
             else:
+                claim_state = None
+                if configured_origin or hybrid_nas_root:
+                    snapshot, claim_state = source_claim_snapshot(body.path, user)
+                    if snapshot["requires_choice"]:
+                        if body.claim_token != snapshot["claim_token"]:
+                            raise HTTPException(409, "目录的领取人或 NAS JSON 状态已变化，请重新检查后确认。")
+                        if snapshot["has_json"] and body.claim_mode not in ("continue", "restart"):
+                            raise HTTPException(422, "请选择沿用 NAS JSON，或备份后从空白开始。")
+                        if not snapshot["has_json"] and body.claim_mode != "keep":
+                            raise HTTPException(422, "此目录没有 NAS JSON，请选择保留平台草稿。")
+                        takeover = snapshot["requires_takeover"]
+                        if takeover and body.takeover_confirmations != 2:
+                            raise HTTPException(409, "接管已有认领人须完成两次确认。")
+                    elif body.claim_token or body.claim_mode or body.takeover_confirmations:
+                        raise HTTPException(409, "目录状态已变化，请重新检查后领取。")
                 allowed = auth.allowed_project_ids(user) if user and user["role"] == "annotator" else None
                 if allowed is not None:
                     allowed.update(item["id"] for item in service.projects() if auth.assignment(item["id"]) is None)
-                project = service.open_path(body.path, name=body.name, allowed_project_ids=allowed)
-            if user and user["role"] == "annotator" and not auth.claim(project["id"], user["id"]):
+                project = service.open_path(body.path, name=body.name, allowed_project_ids=None if takeover else allowed,
+                                            claim_mode=body.claim_mode, claim_hashes=claim_state["hashes"] if claim_state else None)
+                if takeover and user:
+                    auth.assign(project["id"], user["id"])
+            if user and user["role"] == "annotator" and not takeover and not auth.claim(project["id"], user["id"]):
                 raise HTTPException(403, "该素材已由其他标注员领取。")
             return project
 

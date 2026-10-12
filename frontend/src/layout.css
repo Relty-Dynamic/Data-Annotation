@@ -384,6 +384,16 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 .submit-project-dialog h2 { margin: 0 0 12px; font-size: 19px; }
 .submit-project-dialog p { color: #b8cbd5; line-height: 1.7; }
 .submit-project-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.claim-backdrop { z-index: 11; }
+.claim-project-dialog { width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; }
+.claim-project-path { overflow-wrap: anywhere; font-size: 11px; }
+.claim-options { margin-top: 15px; padding: 10px; border: 1px solid #485a63; border-radius: 8px; }
+.claim-options legend { padding: 0 5px; color: #d9e9ed; }
+.claim-options label { display: flex; align-items: flex-start; gap: 9px; padding: 9px 5px; cursor: pointer; }
+.claim-options label + label { border-top: 1px solid #3a4850; }
+.claim-options input { flex: none; width: auto; margin: 2px 0 0; }
+.claim-options span { display: grid; gap: 4px; }
+.claim-options small { color: #b8cbd5; line-height: 1.5; }
 .editing-presence-warning { padding: 8px 16px; color: #ffe3a1; background: #4b3719; border-bottom: 1px solid #886729; font-size: 12px; }
 
 /* Keep the empty workspace actionable and show all four placeholder tracks. */

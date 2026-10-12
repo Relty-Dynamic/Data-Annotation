@@ -1153,7 +1153,7 @@ class ProjectService:
             raise HTTPException(422, "没有找到支持的视频，请选择视频文件或所在目录。")
         return self.supplement(ident, paths, expected_revision)
 
-    def reopen_supplemented(self, project: dict, paths: list[Path]) -> dict:
+    def reopen_supplemented(self, project: dict, paths: list[Path], *, import_external: bool = True) -> dict:
         """A source directory is only one part of a supplemented composition."""
         by_name = {video["name"].casefold(): video for video in project["videos"]}
         for path in paths:
@@ -1168,7 +1168,7 @@ class ProjectService:
                 raise HTTPException(409, "该目录中的同名视频内容已改变，本机补导入项目和标注仍保留。")
         hashes = self.current_external_hashes(Path(project["source_dir"]))
         warnings = alignment_warnings(project["videos"]) + project.get("_supplement_warnings", [])
-        if hashes != self.expected_external_hashes(project):
+        if import_external and hashes != self.expected_external_hashes(project):
             if project.get("draft_dirty"):
                 warnings.append("原目录 JSON 已被修改。本机草稿已保留；写回将阻止覆盖外部更改。")
             else:
@@ -1183,6 +1183,75 @@ class ProjectService:
         project["warnings"] = warnings
         self.save(project)
         return self.public(project)
+
+    def inspect_source_claim(self, raw_path: str) -> dict:
+        path = Path(raw_path.strip().strip('"')).expanduser()
+        try:
+            path = path.resolve(strict=True)
+            if not path.is_dir():
+                raise HTTPException(422, "请选择完整采集目录。")
+            source = path.parent if path.name.casefold() == "fpv" else path
+            if self.is_managed_copy(source) or CACHE_FOLDER in source.parts:
+                raise HTTPException(422, "请选择原视频目录。")
+        except OSError:
+            raise HTTPException(422, "无法访问采集目录。")
+        with self.connection() as con:
+            row = con.execute("SELECT document FROM projects WHERE source_key=? ORDER BY updated_at DESC LIMIT 1",
+                              (os.path.normcase(str(source)),)).fetchone()
+        previous = json.loads(row[0]) if row else None
+        hashes = self.current_external_hashes(source)
+        return {"source": source, "previous": previous, "hashes": hashes,
+                "has_json": any(value is not None for value in hashes.values())}
+
+    def archive_project_document(self, project: dict) -> str:
+        recovery_dir = self.storage.directory(project["id"]) / "recoveries"
+        try:
+            recovery_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if recovery_dir.is_symlink() or not recovery_dir.is_dir():
+                raise HTTPException(409, "恢复副本目录不安全，未替换旧草稿。")
+            recovery_id = uuid.uuid4().hex
+            recovery_path = recovery_dir / f"{recovery_id}.json"
+            payload = document_bytes(project)
+            descriptor = os.open(recovery_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if recovery_path.read_bytes() != payload:
+                raise OSError("recovery readback mismatch")
+            return recovery_id
+        except OSError:
+            raise HTTPException(409, "无法保存并核验旧草稿的恢复副本，未替换旧标注。")
+
+    def archive_source_json(self, source: Path, hashes: dict) -> str | None:
+        present = {axis: value for axis, value in hashes.items() if value is not None}
+        if not present:
+            return None
+        backup_root = source / ".annotation-backups"
+        if backup_root.is_symlink() or (backup_root.exists() and not backup_root.is_dir()):
+            raise HTTPException(409, "NAS 备份目录不安全，未清空旧标注。")
+        archive_id = "claim-" + uuid.uuid4().hex
+        backup_dir = backup_root / archive_id
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+            directory = self.external_directory(source)
+            for axis, expected_hash in present.items():
+                original = directory / filename_for_axis(axis)
+                if original.is_symlink() or not original.is_file():
+                    raise HTTPException(409, "NAS 时间轴文件不是普通文件，未清空旧标注。")
+                payload = original.read_bytes()
+                if digest(payload) != expected_hash:
+                    raise HTTPException(409, "NAS 时间轴文件在领取期间发生变化，请重新选择目录。")
+                target = backup_dir / original.name
+                with target.open("xb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if digest(target.read_bytes()) != expected_hash:
+                    raise OSError("source backup readback mismatch")
+            return archive_id
+        except OSError:
+            raise HTTPException(409, "NAS 旧 JSON 备份或读回失败，未清空旧标注。")
 
     def read_external(self, project: dict, *, include_tracks: bool = False) -> tuple:
         source = project.get("source_dir")
@@ -1291,7 +1360,10 @@ class ProjectService:
         except (KeyError, ValueError, TypeError):
             raise HTTPException(422, "已有标注文件格式不受支持，或时间基准不正确。")
 
-    def open_path(self, raw_path: str, name: str | None = None, *, allowed_project_ids: set[str] | None = None) -> dict:
+    def open_path(self, raw_path: str, name: str | None = None, *, allowed_project_ids: set[str] | None = None,
+                  claim_mode: str | None = None, claim_hashes: dict | None = None) -> dict:
+        if claim_mode not in (None, "keep", "continue", "restart"):
+            raise HTTPException(422, "领取方式无效。")
         name = validate_project_name(name, allow_empty=True)
         if not raw_path or not raw_path.strip():
             raise HTTPException(422, "请输入服务器可访问的原视频目录或共享目录路径。")
@@ -1323,14 +1395,42 @@ class ProjectService:
             if previous and previous.get("_deleting"):
                 raise HTTPException(409, "项目正在删除，请先完成清理。")
             if previous and previous.get("_supplemented"):
-                return self.reopen_supplemented(previous, paths)
-            fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None)
-            if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
-                raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
-            imported, hashes, imported_tracks, imported_fixed, imported_labels = self.read_external(previous or fresh, include_tracks=True)
+                if claim_mode in (None, "keep"):
+                    return self.reopen_supplemented(previous, paths)
+                self.reopen_supplemented(previous, paths, import_external=False)
+                fresh = previous
+            else:
+                fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None)
+                if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
+                    raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
+            if claim_mode == "restart":
+                hashes = self.current_external_hashes(source_dir)
+                if claim_hashes is not None and hashes != claim_hashes:
+                    raise HTTPException(409, "NAS 时间轴文件在领取期间发生变化，请重新选择目录。")
+                backup_id = self.archive_source_json(source_dir, hashes)
+                imported, imported_tracks, imported_fixed, imported_labels = None, [], list(AXES), copy.deepcopy(DEFAULT_TRACK_LABELS)
+            else:
+                imported, hashes, imported_tracks, imported_fixed, imported_labels = self.read_external(previous or fresh, include_tracks=True)
+                if claim_hashes is not None and hashes != claim_hashes:
+                    raise HTTPException(409, "NAS 时间轴文件在领取期间发生变化，请重新选择目录。")
             if previous:
                 preserved_alignment_warnings = alignment_warnings(previous["videos"])
                 previous["warnings"] = preserved_alignment_warnings
+                if claim_mode in ("continue", "restart"):
+                    recovery_id = self.archive_project_document(previous)
+                    previous["annotations"] = imported or empty_annotations()
+                    previous["custom_tracks"] = imported_tracks
+                    previous["fixed_tracks"] = imported_fixed
+                    previous["track_labels"] = imported_labels
+                    previous['_skipped_video_names'] = fresh.get('_skipped_video_names', {})
+                    previous["_external_hashes"] = hashes
+                    previous["revision"] += 1
+                    previous["updated_at"] = now()
+                    previous["draft_dirty"] = claim_mode == "restart"
+                    previous["last_writeback"] = None
+                    self.save(previous)
+                    return {**self.public(previous), "recovery_id": recovery_id,
+                            **({"source_backup_id": backup_id} if claim_mode == "restart" and backup_id else {})}
                 if hashes != self.expected_external_hashes(previous):
                     if previous.get("draft_dirty"):
                         previous["warnings"] = preserved_alignment_warnings + ["原目录 JSON 已被修改。本机草稿已保留；写回将阻止覆盖外部更改。"]
@@ -1354,9 +1454,14 @@ class ProjectService:
             fresh["fixed_tracks"] = imported_fixed
             fresh["track_labels"] = imported_labels
             fresh["_external_hashes"] = hashes
+            if claim_mode == "restart":
+                fresh["draft_dirty"] = True
             self.attach_source_caches(fresh)
             self.save(fresh)
-            return self.public(fresh)
+            result = self.public(fresh)
+            if claim_mode == "restart" and backup_id:
+                result["source_backup_id"] = backup_id
+            return result
 
     @project_locked
     def rename_project(self, ident: str, name: str, expected_revision: int) -> dict:
@@ -1432,23 +1537,7 @@ class ProjectService:
         hashes = self.current_external_hashes(source)
         if any(value is not None for value in hashes.values()):
             raise HTTPException(409, "原采集目录仍有时间轴 JSON，未清空草稿。请先核对 NAS 文件。")
-        recovery_dir = self.storage.directory(ident) / "recoveries"
-        try:
-            recovery_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if recovery_dir.is_symlink() or not recovery_dir.is_dir():
-                raise HTTPException(409, "恢复副本目录不安全，未清空草稿。")
-            recovery_id = uuid.uuid4().hex
-            recovery_path = recovery_dir / f"{recovery_id}.json"
-            payload = document_bytes(project)
-            descriptor = os.open(recovery_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if recovery_path.read_bytes() != payload:
-                raise OSError("recovery readback mismatch")
-        except OSError:
-            raise HTTPException(409, "无法保存并核验旧草稿的恢复副本，未清空标注。")
+        recovery_id = self.archive_project_document(project)
         project["annotations"] = {**empty_annotations(), **{track["id"]: [] for track in project.get("custom_tracks", [])}}
         project["_external_hashes"] = hashes
         project["draft_dirty"] = True
