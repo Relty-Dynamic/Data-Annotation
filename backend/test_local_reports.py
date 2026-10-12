@@ -186,6 +186,11 @@ class LocalReportTests(unittest.TestCase):
         for axis, value in documents.items():
             self.assertEqual((folder / f"{axis}.timeline.json").read_text(), value)
 
+    def test_local_mirror_has_no_retired_public_nas_default(self):
+        with patch.dict(os.environ, {"DATAMARK_CLOUD_API_ORIGIN": ""}):
+            mirror = CloudMirror()
+        self.assertEqual(mirror.status("local-user")["configured"], False)
+
     def test_local_mirror_sends_metadata_then_verified_written_files_without_video_paths(self):
         project = self.service.open_path(str(self.source))
         captured = []

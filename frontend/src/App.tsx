@@ -414,7 +414,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(importMode==='relink'){await relinkSources(sourcePath);return;}
   await flush();const context=importMode==='supplement'?captureSupplement():null;
   if(context)await finishSupplement(await api<SupplementResponse>(`/api/projects/${context.project.id}/videos/open`,json('POST',{path:sourcePath,expected_revision:serverRevision.current})),context);
-  else await finishImport(await api<Project>('/api/projects/open',json('POST',{path:sourcePath,name:newProjectName.trim()})));
+  else await finishImport(await api<Project>(sharedServer||mockMode?'/api/storage/projects/open':'/api/projects/open',json('POST',{path:sourcePath,name:newProjectName.trim()})));
  }
  async function chooseLocalSources(kind:'files'|'directory'){
   pausePlayback();
@@ -437,7 +437,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  }
  async function browseMock(prefix=''){
   setMockLoading(true);setImportError('');
-  try{setMockListing(await api<NasListing>(`/api/mock-s3/sources?${new URLSearchParams({prefix})}`));}
+  try{setMockListing(await api<NasListing>(`/api/storage/sources?${new URLSearchParams({path:prefix})}`));}
   catch(error){setImportError(error instanceof Error?error.message:String(error));}
   finally{setMockLoading(false);}
  }
@@ -445,7 +445,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(!mockListing?.can_open)return;
   await doBusy('正在打开模拟 S3 项目…',async()=>{
    await checkNewProjectName();
-   await finishImport(await api<Project>('/api/mock-s3/projects/open',json('POST',{path:mockListing.path,name:newProjectName.trim()})));
+   await finishImport(await api<Project>('/api/storage/projects/open',json('POST',{path:mockListing.path,name:newProjectName.trim()})));
   });
  }
  async function browseNas(kind:'files'|'directory', folder?:string, page=0){
@@ -454,7 +454,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    const health=await api<{capabilities?:string[]}>('/api/health',{cache:'no-store'});
    if(!health.capabilities?.includes('nas-source-browser'))throw new Error(oldBackendMessage);
    const query=new URLSearchParams({page:String(page)});if(folder)query.set('path',folder);
-   const listing=await api<NasListing>(`/api/sources/browse?${query}`);
+   const listing=await api<NasListing>(`/api/storage/sources?${query}`);
    if(nasPickerKind!==kind||nasListing?.path!==listing.path)setNasSelected([]);
    setNasPickerKind(kind);setNasListing(listing);
   }catch(error){setImportError(error instanceof Error?error.message:String(error));}

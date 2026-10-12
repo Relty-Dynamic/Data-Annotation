@@ -1,4 +1,4 @@
-"""Forward local project metadata and timeline results to the authenticated Ubuntu platform."""
+"""Forward local project metadata and timeline results to an explicitly configured service."""
 from __future__ import annotations
 
 import os
@@ -14,7 +14,7 @@ from .service import AXES, FILENAMES
 
 class CloudMirror:
     def __init__(self):
-        origin = os.getenv("DATAMARK_CLOUD_API_ORIGIN", "https://api-annotate.reltydynamic.com:10443").strip()
+        origin = os.getenv("DATAMARK_CLOUD_API_ORIGIN", "").strip()
         if origin:
             parsed = urlsplit(origin)
             port = parsed.port
@@ -34,7 +34,7 @@ class CloudMirror:
 
     def connect(self, local_user_id: str, username: str, password: str) -> dict:
         if not self.origin:
-            raise HTTPException(503, "本机尚未配置 Ubuntu 公网接口地址。")
+            raise HTTPException(503, "本机尚未配置远端同步接口地址。")
         client = httpx.Client(base_url=self.origin, timeout=30)
         try:
             health = client.get("/api/health")
@@ -49,7 +49,7 @@ class CloudMirror:
                 raise HTTPException(503, "公网账号会话格式不正确。")
         except (httpx.HTTPError, ValueError) as error:
             client.close()
-            raise HTTPException(503, "无法连接 Ubuntu 公网接口，请检查网络和接口地址。") from error
+            raise HTTPException(503, "无法连接远端同步接口，请检查网络和接口地址。") from error
         except HTTPException:
             client.close()
             raise

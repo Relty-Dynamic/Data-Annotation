@@ -236,6 +236,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                                "nas" if configured_origin else "local").strip()
     if active_storage not in available_storage:
         raise ValueError("DATAMARK_STORAGE_BACKEND is not available in this deployment")
+    if (public_origin or public_api_origin) and active_storage != "s3":
+        raise ValueError("Public API origins require an isolated S3 deployment; NAS and local storage cannot be exposed")
     service = MockProjectService(data_root, mock_s3, hybrid_nas_root) if mock_s3 else ProjectService(root)
     auth = AuthStore(data_root)
     local_reports = LocalReportStore(auth, nas_source_root if configured_origin and not mock_mode else None)
@@ -634,6 +636,24 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         if hybrid_nas_root and active_storage != "s3-mock":
             raise HTTPException(409, "当前未接入 S3 模拟存储。")
         return open_mock_folder(mock_catalog.project_directory(body.path), body.name or "", request, body.path)
+
+    @app.get("/api/storage/sources")
+    def storage_sources(request: Request, path: str | None = None, page: int = 0):
+        if active_storage == "nas":
+            return sources_browse(request, path, page)
+        if active_storage == "s3-mock":
+            if page != 0:
+                raise HTTPException(422, "模拟存储目录不支持分页。")
+            return browse_mock_sources(path or "")
+        raise HTTPException(404, "此部署不提供共享采集目录。")
+
+    @app.post("/api/storage/projects/open")
+    def open_storage_project(body: OpenRequest, request: Request):
+        if active_storage == "nas":
+            return open_project(body, request)
+        if active_storage == "s3-mock":
+            return open_mock_project(body, request)
+        raise HTTPException(404, "此部署不提供共享采集目录。")
 
     def require_local_mock_request(request: Request) -> str:
         if not mock_uploads:
