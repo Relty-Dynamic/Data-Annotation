@@ -540,7 +540,7 @@ class Worker:
         project['fixed_tracks'] = fixed_tracks(project)
         project['track_labels'] = track_labels(project)
         project['annotations'] = validate_annotations(project.get('annotations'), duration, final=True,
-                                                       videos=videos, require_scene_coverage=False,
+                                                       videos=videos, require_coverage=False,
                                                        custom_tracks=project['custom_tracks'], enabled_fixed_tracks=project['fixed_tracks'], fixed_label_options=project['track_labels'])
         project.setdefault('gaps', [])
         project.setdefault('warnings', [])

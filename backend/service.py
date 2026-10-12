@@ -259,7 +259,7 @@ def document_bytes(value: Any) -> bytes:
 
 
 def validate_annotations(value: Any, duration_ms: int, final: bool = False, videos: list | None = None,
-                         *, require_coverage: bool = True, require_scene_coverage: bool = True,
+                         *, require_coverage: bool = True,
                          custom_tracks: list[dict] | None = None, enabled_fixed_tracks: list[str] | None = None,
                          fixed_label_options: dict[str, list[str]] | None = None) -> dict:
     tracks = validate_custom_tracks(custom_tracks or [])
@@ -347,7 +347,7 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
     if final and require_coverage:
         runs = coverage if videos is not None else [{"start_ms": 0, "end_ms": duration_ms}]
         for axis in COVERAGE_AXES:
-            if axis not in enabled or axis == "scene" and not require_scene_coverage:
+            if axis not in enabled:
                 continue
             records = cleaned[axis]
             index = 0
@@ -359,8 +359,7 @@ def validate_annotations(value: Any, duration_ms: int, final: bool = False, vide
                     if cursor >= run["end_ms"]:
                         break
                 if cursor < run["end_ms"]:
-                    action = "导出" if axis == "scene" else "导出或写回"
-                    raise HTTPException(422, f"{AXIS_NAMES[axis]}轴尚未覆盖全部有视频的时间，请补齐后再{action}。")
+                    raise HTTPException(422, f"{AXIS_NAMES[axis]}轴尚未覆盖全部有视频的时间，请补齐后再导出。")
     return cleaned
 
 
@@ -1290,11 +1289,10 @@ class ProjectService:
             expected_axes = LEGACY_AXES if version == 1 else AXES
             if set(documents) != set(expected_axes) | expected_custom:
                 raise HTTPException(409, "原目录标注文件不齐全或格式版本不一致。旧版须有三个文件，新版须有四个文件。")
-            # Previously exported partial annotations remain readable for manual
-            # completion. Current files require posture coverage; scene and
-            # category may contain unannotated intervals after writeback.
+            # Written-back files may preserve unannotated intervals on every axis.
+            # Validate their contents without imposing the stricter export rule.
             cleaned = validate_annotations(annotations, project["duration_ms"], final=True, videos=active_videos(selected),
-                                           require_coverage=version >= 2, require_scene_coverage=False,
+                                           require_coverage=False,
                                            custom_tracks=tracks, enabled_fixed_tracks=enabled_fixed, fixed_label_options=imported_labels)
             project['_skipped_video_names'] = names
             return (cleaned, hashes, tracks, enabled_fixed, imported_labels) if include_tracks else (cleaned, hashes)
@@ -1553,7 +1551,7 @@ class ProjectService:
 
     def export_documents(self, project: dict, *, for_writeback: bool = False) -> tuple[str, dict[str, bytes]]:
         annotations = validate_annotations(project["annotations"], project["duration_ms"], final=True,
-                                           videos=active_videos(project), require_scene_coverage=not for_writeback,
+                                           videos=active_videos(project), require_coverage=not for_writeback,
                                            custom_tracks=project.get("custom_tracks", []), enabled_fixed_tracks=fixed_tracks(project), fixed_label_options=track_labels(project))
         save_id = uuid.uuid4().hex
         recording_start = datetime.fromisoformat(project["recording_start"]).astimezone(timezone(timedelta(hours=8)))

@@ -306,6 +306,18 @@ class RemoteWorkerTests(unittest.TestCase):
         restored, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
         self.assertEqual(restored['scene'], [])
 
+    def test_writeback_accepts_partial_posture_and_reopens_it(self):
+        project = self.project()
+        posture = project['annotations']['posture'][0]
+        posture['start_ms'] = 100
+        posture['end_ms'] = 300
+        response = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(response.status_code, 200, response.text)
+        document = json.loads((self.nas / 'timeline' / FILENAMES['posture']).read_bytes())
+        self.assertEqual([(item['start_ms'], item['end_ms']) for item in document['segments']], [(100, 300)])
+        restored, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
+        self.assertEqual([(item['start_ms'], item['end_ms']) for item in restored['posture']], [(100, 300)])
+
     def test_writeback_accepts_removed_posture_with_empty_fixed_json(self):
         project = self.project()
         project['fixed_tracks'] = ['scene', 'category', 'habit']

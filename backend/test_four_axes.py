@@ -153,7 +153,11 @@ class FourAxisPersistenceTests(unittest.TestCase):
         added = self.service.set_fixed_track(project["id"], "posture", True, saved["revision"])
         self.assertEqual(added["fixed_tracks"], ["posture"])
         with self.assertRaises(HTTPException):
-            self.service.export_documents(self.service.load(project["id"]), for_writeback=True)
+            self.service.export_zip(project["id"])
+        self.service.writeback(project["id"])
+        self.assertEqual(json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())["segments"], [])
+        restored, _ = self.service.read_external(self.service.load(project["id"]))
+        self.assertEqual(restored["posture"], [])
 
     def test_track_labels_delete_annotations_and_round_trip_with_stable_json(self):
         project = self.annotated_project()
@@ -183,12 +187,19 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual([item["label"] for item in imported["category"]], ["阅读"])
         self.assertEqual(imported_labels["category"], labels)
 
-    def test_removing_used_posture_requires_coverage_before_writeback(self):
+    def test_removing_used_posture_allows_empty_writeback_and_reopen(self):
         project = self.annotated_project()
         changed = self.service.set_track_labels(project["id"], "posture", ["动", "站", "躺", "蹲"], project["revision"])
         self.assertEqual(changed["annotations"]["posture"], [])
         with self.assertRaises(HTTPException):
-            self.service.export_documents(self.service.load(project["id"]), for_writeback=True)
+            self.service.export_zip(project["id"])
+        self.service.writeback(project["id"])
+        self.assertEqual(json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())["segments"], [])
+        fresh = ProjectService(self.root / "empty-posture-fresh")
+        try:
+            self.assertEqual(fresh.open_path(str(self.source))["annotations"]["posture"], [])
+        finally:
+            fresh.previews.close()
 
     def test_custom_event_shortcut_labels_can_be_added_and_removed(self):
         project = self.annotated_project()
@@ -496,23 +507,31 @@ class FourAxisPersistenceTests(unittest.TestCase):
             interval("extra", "用餐", 800, 2000, mode="overlay"),
         ])
 
-    def test_missing_posture_still_blocks_export_and_writeback_with_empty_category(self):
+    def test_missing_posture_blocks_export_but_writes_back_and_reopens_without_filling(self):
         project = self.annotated_project()
-        revision = project["revision"]
+        label = project["annotations"]["posture"][0]["label"]
         for partial in (False, True):
             with self.subTest(partial=partial):
                 annotations = copy.deepcopy(project["annotations"])
                 annotations["category"] = []
-                label = annotations["posture"][0]["label"]
                 annotations["posture"] = [interval("partial", label, 100, 3000)] if partial else []
-                updated = self.service.update_draft(project["id"], annotations, revision)
-                revision = updated["revision"]
-                for operation in (self.service.export_zip, self.service.writeback):
-                    with self.assertRaises(HTTPException) as error:
-                        operation(project["id"])
-                    self.assertEqual(error.exception.status_code, 422)
-                    self.assertIn("姿势轴尚未覆盖", error.exception.detail)
-                self.assertFalse(any((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
+                project = self.service.update_draft(project["id"], annotations, project["revision"])
+                with self.assertRaises(HTTPException) as error:
+                    self.service.export_zip(project["id"])
+                self.assertEqual(error.exception.status_code, 422)
+                self.assertIn("姿势轴尚未覆盖", error.exception.detail)
+                self.service.writeback(project["id"])
+                document = json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())
+                self.assertEqual([(item["start_ms"], item["end_ms"]) for item in document["segments"]],
+                                 [(item["start_ms"], item["end_ms"]) for item in annotations["posture"]])
+                imported, _ = self.service.read_external(self.service.load(project["id"]))
+                self.assertEqual(imported["posture"], annotations["posture"])
+                fresh = ProjectService(self.root / f"partial-posture-fresh-{partial}")
+                try:
+                    self.assertEqual(fresh.open_path(str(self.source))["annotations"]["posture"], annotations["posture"])
+                finally:
+                    fresh.previews.close()
+                project = self.service.load(project["id"])
 
     def test_incomplete_scene_blocks_export_but_writes_back_and_reopens_without_filling(self):
         project = self.annotated_project()
