@@ -6,7 +6,10 @@ def complete_annotations(project, annotations=None):
     result = validate_annotations(annotations if annotations is not None else project["annotations"],
                                   project["duration_ms"], videos=project.get("videos"))
     runs = recording_layout(project["videos"])[0] if "videos" in project else [{"start_ms": 0, "end_ms": project["duration_ms"]}]
+    enabled = project.get("fixed_tracks", ["scene", "posture", "category", "habit"])
     for axis, label in (("scene", "室外"), ("posture", "站"), ("category", "其他")):
+        if axis not in enabled:
+            continue
         records = list(result[axis])
         gaps = []
         for run in runs:

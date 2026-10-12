@@ -30,6 +30,14 @@ class SourceCacheTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='source-cache-test-', dir=ROOT / '.tmp')
         self.root = Path(self.temp.name)
         self.service = ProjectService(self.root / 'app')
+        open_files = self.service.open_files
+        def open_legacy_files(*args, **kwargs):
+            result = open_files(*args, **kwargs)
+            project = self.service.load(result['id'])
+            project['fixed_tracks'] = list(FILENAMES)
+            self.service.save(project)
+            return self.service.public(project)
+        self.service.open_files = open_legacy_files
         self.service.probe = lambda path: {
             'duration_ms': 1000, 'codec': 'mjpeg', 'pixel_format': 'yuvj420p',
             'audio_codecs': [], 'media_start_seconds': 0, 'format_start_seconds': 0,

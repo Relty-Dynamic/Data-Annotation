@@ -82,6 +82,13 @@ test('range annotations split at real gaps and category/habit ranges preserve ov
   }
 });
 
+test('new category anchor ranges replace previous category labels without overlap', () => {
+  const original = [segment('state', '专注', 0, 10000, { mode: 'state' })];
+  const result = applyAnnotationRange(original, 2000, 8000, '用餐', runs, 'category', undefined, true);
+  assert.deepEqual(compact(result), [['专注', 0, 2000], ['用餐', 2000, 8000], ['专注', 8000, 10000]]);
+  assert.ok(result.every(item => item.mode === 'state'));
+});
+
 test('editing removes only the old range and keeps category mode and first ID', () => {
   const original = [
     segment('state', '活动', 0, 10000, { mode: 'state' }),

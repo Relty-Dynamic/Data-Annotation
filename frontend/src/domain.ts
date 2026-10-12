@@ -1,6 +1,6 @@
 export type FixedTrack = 'scene' | 'posture' | 'category' | 'habit';
-export type Track = FixedTrack | `custom_${string}`;
-export interface CustomTrack { id: `custom_${string}`; name: string; mode: 'state' | 'event'; labels: string[]; }
+export type Track = string;
+export interface CustomTrack { id: string; name: string; mode: 'state' | 'event'; labels: string[]; }
 
 export interface Segment {
   id: string;
@@ -84,7 +84,7 @@ export const TRACK_LABELS: Record<FixedTrack, string> = {
 export const TRACKS: FixedTrack[] = ['scene', 'posture', 'category', 'habit'];
 export function projectTracks(project: Project): Track[] { return [...TRACKS.filter(track=>(project.fixed_tracks??TRACKS).includes(track)), ...(project.custom_tracks??[]).map(track=>track.id)]; }
 export function customTrack(project: Project, track: Track): CustomTrack | undefined { return project.custom_tracks?.find(item=>item.id===track); }
-export function trackName(project: Project, track: Track): string { return track.startsWith('custom_') ? customTrack(project,track)?.name??'自定义轴' : TRACK_LABELS[track as FixedTrack]; }
+export function trackName(project: Project, track: Track): string { return customTrack(project,track)?.name??TRACK_LABELS[track as FixedTrack]??'自定义轴'; }
 export function isEventTrack(project: Project, track: Track): boolean { return track==='habit'||customTrack(project,track)?.mode==='event'; }
 export function isExclusiveTrack(project: Project, track: Track): boolean { return track==='scene'||track==='posture'||customTrack(project,track)?.mode==='state'; }
 export const SCENE_LABELS = ['室内', '室外'];
@@ -94,8 +94,7 @@ export const DEFAULT_TRACK_LABELS: Record<FixedTrack,string[]> = {
   scene: SCENE_LABELS, posture: POSTURE_LABELS, category: CATEGORY_LABELS, habit: [],
 };
 export function projectTrackLabels(project: Project, track: Track): string[] {
-  return track.startsWith('custom_') ? customTrack(project, track)?.labels ?? []
-    : project.track_labels?.[track as FixedTrack] ?? DEFAULT_TRACK_LABELS[track as FixedTrack];
+  return customTrack(project, track)?.labels ?? project.track_labels?.[track as FixedTrack] ?? DEFAULT_TRACK_LABELS[track as FixedTrack] ?? [];
 }
 
 export function formatTime(ms: number): string {
@@ -431,7 +430,7 @@ export function applyAnnotationRange(
     label: label.trim(),
     ...range,
     kind: 'interval',
-    ...(track === 'category' ? { mode: editing ? editing.mode ?? 'state' : 'overlay' } as const : {}),
+    ...(track === 'category' ? { mode: exclusive ? 'state' as const : editing ? editing.mode ?? 'state' : 'overlay' as const } : {}),
   }));
   const result = [...remaining, ...added];
   return track === 'scene' || track === 'posture' || exclusive ? mergeTouchingStates(result) : orderedCopies(result);

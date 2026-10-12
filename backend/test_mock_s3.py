@@ -124,6 +124,36 @@ class MockS3WorkflowTests(unittest.TestCase):
             self.assertEqual(other.post("/api/mock-s3/projects/open", headers={"X-CSRF-Token": login.json()["csrf"]},
                                         json={"path": "daily/1001test/20261010"}).status_code, 403)
 
+    def test_named_custom_track_is_written_and_removed_in_mock_timeline(self):
+        opened = self.client.post("/api/storage/projects/open", headers=self.csrf,
+                                  json={"path": "daily/1001test/20261010"})
+        self.assertEqual(opened.status_code, 200, opened.text)
+        project = opened.json()
+        self.assertEqual(project["fixed_tracks"], ["scene", "posture"])
+        ident = project["id"]
+        created = self.client.post(f"/api/projects/{ident}/custom-tracks", headers=self.csrf,
+                                   json={"name": "饮食", "json_name": "food", "mode": "state",
+                                         "labels": ["进食"], "expected_revision": 0})
+        self.assertEqual(created.status_code, 200, created.text)
+        annotations = created.json()["annotations"]
+        annotations["posture"] = [{"id": "pose", "label": "坐", "start_ms": 0, "end_ms": project["duration_ms"]}]
+        annotations["food"] = [{"id": "meal", "label": "进食", "start_ms": 0, "end_ms": project["duration_ms"]}]
+        saved = self.client.put(f"/api/projects/{ident}/draft", headers=self.csrf,
+                                json={"annotations": annotations, "expected_revision": 1})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        submitted = self.client.post(f"/api/projects/{ident}/writeback", headers=self.csrf,
+                                     json={"expected_revision": 2})
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        path = self.app.state.mock_s3.objects / "daily/1001test/20261010/timeline/food.timeline.json"
+        self.assertEqual(json.loads(path.read_text())["segments"][0]["label"], "进食")
+        removed = self.client.request("DELETE", f"/api/projects/{ident}/custom-tracks/food", headers=self.csrf,
+                                      json={"confirmed": True, "expected_revision": 2})
+        self.assertEqual(removed.status_code, 200, removed.text)
+        resubmitted = self.client.post(f"/api/projects/{ident}/writeback", headers=self.csrf,
+                                       json={"expected_revision": 3})
+        self.assertEqual(resubmitted.status_code, 200, resubmitted.text)
+        self.assertFalse(path.exists())
+
     def test_folder_only_selection_does_not_accept_video_uploads(self):
         uploaded = self.client.post("/api/mock-s3/projects", headers=self.csrf,
                                     files=[("files", (self.video.name, self.video.read_bytes(), "video/mp4"))])

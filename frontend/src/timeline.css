@@ -149,7 +149,7 @@
 .tl-hover-line { position: absolute; top: 0; bottom: 0; width: 1px; z-index: 6; pointer-events: none; background: #e2e9f2b3; box-shadow: 0 0 0 1px #07111d66; }
 .tl-hover-line-snapped { background: #ffda8b; box-shadow: 0 0 0 1px #ffda8b30; }
 .tl-range-overlay { position: absolute; top: 26px; bottom: 0; z-index: 4; pointer-events: none; background: #85c9f014; border-left: 1px solid #8bd2f580; border-right: 1px solid #8bd2f580; box-sizing: border-box; }
-.tl-anchor { position: absolute; top: 29px; bottom: 0; width: 0; z-index: 5; border-left: 1px dashed #e7b97eaa; pointer-events: none; }
+.tl-anchor { position: absolute; top: 0; bottom: 0; width: 0; z-index: 5; border-left: 1px dashed #e7b97eaa; pointer-events: none; }
 .tl-anchor-label { position: absolute; top: 0; left: 2px; width: 16px; height: 20px; padding-top: 1px; background: #e7b97e; color: #302214; font-size: 10px; font-weight: 700; text-align: center; clip-path: polygon(0 0, 100% 0, 100% 74%, 50% 100%, 0 74%); }
 .tl-anchor-label-left { left: -18px; }
 

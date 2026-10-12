@@ -77,6 +77,7 @@ class FixedTrackRequest(BaseModel):
 
 class TrackLabelsRequest(BaseModel):
     labels: list[str]
+    renames: dict[str, str] = Field(default_factory=dict)
     expected_revision: int = Field(ge=0, strict=True)
 
 
@@ -93,7 +94,14 @@ class CustomTrackRequest(BaseModel):
     name: str = Field(strict=True)
     mode: Literal["state", "event"]
     labels: list[str] = Field(default_factory=list)
+    json_name: str | None = None
     expected_revision: int = Field(ge=0, strict=True)
+
+
+class TrackTemplateRequest(BaseModel):
+    name: str = Field(strict=True)
+    json_name: str = Field(strict=True)
+    labels: list[str]
 
 
 class RenameProjectRequest(BaseModel):
@@ -443,6 +451,25 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         response.delete_cookie("datamark_session", path="/")
         response.delete_cookie("datamark_csrf", path="/")
         return response
+
+    @app.get("/api/account/track-templates")
+    def list_track_templates(request: Request):
+        if not auth_required:
+            return []
+        return auth.list_track_templates(request.state.user["id"])
+
+    @app.put("/api/account/track-templates")
+    def save_track_template(body: TrackTemplateRequest, request: Request):
+        if not auth_required:
+            raise HTTPException(404, "本机无账号模板。")
+        return auth.save_track_template(request.state.user["id"], body.json_name, body.name, body.labels)
+
+    @app.delete("/api/account/track-templates/{json_name}")
+    def delete_track_template(json_name: str, request: Request):
+        if not auth_required:
+            raise HTTPException(404, "本机无账号模板。")
+        auth.delete_track_template(request.state.user["id"], json_name)
+        return {"ok": True}
 
     @app.get("/api/users")
     def users():
@@ -820,7 +847,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/projects/{project_id}/custom-tracks")
     def add_custom_track(project_id: str, body: CustomTrackRequest):
-        return service.add_custom_track(project_id, body.name, body.mode, body.labels, body.expected_revision)
+        return service.add_custom_track(project_id, body.name, body.mode, body.labels, body.expected_revision,
+                                        json_name=body.json_name)
 
     @app.put("/api/projects/{project_id}/fixed-tracks/{track_id}")
     def set_fixed_track(project_id: str, track_id: str, body: FixedTrackRequest):
@@ -829,7 +857,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.put("/api/projects/{project_id}/tracks/{track_id}/labels")
     def set_track_labels(project_id: str, track_id: str, body: TrackLabelsRequest, request: Request):
         return service.set_track_labels(project_id, track_id, body.labels, body.expected_revision,
-                                        actor=request.state.user if auth_required else None)
+                                        actor=request.state.user if auth_required else None, renames=body.renames)
 
     @app.delete("/api/projects/{project_id}/custom-tracks/{track_id}")
     def delete_custom_track(project_id: str, track_id: str, body: DeleteProjectRequest):

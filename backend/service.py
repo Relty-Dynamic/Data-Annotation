@@ -38,6 +38,11 @@ AXES = ("scene", "posture", "category", "habit")
 COVERAGE_AXES = ("scene", "posture")
 AXIS_NAMES = {"scene": "场景", "posture": "姿势", "category": "大类", "habit": "习惯"}
 FILENAMES = {axis: f"{axis}.timeline.json" for axis in AXES}
+CUSTOM_FILENAME = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+
+
+def valid_custom_axis(axis: str) -> bool:
+    return bool((re.fullmatch(r"custom_[0-9a-f]{32}", axis) or CUSTOM_FILENAME.fullmatch(axis)) and axis not in FILENAMES)
 
 
 def validate_fixed_tracks(value: Any) -> list[str]:
@@ -53,7 +58,7 @@ def fixed_tracks(project: dict) -> list[str]:
 
 
 def filename_for_axis(axis: str) -> str:
-    if axis in FILENAMES or re.fullmatch(r"custom_[0-9a-f]{32}", axis):
+    if axis in FILENAMES or valid_custom_axis(axis):
         return f"{axis}.timeline.json"
     raise ValueError("Invalid timeline axis")
 FIXED_LABELS = {
@@ -122,9 +127,9 @@ def validate_custom_tracks(value: Any) -> list[dict]:
         if not isinstance(track, dict) or set(track) != {"id", "name", "mode", "labels"}:
             raise HTTPException(422, "自定义时间轴格式不正确。")
         ident = track["id"]
-        if not isinstance(ident, str) or not re.fullmatch(r"custom_[0-9a-f]{32}", ident) or ident in ids:
+        if not isinstance(ident, str) or not valid_custom_axis(ident) or ident.casefold() in ids:
             raise HTTPException(422, "自定义时间轴 ID 不正确或重复。")
-        ids.add(ident)
+        ids.add(ident.casefold())
         name = validate_project_name(track["name"])
         mode = track["mode"]
         if mode not in ("state", "event"):
@@ -691,7 +696,7 @@ class ProjectService:
                 raise HTTPException(409, "所选 NAS 视频已在平台项目中，请打开已有项目；无法重复创建独立草稿。")
         parents = {path.parent for path in resolved}
         source_dir = next(iter(parents)) if source_writeback and len(parents) == 1 else None
-        project = self.create(resolved, "", source_dir)
+        project = self.create(resolved, "", source_dir, default_fixed_tracks=["scene", "posture"])
         if name is not None:
             project.update(name=name, _custom_name=True)
         # File selection may intentionally choose only part of one directory.
@@ -939,7 +944,7 @@ class ProjectService:
         except OSError:
             raise HTTPException(422, f"无法读取视频：{path.name}，请检查路径和共享目录权限。")
 
-    def create(self, paths: list[Path], name: str, source_dir: Path | None, ident: str | None = None, imported_at: str | None = None, *, existing: dict | None = None) -> dict:
+    def create(self, paths: list[Path], name: str, source_dir: Path | None, ident: str | None = None, imported_at: str | None = None, *, existing: dict | None = None, default_fixed_tracks: list[str] | None = None) -> dict:
         imported_at = imported_at or now()
         if not paths:
             raise HTTPException(422, "目录中没有找到支持的视频。请选择采集根目录、FPV 目录，或直接选择原视频文件。")
@@ -1005,7 +1010,7 @@ class ProjectService:
             videos.append(video)
             sources[video_id] = dict(metadata) if old_video else {"path": str(path.resolve()), "stamp": stamp, **metadata}
         fingerprint = digest(document_bytes([{**video, "id": f"v{index + 1:04d}", "url": None, "thumbnail_url": None, "stamp": sources[video["id"]]["stamp"]} for index, video in enumerate(videos)]))
-        project = {"id": ident, "name": import_name(imported_at), "imported_at": imported_at, "import_time_estimated": False, "_storage_version": 2, "source_dir": str(source_dir) if source_dir else None, "duration_ms": cursor, "recording_start": origin.isoformat(timespec="milliseconds"), "gaps": gaps, "videos": videos, "annotations": empty_annotations(), "revision": 0, "updated_at": now(), "source_fingerprint": fingerprint, "draft_dirty": False, "warnings": alignment_warnings(videos), "_sources": sources, "_source_key": os.path.normcase(str(source_dir)) if source_dir else None, "_external_hashes": {axis: None for axis in AXES}}
+        project = {"id": ident, "name": import_name(imported_at), "imported_at": imported_at, "import_time_estimated": False, "_storage_version": 2, "source_dir": str(source_dir) if source_dir else None, "duration_ms": cursor, "recording_start": origin.isoformat(timespec="milliseconds"), "gaps": gaps, "videos": videos, "annotations": empty_annotations(), "fixed_tracks": validate_fixed_tracks(default_fixed_tracks if default_fixed_tracks is not None else list(AXES)), "revision": 0, "updated_at": now(), "source_fingerprint": fingerprint, "draft_dirty": False, "warnings": alignment_warnings(videos), "_sources": sources, "_source_key": os.path.normcase(str(source_dir)) if source_dir else None, "_external_hashes": {axis: None for axis in AXES}}
         return project
 
     @staticmethod
@@ -1285,8 +1290,8 @@ class ProjectService:
         if any(document.get("timebase", {}).get("track_labels", DEFAULT_TRACK_LABELS) != imported_labels for document in documents.values()):
             raise HTTPException(409, "标注文件中的标签清单不一致。")
         expected_custom = {track["id"] for track in tracks}
-        actual_custom = {path.name.removesuffix(".timeline.json") for path in directory.glob("custom_*.timeline.json")
-                         if re.fullmatch(r"custom_[0-9a-f]{32}\.timeline\.json", path.name)}
+        actual_custom = {path.name.removesuffix(".timeline.json") for path in directory.glob("*.timeline.json")
+                         if path.name not in FILENAMES.values()}
         if actual_custom != expected_custom:
             raise HTTPException(409, "自定义时间轴文件不齐全或包含其他保存批次。")
         for axis in expected_custom:
@@ -1400,7 +1405,8 @@ class ProjectService:
                 self.reopen_supplemented(previous, paths, import_external=False)
                 fresh = previous
             else:
-                fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None)
+                fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None,
+                                    default_fixed_tracks=["scene", "posture"])
                 if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
                     raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
             if claim_mode == "restart":
@@ -1451,7 +1457,7 @@ class ProjectService:
             fresh.update(name=name if name is not None else validate_project_name(path.name), _custom_name=True)
             fresh["annotations"] = imported or empty_annotations()
             fresh["custom_tracks"] = imported_tracks
-            fresh["fixed_tracks"] = imported_fixed
+            fresh["fixed_tracks"] = imported_fixed if imported is not None else ["scene", "posture"]
             fresh["track_labels"] = imported_labels
             fresh["_external_hashes"] = hashes
             if claim_mode == "restart":
@@ -1550,12 +1556,18 @@ class ProjectService:
         result["recovery_id"] = recovery_id
         return result
 
-    def add_custom_track(self, ident: str, name: str, mode: str, labels: list[str], expected_revision: int) -> dict:
+    def add_custom_track(self, ident: str, name: str, mode: str, labels: list[str], expected_revision: int,
+                         json_name: str | None = None) -> dict:
         with self.lock:
             project = self.load(ident)
             if project["revision"] != expected_revision:
                 raise HTTPException(409, "项目已在其他窗口更新，请重新打开后添加时间轴。")
-            track = {"id": "custom_" + uuid.uuid4().hex, "name": name, "mode": mode, "labels": labels}
+            axis = json_name if json_name is not None else "custom_" + uuid.uuid4().hex
+            if not isinstance(axis, str) or not valid_custom_axis(axis) or (json_name is not None and axis.startswith("custom_")):
+                raise HTTPException(422, "JSON 文件名只能使用小写英文字母、数字、下划线或连字符，且须以字母开头。")
+            if axis in {item["id"] for item in project.get("custom_tracks", [])} or axis in project.get("_external_hashes", {}):
+                raise HTTPException(409, "这个 JSON 文件名已被当前项目使用或等待清理，请选择其他名称。")
+            track = {"id": axis, "name": name, "mode": mode, "labels": labels}
             tracks = validate_custom_tracks([*project.get("custom_tracks", []), track])
             project["custom_tracks"] = tracks
             project["annotations"][track["id"]] = []
@@ -1585,7 +1597,7 @@ class ProjectService:
             return self.public(project)
 
     def set_track_labels(self, ident: str, track_id: str, labels: list[str], expected_revision: int,
-                         *, actor: dict | None = None) -> dict:
+                         *, actor: dict | None = None, renames: dict[str, str] | None = None) -> dict:
         with self.lock:
             project = self.load(ident)
             if project["revision"] != expected_revision:
@@ -1605,7 +1617,13 @@ class ProjectService:
             cleaned = [validate_project_name(label) for label in labels]
             if len(set(cleaned)) != len(cleaned):
                 raise HTTPException(422, "同一时间轴不能有重复标签。")
-            if cleaned == current:
+            renames = renames or {}
+            if (not isinstance(renames, dict) or any(not isinstance(old, str) or not isinstance(new, str)
+                    or old not in current or new not in cleaned or old == new for old, new in renames.items())
+                    or len(set(renames.values())) != len(renames)
+                    or any(new in current and new not in renames for new in renames.values())):
+                raise HTTPException(422, "标签备注更改与当前标签不匹配，请重新打开后保存。")
+            if cleaned == current and not renames:
                 return self.public(project)
             if track_id in AXES:
                 options = copy.deepcopy(track_labels(project))
@@ -1615,10 +1633,12 @@ class ProjectService:
                 project["custom_tracks"] = validate_custom_tracks([
                     {**item, "labels": cleaned} if item["id"] == track_id else item
                     for item in project["custom_tracks"]])
-            removed = set(current) - set(cleaned)
+            removed = set(current) - set(cleaned) - set(renames)
             deleted = [item for item in project["annotations"][track_id] if item["label"] in removed]
-            project["annotations"][track_id] = [item for item in project["annotations"][track_id]
-                                                  if item["label"] not in removed]
+            renamed = [(item, {**item, "label": renames[item["label"]]}) for item in project["annotations"][track_id]
+                       if item["label"] in renames]
+            project["annotations"][track_id] = [{**item, "label": renames[item["label"]]} if item["label"] in renames else item
+                                                  for item in project["annotations"][track_id] if item["label"] not in removed]
             project["revision"] += 1
             project["updated_at"] = now()
             project["draft_dirty"] = True
@@ -1630,7 +1650,11 @@ class ProjectService:
                     con.executemany("INSERT INTO edit_events VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
                         (uuid.uuid4().hex, ident, project["revision"], track_id, item["id"], "delete",
                          actor["id"], actor["display_name"], project["updated_at"],
-                         json.dumps(item, ensure_ascii=False), None) for item in deleted])
+                         json.dumps(item, ensure_ascii=False), None) for item in deleted] + [
+                        (uuid.uuid4().hex, ident, project["revision"], track_id, before["id"], "update",
+                         actor["id"], actor["display_name"], project["updated_at"],
+                         json.dumps(before, ensure_ascii=False), json.dumps(after, ensure_ascii=False))
+                        for before, after in renamed])
             return self.public(project)
 
     def delete_custom_track(self, ident: str, track_id: str, expected_revision: int) -> dict:
@@ -1775,7 +1799,7 @@ class ProjectService:
     def expected_external_hashes(project: dict) -> dict:
         previous = project.get("_external_hashes", {})
         return {**{axis: previous.get(axis) for axis in AXES},
-                **{axis: value for axis, value in previous.items() if axis.startswith("custom_") and value is not None}}
+                **{axis: value for axis, value in previous.items() if axis not in AXES and valid_custom_axis(axis) and value is not None}}
 
     @staticmethod
     def external_directory(source: Path) -> Path:
@@ -1800,9 +1824,9 @@ class ProjectService:
     def _hashes_in_directory(directory: Path) -> dict:
         try:
             hashes = {axis: digest((directory / FILENAMES[axis]).read_bytes()) if (directory / FILENAMES[axis]).exists() else None for axis in AXES}
-            for path in directory.glob("custom_*.timeline.json"):
+            for path in directory.glob("*.timeline.json"):
                 axis = path.name.removesuffix(".timeline.json")
-                if re.fullmatch(r"custom_[0-9a-f]{32}", axis):
+                if valid_custom_axis(axis):
                     if path.is_symlink() or not path.is_file():
                         raise HTTPException(409, "自定义时间轴文件不是普通文件，已停止写回。")
                     hashes[axis] = digest(path.read_bytes())
@@ -1847,7 +1871,7 @@ class ProjectService:
             target_expected = actual if external_directory == destination else {axis: None for axis in documents}
             created_destination = not destination.exists()
             retired = [axis for axis, value in target_expected.items()
-                       if axis.startswith("custom_") and axis not in documents and value is not None]
+                       if axis not in AXES and valid_custom_axis(axis) and axis not in documents and value is not None]
             temporary, backups, replaced, removed = {}, {}, [], []
             backup_dir = source / ".annotation-backups" / save_id
             try:

@@ -192,7 +192,7 @@ class MockS3Store:
         pointer.parent.mkdir(parents=True, exist_ok=True)
         targets = {self._path(key): payload for key, payload in keys}
         if prefix:
-            for old in pointer.parent.glob("custom_*.timeline.json"):
+            for old in pointer.parent.glob("*.timeline.json"):
                 targets.setdefault(self._path(old.relative_to(self.objects).as_posix()), None)
         targets[pointer] = json.dumps({"save_id": save_id, "keys": [key for key, _ in keys]}).encode()
         previous = {path: path.read_bytes() if path.exists() else None for path in targets}

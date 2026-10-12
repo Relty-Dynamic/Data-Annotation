@@ -49,6 +49,8 @@ class PlaybackSessionTests(unittest.TestCase):
             paths.append(path)
         opened = self.service.open_files([str(path) for path in paths])
         self.project = self.service.load(opened["id"])
+        self.project["fixed_tracks"] = ["scene", "posture", "category", "habit"]
+        self.service.save(self.project)
         self.ident = self.project["id"]
         self.specs = {}
         for video in self.project["videos"]:

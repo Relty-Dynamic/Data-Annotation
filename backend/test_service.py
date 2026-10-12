@@ -173,6 +173,18 @@ class PersistenceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="backend-tests-", dir=ROOT / ".tmp")
         self.root = Path(self.temp.name)
         self.service = ProjectService(self.root)
+        # Legacy persistence cases exercise four enabled axes; new-project defaults
+        # are verified separately and must remain scene/posture in production.
+        open_path = self.service.open_path
+        def open_legacy_project(*args, **kwargs):
+            result = open_path(*args, **kwargs)
+            if result["revision"] == 0 and result["fixed_tracks"] == ["scene", "posture"]:
+                project = self.service.load(result["id"])
+                project["fixed_tracks"] = list(AXES)
+                self.service.save(project)
+                return self.service.public(project)
+            return result
+        self.service.open_path = open_legacy_project
         self.source = self.root / "collection"
         self.fpv = self.source / "FPV"
         self.fpv.mkdir(parents=True)

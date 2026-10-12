@@ -140,6 +140,21 @@ class AccountAccessTests(unittest.TestCase):
         self.assertEqual(removed.status_code, 200, removed.text)
         self.assertNotIn(axis, removed.json()["annotations"])
 
+    def test_track_templates_are_private_to_account_and_require_csrf(self):
+        self.assertEqual(self.client.get("/api/account/track-templates").status_code, 401)
+        csrf = self.login("worker", "another long safe password")
+        path = "/api/account/track-templates"
+        body = {"name": "饮食", "json_name": "food", "labels": ["进食", "未进食"]}
+        self.assertEqual(self.client.put(path, json=body).status_code, 403)
+        created = self.client.put(path, json=body, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(self.client.get(path).json(), [body])
+        invalid = {**body, "labels": ["进食\n伪造"]}
+        self.assertEqual(self.client.put(path, json=invalid, headers={"X-CSRF-Token": csrf}).status_code, 422)
+        self.client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
+        self.login("admin", "correct horse battery staple")
+        self.assertEqual(self.client.get(path).json(), [])
+
     def test_admin_controls_accounts_and_assignments(self):
         csrf = self.login("admin", "correct horse battery staple")
         users = self.client.get("/api/users")

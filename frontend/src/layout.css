@@ -537,6 +537,8 @@ html, body, #root { background: var(--bg); }
 .track-label-list > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; }
 .track-label-list > div + div { border-top: 1px solid #344653; }
 .track-label-list > div span { overflow-wrap: anywhere; }
+.track-label-list > div span { min-width: 65px; max-width: 45%; }
+.track-label-list > div input { min-width: 0; flex: 1; }
 .track-label-list > div button { flex: 0 0 auto; }
 .track-label-list > p { padding: 10px; }
 .track-label-add { display: flex; gap: 8px; }
@@ -552,6 +554,9 @@ html, body, #root { background: var(--bg); }
 .custom-track-dialog textarea { width: 100%; resize: vertical; border: 1px solid #435563; border-radius: 6px; padding: 10px; background: #111a23; color: #e4eff1; font: inherit; }
 .restore-fixed-tracks { display: flex; flex-direction: column; gap: 8px; }
 .restore-fixed-tracks > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.template-item { display: inline-flex; align-items: center; gap: 4px; }
+.template-save-option { flex-direction: row !important; align-items: center; font-size: 12px; }
+.template-save-option input { width: auto; }
 .custom-track-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .delete-custom-track-dialog[open] { display: flex; flex-direction: column; gap: 15px; }
 .delete-custom-track-dialog .import-error { padding: 9px 11px; border: 1px solid #825251; border-radius: 6px; background: #39272a; color: #f0bcb4; }

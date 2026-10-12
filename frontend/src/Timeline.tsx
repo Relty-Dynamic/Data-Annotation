@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type CSSProperties, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { arrangeLanes, formatTime, isPointSegment, isEventTrack, projectTracks, snapTimelineTime, timelineSnapPoints, trackName, type Project, type Segment, type Track, type VideoGap } from './domain';
+import { arrangeLanes, customTrack, formatTime, isPointSegment, isEventTrack, projectTracks, snapTimelineTime, timelineSnapPoints, trackName, type Project, type Segment, type Track, type VideoGap } from './domain';
 import HoverPreview from './HoverPreview';
 import type { ExternalTimeline } from './externalTimeline';
 import { sessionAssetUrl } from './sessionAssets';
@@ -496,7 +496,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
       <button
         key={segment.id}
         type="button"
-        className={`tl-segment tl-segment-${track.startsWith('custom_')?'custom':track}${selected ? ' tl-segment-selected' : ''}${segment.end_ms === null ? ' tl-segment-open' : ''}${point ? ' tl-segment-point' : ''}`}
+        className={`tl-segment tl-segment-${customTrack(project,track)?'custom':track}${selected ? ' tl-segment-selected' : ''}${segment.end_ms === null ? ' tl-segment-open' : ''}${point ? ' tl-segment-point' : ''}`}
         style={{ ...positionStyle(segment.start_ms, point ? segment.start_ms : end, duration), top: 6 + lane * LANE_PITCH }}
         title={point ? `${segment.label} · 时点 ${formatTime(segment.start_ms)}` : `${segment.label} · ${formatTime(segment.start_ms)} → ${segment.end_ms === null ? '标注中' : formatTime(segment.end_ms)}`}
         aria-label={point ? `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}：${segment.label}，时点 ${formatTime(segment.start_ms)}` : `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}：${segment.label}，从 ${formatTime(segment.start_ms)}${segment.end_ms === null ? '，标注中' : ` 到 ${formatTime(segment.end_ms)}`}`}
@@ -576,9 +576,9 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
                 const overlapping = external || track === 'category' || isEventTrack(project,track);
                 const laneCount = Math.max(1, ...segments.map(({ lane }) => lane + 1));
                 const contentHeight = overlapping ? laneCount * LANE_PITCH + 10 : 34;
-                return <div className={`tl-row tl-track-row tl-track-${track.startsWith('custom_')?'custom':track}${external ? ' tl-external-row' : ''}${active ? ' tl-track-active' : ''}`} key={key}>
+                return <div className={`tl-row tl-track-row tl-track-${customTrack(project,track)?'custom':track}${external ? ' tl-external-row' : ''}${active ? ' tl-track-active' : ''}`} key={key}>
                   <button type="button" className="tl-gutter tl-track-select" aria-pressed={active} onClick={() => { if (!comparison) onTrackSelect(track); }} aria-label={`${comparison ? (external ? '外部' : '项目') : '选择'}${trackName(project,track)}标注轴`}>
-                    <span className="tl-track-title"><span className={`tl-row-dot tl-dot-${track.startsWith('custom_')?'custom':track}`} /><span>{comparison ? (external ? '外部 · ' : '项目 · ') : ''}{trackName(project,track)}</span><span className="tl-count">{segments.length}</span>
+                    <span className="tl-track-title"><span className={`tl-row-dot tl-dot-${customTrack(project,track)?'custom':track}`} /><span>{comparison ? (external ? '外部 · ' : '项目 · ') : ''}{trackName(project,track)}</span><span className="tl-count">{segments.length}</span>
                     {overlapping && laneCount > 1 && <span className="tl-lane-hint" title="Alt + 滚轮查看重叠层">{laneCount}层</span>}</span>
                   </button>
                   <div className={overlapping ? 'tl-overlap-viewport' : 'tl-state-viewport'}
@@ -604,7 +604,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
                     if ((event.target as HTMLElement).closest('button')) return;
                     beginScrub(event);
                   }} {...scrubPointerHandlers}>
-                    {!segments.length && <span className="tl-empty-track">{comparison ? '暂无记录' : track === 'scene' ? '点击右侧按钮切换室内 / 室外' : track === 'posture' ? 'Z 动 / X 坐 / C 站 / V 躺' : track === 'category' ? '切换大类，或添加可重叠的时间段' : track === 'habit' ? '记录习惯，同一时段可叠加' : isEventTrack(project,track) ? '记录事件，支持瞬时和重叠' : '点击右侧标签开始标注状态'}</span>}
+                    {!segments.length && <span className="tl-empty-track">{comparison ? '暂无记录' : track === 'scene' ? '点击右侧按钮切换室内 / 室外' : track === 'posture' ? 'Z 动 / X 坐 / C 站 / V 躺' : track === 'category' ? '点击标签切换大类，或用锚点选择区间' : track === 'habit' ? '记录习惯，同一时段可叠加' : isEventTrack(project,track) ? '记录事件，支持瞬时和重叠' : '点击右侧标签开始标注状态'}</span>}
                     {segments.map(({ segment, lane }) => renderSegment(track, segment, lane, external))}
                     {renderGaps('track')}
                   </div>
@@ -645,9 +645,6 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     </section>
   );
 }
-
-
-
 
 
 

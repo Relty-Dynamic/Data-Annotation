@@ -5,6 +5,7 @@ import argparse
 import getpass
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -16,6 +17,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import HTTPException
+
+from .service import validate_project_name
 
 
 SESSION_SECONDS = 12 * 60 * 60
@@ -67,6 +70,11 @@ class AuthStore:
                 CREATE TABLE IF NOT EXISTS editing_sessions (
                     project_id TEXT NOT NULL, tab_id TEXT NOT NULL, user_id TEXT NOT NULL,
                     touched_at INTEGER NOT NULL, PRIMARY KEY(project_id, tab_id)
+                );
+                CREATE TABLE IF NOT EXISTS track_templates (
+                    user_id TEXT NOT NULL REFERENCES users(id), json_name TEXT NOT NULL,
+                    name TEXT NOT NULL, labels_json TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                    PRIMARY KEY(user_id, json_name)
                 );
             """)
             if "can_upload" not in {row[1] for row in con.execute("PRAGMA table_info(users)")}:
@@ -135,6 +143,38 @@ class AuthStore:
         with self.connection() as con:
             row = con.execute("SELECT role,active,can_upload FROM users WHERE id=?", (user_id,)).fetchone()
         return bool(row and row["active"] and (row["role"] == "admin" or row["can_upload"]))
+
+    def list_track_templates(self, user_id: str) -> list[dict]:
+        with self.connection() as con:
+            rows = con.execute("SELECT json_name,name,labels_json FROM track_templates WHERE user_id=? ORDER BY updated_at DESC,json_name",
+                               (user_id,)).fetchall()
+        return [{"json_name": row["json_name"], "name": row["name"], "labels": json.loads(row["labels_json"])} for row in rows]
+
+    def save_track_template(self, user_id: str, json_name: str, name: str, labels: list[str]) -> dict:
+        if (not isinstance(json_name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", json_name)
+                or json_name in {"scene", "posture", "category", "habit"} or json_name.startswith("custom_")
+                or not isinstance(name, str)
+                or not isinstance(labels, list) or not 1 <= len(labels) <= 32
+                or any(not isinstance(label, str) for label in labels)):
+            raise HTTPException(422, "个人时间轴模板格式不正确。")
+        name = validate_project_name(name)
+        labels = [validate_project_name(label) for label in labels]
+        if len(set(labels)) != len(labels):
+            raise HTTPException(422, "个人时间轴模板中的标签不能重复。")
+        with self.connection() as con:
+            count = con.execute("SELECT COUNT(*) FROM track_templates WHERE user_id=?", (user_id,)).fetchone()[0]
+            exists = con.execute("SELECT 1 FROM track_templates WHERE user_id=? AND json_name=?", (user_id, json_name)).fetchone()
+            if count >= 32 and not exists:
+                raise HTTPException(422, "每个账号最多保存 32 条时间轴模板。")
+            con.execute("INSERT INTO track_templates VALUES (?,?,?,?,?) ON CONFLICT(user_id,json_name) DO UPDATE SET name=excluded.name,labels_json=excluded.labels_json,updated_at=excluded.updated_at",
+                        (user_id, json_name, name, json.dumps(labels, ensure_ascii=False), int(time.time())))
+        return {"json_name": json_name, "name": name, "labels": labels}
+
+    def delete_track_template(self, user_id: str, json_name: str) -> None:
+        with self.connection() as con:
+            result = con.execute("DELETE FROM track_templates WHERE user_id=? AND json_name=?", (user_id, json_name))
+            if result.rowcount == 0:
+                raise HTTPException(404, "个人时间轴模板不存在。")
 
     def set_active(self, user_id: str, active: bool) -> None:
         with self.connection() as con:
