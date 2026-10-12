@@ -1418,6 +1418,49 @@ class ProjectService:
                     con.executemany("INSERT INTO edit_events VALUES (?,?,?,?,?,?,?,?,?,?,?)", events)
             return self.public(project)
 
+    @project_locked
+    def reset_annotations_from_empty_source(self, ident: str, expected_revision: int) -> dict:
+        """Explicitly discard a dirty draft only after preserving a private recovery copy."""
+        project = self.load(ident)
+        if project["revision"] != expected_revision:
+            raise HTTPException(409, "项目已在其他窗口更新，请重新打开后再清空旧标注。")
+        if not project.get("source_dir"):
+            raise HTTPException(400, "项目没有关联原采集目录。")
+        source = Path(project["source_dir"])
+        if not source.is_dir():
+            raise HTTPException(409, "原采集目录当前不可访问，未清空草稿。")
+        hashes = self.current_external_hashes(source)
+        if any(value is not None for value in hashes.values()):
+            raise HTTPException(409, "原采集目录仍有时间轴 JSON，未清空草稿。请先核对 NAS 文件。")
+        recovery_dir = self.storage.directory(ident) / "recoveries"
+        try:
+            recovery_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if recovery_dir.is_symlink() or not recovery_dir.is_dir():
+                raise HTTPException(409, "恢复副本目录不安全，未清空草稿。")
+            recovery_id = uuid.uuid4().hex
+            recovery_path = recovery_dir / f"{recovery_id}.json"
+            payload = document_bytes(project)
+            descriptor = os.open(recovery_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if recovery_path.read_bytes() != payload:
+                raise OSError("recovery readback mismatch")
+        except OSError:
+            raise HTTPException(409, "无法保存并核验旧草稿的恢复副本，未清空标注。")
+        project["annotations"] = {**empty_annotations(), **{track["id"]: [] for track in project.get("custom_tracks", [])}}
+        project["_external_hashes"] = hashes
+        project["draft_dirty"] = True
+        project["last_writeback"] = None
+        project["warnings"] = alignment_warnings(project["videos"])
+        project["revision"] += 1
+        project["updated_at"] = now()
+        self.save(project)
+        result = self.public(project)
+        result["recovery_id"] = recovery_id
+        return result
+
     def add_custom_track(self, ident: str, name: str, mode: str, labels: list[str], expected_revision: int) -> dict:
         with self.lock:
             project = self.load(ident)

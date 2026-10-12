@@ -51,10 +51,16 @@ class AccountAccessTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/api/%70rojects/{project_id}").status_code, 403)
         self.assertEqual(self.client.get(f"/api/session-media/{project_id}/v1/v0001").status_code, 403)
         self.assertEqual(self.client.post(f"/api/projects/{project_id}/writeback", headers={"X-CSRF-Token": csrf}).status_code, 403)
+        self.assertEqual(self.client.post(f"/api/projects/{project_id}/annotations/reset-from-empty-source", json={"expected_revision": 0}, headers={"X-CSRF-Token": csrf}).status_code, 403)
         self.assertEqual(self.client.get("/api/users").status_code, 403)
         self.auth.assign(project_id, self.annotator["id"])
         self.assertEqual(len(self.client.get("/api/projects").json()), 1)
         self.assertEqual(self.client.get(f"/api/projects/{project_id}").status_code, 200)
+        reset_path = f"/api/projects/{project_id}/annotations/reset-from-empty-source"
+        self.assertEqual(self.client.post(reset_path, json={"expected_revision": 0}).status_code, 403)
+        with patch.object(self.app.state.service, "reset_annotations_from_empty_source", return_value={"ok": True}) as reset:
+            self.assertEqual(self.client.post(reset_path, json={"expected_revision": 0}, headers={"X-CSRF-Token": csrf}).status_code, 200)
+            reset.assert_called_once_with(project_id, 0)
         with patch.object(self.app.state.service, "writeback", return_value={"ok": True}) as writeback:
             self.assertEqual(self.client.post(f"/api/projects/{project_id}/writeback", headers={"X-CSRF-Token": csrf}).status_code, 200)
             writeback.assert_called_once_with(project_id)

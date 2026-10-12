@@ -656,6 +656,44 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual(self.service.open_path(str(self.source))['annotations']['scene'], changed['annotations']['scene'])
         self.assertTrue((self.source / FILENAMES['scene']).exists(), 'legacy root files remain untouched')
 
+    def test_deleted_nas_json_with_dirty_draft_requires_explicit_archived_reset(self):
+        project = self.annotated_project()
+        self.service.writeback(project['id'])
+        stored = self.service.load(project['id'])
+        dirty = self.service.update_draft(project['id'],
+            {**stored['annotations'], 'scene': [interval('draft-scene', '室外', 0, stored['duration_ms'])]},
+            stored['revision'])
+        for name in FILENAMES.values():
+            (self.source / 'timeline' / name).unlink()
+        reopened = self.service.open_path(str(self.source))
+        self.assertEqual(reopened['annotations']['scene'], dirty['annotations']['scene'])
+        with self.assertRaises(HTTPException) as conflict:
+            self.service.writeback(project['id'])
+        self.assertEqual(conflict.exception.status_code, 409)
+        with self.assertRaises(HTTPException) as stale:
+            self.service.reset_annotations_from_empty_source(project['id'], reopened['revision'] - 1)
+        self.assertEqual(stale.exception.status_code, 409)
+        reset = self.service.reset_annotations_from_empty_source(project['id'], reopened['revision'])
+        self.assertEqual(reset['annotations'], empty_annotations())
+        self.assertEqual(self.service.expected_external_hashes(self.service.load(project['id'])),
+                         {axis: None for axis in AXES})
+        recovery = self.service.storage.directory(project['id']) / 'recoveries' / f"{reset['recovery_id']}.json"
+        self.assertEqual(json.loads(recovery.read_text())['annotations']['scene'], dirty['annotations']['scene'])
+        self.assertEqual(recovery.stat().st_mode & 0o777, 0o600)
+        changed = self.service.update_draft(project['id'],
+            {**reset['annotations'], 'scene': [interval('new-scene', '室内', 0, reset['duration_ms'])]},
+            reset['revision'])
+        self.service.writeback(project['id'])
+        self.assertEqual(self.service.open_path(str(self.source))['annotations']['scene'], changed['annotations']['scene'])
+
+    def test_reset_rejects_existing_source_json_without_archiving(self):
+        project = self.annotated_project()
+        self.service.writeback(project['id'])
+        with self.assertRaises(HTTPException) as conflict:
+            self.service.reset_annotations_from_empty_source(project['id'], self.service.load(project['id'])['revision'])
+        self.assertEqual(conflict.exception.status_code, 409)
+        self.assertFalse((self.service.storage.directory(project['id']) / 'recoveries').exists())
+
     def test_failed_first_subfolder_write_preserves_legacy_files_and_can_retry(self):
         stored = self.legacy_files(self.annotated_project())
         originals = {axis: (self.source / FILENAMES[axis]).read_bytes() for axis in LEGACY_AXES}
