@@ -788,7 +788,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy||mockUploading} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
    <h2 id="import-title">{mockMode?'新建 S3 mock 项目':importMode==='relink'?'关联原视频目录':importMode==='supplement'?'补导入视频':'新建采集项目'}</h2>
    {mockMode ? <>
-    <p>从采集设备的 video 文件夹选择本次采集的 AVI，填写采集人后上传。新数据位于 daily、采集日期、“月日＋采集人”文件夹；进入该文件夹后选择项目。已有桌面测试目录仍可使用。</p>
+    <p>本机上传程序会打开系统文件选择窗口，请从采集设备的 video 文件夹选择 AVI，填写采集人后由本机压缩并发布。新数据位于 daily、采集日期、“月日＋采集人”文件夹；进入该文件夹后选择项目。已有桌面测试目录仍可使用。</p>
     <label className="field-label" htmlFor="mock-project-name">项目名称</label>
     <input id="mock-project-name" className="project-name-input" value={newProjectName} disabled={!!busy} maxLength={80} onChange={e=>setNewProjectName(e.target.value)}/>
     {user.can_upload&&<><button className="secondary wide" disabled={!!busy||mockUploading} onClick={()=>setMockUploadOpen(value=>!value)}>{mockUploadOpen?'收起上传':'上传 AVI 视频'}</button>

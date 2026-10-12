@@ -146,7 +146,7 @@ class MockUploadRequest(BaseModel):
     collector_name: str = Field(min_length=1, max_length=80)
     uploader_name: str | None = Field(default=None, max_length=80)
     note: str | None = Field(default=None, max_length=500)
-    files: list[dict] = Field(min_length=1, max_length=1000)
+    selection_id: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
 class PasswordRequest(BaseModel):
@@ -215,7 +215,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         allowed_hosts.append(api_host)
         allowed_origins.add(public_origin)
     mock_s3 = MockS3Store(data_root) if mock_mode else None
-    mock_uploads = MockUploadManager(mock_s3) if mock_s3 else None
+    mock_uploads = MockUploadManager(mock_s3, data_root / ".local" / "mock-upload-staging") if mock_s3 else None
     mock_catalog = (MockS3Catalog(mock_s3, Path(mock_source).expanduser() if mock_source else None,
                                   os.getenv("DATAMARK_S3_MOCK_SOURCE_KEY", "").strip()
                                   or (f"daily/{Path(mock_source).name}/{datetime.now().astimezone():%Y%m%d}" if mock_source else ""))
@@ -591,34 +591,48 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             raise HTTPException(404, "未配置模拟项目文件夹。")
         return open_mock_folder(mock_catalog.project_directory(body.path), body.name or "", request, body.path)
 
-    def require_mock_upload(request: Request) -> str:
+    def require_local_mock_request(request: Request) -> str:
         if not mock_uploads:
             raise HTTPException(404, "S3 mock 上传未启用。")
+        try:
+            if not request.client or not ipaddress.ip_address(request.client.host).is_loopback:
+                raise HTTPException(403, "本机上传程序只接受本机访问。")
+        except ValueError as error:
+            raise HTTPException(403, "本机上传程序只接受本机访问。") from error
         user = getattr(request.state, "user", None)
-        if not user or not auth.can_upload(user["id"]):
-            raise HTTPException(403, "管理员尚未开放此账号的上传权限。")
+        if not user:
+            raise HTTPException(401, "请先登录。")
         return user["id"]
+
+    def require_mock_upload(request: Request) -> str:
+        user_id = require_local_mock_request(request)
+        if not auth.can_upload(user_id):
+            raise HTTPException(403, "管理员尚未开放此账号的上传权限。")
+        return user_id
+
+    @app.post("/api/mock-s3/uploads/pick")
+    def pick_mock_upload_files(request: Request):
+        user_id = require_mock_upload(request)
+        paths = choose_local_paths(root, "capture_avi")
+        return mock_uploads.select_local(user_id, paths) if paths else Response(status_code=204)
 
     @app.post("/api/mock-s3/uploads")
     def start_mock_upload(body: MockUploadRequest, request: Request):
         require_mock_upload(request)
-        return mock_uploads.start(request.state.user, body.collector_name, body.uploader_name, body.note, body.files)
+        return mock_uploads.start(request.state.user, body.collector_name, body.uploader_name, body.note, body.selection_id)
 
     @app.put("/api/mock-s3/uploads/{upload_id}/files/{index}")
     async def receive_mock_upload(upload_id: str, index: int, request: Request):
-        return await mock_uploads.receive(upload_id, require_mock_upload(request), index, request)
+        require_mock_upload(request)
+        raise HTTPException(410, "原始 AVI 只由上传人电脑上的本机程序读取，不通过网页传输。")
 
     @app.get("/api/mock-s3/uploads/{upload_id}")
     def mock_upload_status(upload_id: str, request: Request):
-        if not mock_uploads:
-            raise HTTPException(404, "S3 mock 上传未启用。")
-        return mock_uploads.status(upload_id, request.state.user["id"])
+        return mock_uploads.status(upload_id, require_local_mock_request(request))
 
     @app.delete("/api/mock-s3/uploads/{upload_id}")
     def abort_mock_upload(upload_id: str, request: Request):
-        if not mock_uploads:
-            raise HTTPException(404, "S3 mock 上传未启用。")
-        return mock_uploads.abort(upload_id, request.state.user["id"])
+        return mock_uploads.abort(upload_id, require_local_mock_request(request))
 
     @app.post("/api/mock-s3/uploads/{upload_id}/finish")
     def finish_mock_upload(upload_id: str, request: Request):

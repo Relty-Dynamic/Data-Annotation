@@ -13,6 +13,7 @@ import time
 import uuid
 from pathlib import Path
 from datetime import datetime
+from typing import Protocol
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -23,6 +24,19 @@ from .service import VIDEO_EXTENSIONS, ProjectService, alignment_warnings, diges
 
 PART = re.compile(r"[\w.-]{1,120}\Z")
 VIDEO_SUFFIXES = VIDEO_EXTENSIONS
+
+
+def file_sha256(path: Path) -> str:
+    checksum = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
+class CaptureTarget(Protocol):
+    def capture_exists(self, prefix: str) -> bool: ...
+    def publish_capture(self, prefix: str, prepared: Path, manifest: dict, service: ProjectService) -> None: ...
 
 
 class MockS3Catalog:
@@ -99,6 +113,7 @@ class MockS3Store:
         self.root = root / ".local" / "mock-s3"
         self.objects = self.root / "objects"
         self.objects.mkdir(parents=True, exist_ok=True)
+        self.capture_lock = threading.RLock()
         secret_path = self.root / "signing-key"
         try:
             with secret_path.open("xb") as handle:
@@ -138,13 +153,36 @@ class MockS3Store:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def publish_capture(self, prefix: str, prepared: Path, manifest: dict, service: ProjectService) -> None:
+        """Accept only verified playback objects at the mock storage boundary."""
+        target = self._path(f"{prefix}/manifest.json").parent
+        files = manifest.get("files")
+        if (not isinstance(files, list) or not files or manifest.get("prefix") != prefix
+                or any(not isinstance(item, dict) or not isinstance(item.get("key"), str)
+                       or not re.fullmatch(r"FPV/[^/]+\.mp4", item["key"], re.IGNORECASE)
+                       for item in files)):
+            raise HTTPException(422, "压缩文件清单无效，未发布采集目录。")
+        expected = {item["key"] for item in files}
+        if len(expected) != len(files) or {path.relative_to(prepared).as_posix() for path in prepared.rglob("*") if path.is_file()} != expected:
+            raise HTTPException(422, "压缩文件清单与成品不一致，未发布采集目录。")
+        for item in files:
+            video = prepared / item["key"]
+            if (video.is_symlink() or not video.is_file() or video.stat().st_size != item.get("size")
+                    or self._file_digest(video) != item.get("sha256") or service.probe(video)["codec"] != "h264"):
+                raise HTTPException(422, "压缩视频校验失败，未发布采集目录。")
+        (prepared / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        with self.capture_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                raise HTTPException(409, "采集目录已存在，未覆盖已有数据。")
+            os.replace(prepared, target)
+
+    def capture_exists(self, prefix: str) -> bool:
+        return self._path(f"{prefix}/manifest.json").parent.exists()
+
     @staticmethod
     def _file_digest(path: Path) -> str:
-        checksum = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                checksum.update(chunk)
-        return checksum.hexdigest()
+        return file_sha256(path)
 
     def put_submission(self, project_id: str, save_id: str, documents: dict[str, bytes], prefix: str = "") -> list[str]:
         keys = [(f"{prefix}/timeline/{filename_for_axis(axis)}" if prefix else
@@ -228,18 +266,19 @@ class MockS3Store:
 
 
 class MockUploadManager:
-    """Stream browser files into isolated staging, then publish only compressed FPV objects."""
+    """Receive source AVI on the uploader computer and hand only MP4 to the object store."""
 
     MAX_FILES = 1000
     MAX_FILE_BYTES = 16 * 1024**3
     MAX_TOTAL_BYTES = 100 * 1024**3
 
-    def __init__(self, store: MockS3Store):
+    def __init__(self, store: CaptureTarget, staging: Path):
         self.store = store
-        self.staging = store.root / "staging"
+        self.staging = staging
         self.staging.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
+        self.selections: dict[str, dict] = {}
 
     @staticmethod
     def _relative_path(value: str) -> tuple[str, bool]:
@@ -254,8 +293,59 @@ class MockUploadManager:
             return "FPV/" + source.stem + ".mp4", True
         raise HTTPException(422, "AVI 须来自 video 或 FPV 子目录，或直接选择视频文件。")
 
+    def select_local(self, user_id: str, paths: list[str]) -> dict:
+        """Keep native-picker paths server-side; the browser receives only names and a token."""
+        if not paths or len(paths) > self.MAX_FILES:
+            raise HTTPException(422, "请选择 1 到 1000 个 AVI 视频。")
+        files, outputs, total, parent = [], set(), 0, None
+        for raw in paths:
+            source = Path(raw).expanduser()
+            try:
+                if source.is_symlink() or not source.is_file():
+                    raise HTTPException(422, "所选视频不存在或是文件链接，请重新选择。")
+                source = source.resolve(strict=True)
+                stat = source.stat()
+            except OSError as error:
+                raise HTTPException(409, "采集设备已断开或视频不可读，请重新选择。") from error
+            if source.parent.name.casefold() != "video" or (parent is not None and source.parent != parent):
+                raise HTTPException(422, "请在同一个 video 文件夹中选择本次采集的 AVI。")
+            parent = source.parent
+            output, _ = self._relative_path(f"video/{source.name}")
+            if output.casefold() in outputs:
+                raise HTTPException(409, "压缩后的文件名重复，请先整理采集目录。")
+            outputs.add(output.casefold())
+            if not 0 < stat.st_size <= self.MAX_FILE_BYTES:
+                raise HTTPException(422, "所选视频大小无效或超过单文件上限。")
+            total += stat.st_size
+            files.append({"source": str(source), "name": source.name, "size": stat.st_size,
+                          "mtime_ns": stat.st_mtime_ns, "device": stat.st_dev, "inode": stat.st_ino,
+                          "output": output,
+                          "date": parse_recording_start(source.name).strftime("%Y%m%d")})
+        if total > self.MAX_TOTAL_BYTES:
+            raise HTTPException(422, "所选视频总量超过上限。")
+        ident = uuid.uuid4().hex
+        with self.lock:
+            self.selections = {key: value for key, value in self.selections.items()
+                               if time.time() - value["selected_at"] < 3600}
+            self.selections[ident] = {"owner": user_id, "files": files, "selected_at": time.time()}
+        return {"selection_id": ident, "files": [{"name": item["name"], "size": item["size"]} for item in files],
+                "capture_date": min(item["date"] for item in files)}
+
+    @staticmethod
+    def _check_local_source(record: dict) -> Path:
+        source = Path(record["source"])
+        try:
+            stat = source.stat()
+        except OSError as error:
+            raise HTTPException(409, "采集设备已断开或视频不可读，请重新连接后重试。") from error
+        if (source.is_symlink() or not source.is_file() or stat.st_size != record["size"]
+                or stat.st_mtime_ns != record["mtime_ns"] or stat.st_dev != record["device"]
+                or stat.st_ino != record["inode"]):
+            raise HTTPException(409, "所选 AVI 已变化，请重新选择后上传。")
+        return source
+
     def start(self, user: dict, collector_name: str, uploader_name: str | None,
-              note: str | None, files: list[dict]) -> dict:
+              note: str | None, selection_id: str) -> dict:
         collector_name = collector_name.strip()
         uploader_name = (uploader_name or "").strip() or user["display_name"]
         note = (note or "").strip() or None
@@ -266,45 +356,35 @@ class MockUploadManager:
             raise HTTPException(422, "上传人姓名无效。")
         if note and (len(note) > 500 or any(ord(char) < 32 and char not in "\n\r\t" for char in note)):
             raise HTTPException(422, "备注无效或超过 500 字。")
-        if not files or len(files) > self.MAX_FILES:
-            raise HTTPException(422, "请选择 1 到 1000 个文件。")
-        records, outputs, total, dates = [], set(), 0, []
-        for index, item in enumerate(files):
-            if not isinstance(item, dict) or not isinstance(item.get("path"), str) or type(item.get("size")) is not int:
-                raise HTTPException(422, "上传文件清单无效。")
-            size = item["size"]
-            if not 0 < size <= self.MAX_FILE_BYTES:
-                raise HTTPException(422, "上传文件大小无效或超过单文件上限。")
-            total += size
-            output, video = self._relative_path(item["path"])
-            if output.casefold() in outputs:
-                raise HTTPException(409, "压缩后的文件名重复，请先整理采集目录。")
-            outputs.add(output.casefold())
-            if video:
-                dates.append(parse_recording_start(Path(item["path"]).name).strftime("%Y%m%d"))
-            records.append({"index": index, "path": item["path"], "output": output, "size": size,
-                            "video": video, "received": False})
-        if not dates or total > self.MAX_TOTAL_BYTES:
-            raise HTTPException(422, "须包含 FPV 视频，且上传总量不得超过上限。")
-        capture_date = min(dates)
+        with self.lock:
+            selection = self.selections.get(selection_id)
+        if not selection or selection["owner"] != user["id"] or time.time() - selection["selected_at"] >= 3600:
+            raise HTTPException(404, "视频选择已失效，请重新选择。")
+        records = [{"index": index, "path": f"video/{item['name']}", **item}
+                   for index, item in enumerate(selection["files"])]
+        for record in records:
+            self._check_local_source(record)
+        capture_date = min(item["date"] for item in records)
         datetime.strptime(capture_date, "%Y%m%d")
         folder = f"{capture_date[4:]}{collector_name}"
         prefix = f"daily/{capture_date}/{folder}"
         with self.lock:
-            if (self.store.objects / prefix).exists():
+            if self.store.capture_exists(prefix):
                 raise HTTPException(409, "此采集日期和个人文件夹已存在，不能覆盖已有素材或标注。")
-            if any(job["prefix"] == prefix and job["state"] in {"receiving", "compressing"}
+            if any(job["prefix"] == prefix and job["state"] in {"ready_to_compress", "compressing"}
                    for job in self.jobs.values()):
                 raise HTTPException(409, "此采集目录已有上传任务。")
-            if shutil.disk_usage(self.staging).free < total + 512 * 1024**2:
-                raise HTTPException(507, "本机空间不足，无法暂存待压缩文件。")
+            if shutil.disk_usage(self.staging).free < 512 * 1024**2:
+                raise HTTPException(507, "本机空间不足，无法生成压缩视频。")
             ident = uuid.uuid4().hex
-            (self.staging / ident / "incoming").mkdir(parents=True)
+            (self.staging / ident).mkdir(parents=True)
             job = {"id": ident, "owner": user["id"], "prefix": prefix, "records": records,
                    "capture_date": capture_date, "collector_name": collector_name,
                    "uploader_name": uploader_name, "uploaded_by_username": user["username"], "note": note,
-                   "state": "receiving", "progress": 0, "detail": "等待上传文件。", "updated_at": time.time()}
+                   "state": "ready_to_compress", "progress": 0,
+                   "detail": "已选择本机 AVI，等待压缩。", "updated_at": time.time()}
             self.jobs[ident] = job
+            self.selections.pop(selection_id, None)
         return self.status(ident, user["id"])
 
     def _job(self, ident: str, user_id: str) -> dict:
@@ -321,72 +401,45 @@ class MockUploadManager:
                     "progress": job["progress"], "detail": job["detail"],
                     "collector_name": job["collector_name"], "uploader_name": job["uploader_name"],
                     "uploaded_by_username": job["uploaded_by_username"], "note": job["note"],
-                    "received": sum(record["received"] for record in job["records"]),
+                    "selected": len(job["records"]),
                     "total": len(job["records"])}
-
-    async def receive(self, ident: str, user_id: str, index: int, request) -> dict:
-        job = self._job(ident, user_id)
-        with self.lock:
-            if job["state"] != "receiving" or not 0 <= index < len(job["records"]):
-                raise HTTPException(409, "上传任务状态不允许接收此文件。")
-            record = job["records"][index]
-            if record["received"] or record.get("receiving"):
-                raise HTTPException(409, "此文件已经上传或正在上传。")
-            record["receiving"] = True
-        target = self.staging / ident / "incoming" / str(index)
-        temporary = target.with_suffix(".partial")
-        written = 0
-        try:
-            with temporary.open("xb") as handle:
-                async for chunk in request.stream():
-                    written += len(chunk)
-                    if written > record["size"]:
-                        raise HTTPException(422, "上传文件超过申报大小。")
-                    handle.write(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if written != record["size"]:
-                raise HTTPException(422, "上传文件不完整。")
-            os.replace(temporary, target)
-            with self.lock:
-                record["received"] = True
-                count = sum(item["received"] for item in job["records"])
-                job.update(progress=round(count / len(job["records"]) * 50, 1),
-                           detail=f"已接收 {count}/{len(job['records'])} 个文件。", updated_at=time.time())
-        finally:
-            temporary.unlink(missing_ok=True)
-            with self.lock:
-                record["receiving"] = False
-        return self.status(ident, user_id)
 
     def abort(self, ident: str, user_id: str) -> dict:
         job = self._job(ident, user_id)
         with self.lock:
-            if job["state"] not in {"receiving", "error"} or any(item.get("receiving") for item in job["records"]):
+            if job["state"] not in {"ready_to_compress", "error"}:
                 raise HTTPException(409, "正在压缩或已发布的采集目录不能取消。")
             self.jobs.pop(ident, None)
         shutil.rmtree(self.staging / ident, ignore_errors=True)
         return {"ok": True}
 
+    def _progress(self, job: dict, index: int, percent: float) -> None:
+        bounded = max(0, min(100, percent))
+        with self.lock:
+            job.update(progress=round((index - 1 + bounded / 100) / len(job["records"]) * 99, 1),
+                       detail=f"正在压缩第 {index}/{len(job['records'])} 个视频。", updated_at=time.time())
+
     def finish(self, ident: str, user_id: str, service: ProjectService, can_upload) -> dict:
         job = self._job(ident, user_id)
         with self.lock:
-            if job["state"] != "receiving" or not all(item["received"] for item in job["records"]):
-                raise HTTPException(409, "仍有文件未上传完毕。")
-            job.update(state="compressing", detail="正在压缩 FPV 视频并核对文件。")
+            if job["state"] not in {"ready_to_compress", "error"}:
+                raise HTTPException(409, "上传任务当前不能开始压缩。")
+            job.update(state="compressing", detail="正在本机压缩 FPV 视频并核对文件。")
         workspace = self.staging / ident
         publish = workspace / "publish"
-        publish.mkdir()
         try:
+            workspace.mkdir(parents=True, exist_ok=True)
+            publish.mkdir()
             for count, record in enumerate(job["records"], 1):
                 if not can_upload(user_id):
                     raise HTTPException(403, "上传权限已关闭，未发布数据。")
-                source = workspace / "incoming" / str(record["index"])
+                source = self._check_local_source(record)
                 target = publish / record["output"]
                 target.parent.mkdir(parents=True, exist_ok=True)
-                self._compress_video(service, source, target)
+                self._compress_video(service, source, target, lambda percent, index=count: self._progress(job, index, percent))
+                self._check_local_source(record)
                 with self.lock:
-                    job.update(progress=round(50 + count / len(job["records"]) * 49, 1),
+                    job.update(progress=round(count / len(job["records"]) * 99, 1),
                                detail=f"已处理 {count}/{len(job['records'])} 个文件。")
             manifest = {"schema_version": 1, "prefix": job["prefix"], "uploaded_by": user_id,
                         "uploaded_by_username": job["uploaded_by_username"],
@@ -395,15 +448,10 @@ class MockUploadManager:
                         "created_at": now(), "video_profile": "playback-480x270-256k32k-v1",
                         "files": [{"source": item["path"], "key": item["output"],
                                    "size": (publish / item["output"]).stat().st_size,
-                                   "sha256": self.store._file_digest(publish / item["output"])} for item in job["records"]]}
-            (publish / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+                                   "sha256": file_sha256(publish / item["output"])} for item in job["records"]]}
             if not can_upload(user_id):
                 raise HTTPException(403, "上传权限已关闭，未发布数据。")
-            final = self.store.objects / job["prefix"]
-            final.parent.mkdir(parents=True, exist_ok=True)
-            if final.exists():
-                raise HTTPException(409, "采集目录已存在，未覆盖已有数据。")
-            os.replace(publish, final)
+            self.store.publish_capture(job["prefix"], publish, manifest, service)
             with self.lock:
                 job.update(state="ready", progress=100, detail="压缩文件已发布到 S3 mock。")
             return self.status(ident, user_id)
@@ -416,7 +464,7 @@ class MockUploadManager:
             shutil.rmtree(workspace, ignore_errors=True)
 
     @staticmethod
-    def _compress_video(service: ProjectService, source: Path, target: Path) -> None:
+    def _compress_video(service: ProjectService, source: Path, target: Path, update) -> None:
         ffmpeg = service.tool("ffmpeg")
         if not ffmpeg:
             raise HTTPException(503, "缺少 FFmpeg，无法上传压缩视频。")
@@ -431,7 +479,7 @@ class MockUploadManager:
                 "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-c:a", "aac", "-b:a", "32k",
                 "-movflags", "+faststart", str(target)]
         try:
-            run_ffmpeg(args, duration, target.with_suffix(".ffmpeg.log"), lambda _: None, threading.Event())
+            run_ffmpeg(args, duration, target.with_suffix(".ffmpeg.log"), update, threading.Event())
             rendered = service.probe(target)
             if abs(rendered["duration_ms"] - duration) > 250 or abs(rendered["media_start_seconds"]) >= .001:
                 raise HTTPException(422, "压缩视频时长或起点校验失败，未发布采集目录。")

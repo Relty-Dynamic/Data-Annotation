@@ -18,7 +18,9 @@ function run(argv) {
     try {
         var selected = argv[0] === "directory"
             ? [app.chooseFolder({withPrompt: "选择原视频目录（原视频保留在此处）"})]
-            : app.chooseFile({withPrompt: "选择视频（直接读取，不复制）", multipleSelectionsAllowed: true});
+            : app.chooseFile({withPrompt: argv[0] === "capture_avi"
+                ? "进入采集设备的 video 文件夹，选择本次采集的 AVI"
+                : "选择视频（直接读取，不复制）", multipleSelectionsAllowed: true});
         if (!Array.isArray(selected)) selected = [selected];
         return JSON.stringify({paths: selected.map(function(item) { return item.toString(); })});
     } catch (error) {
@@ -33,7 +35,7 @@ def native_picker_available() -> bool:
 
 
 def choose_local_paths(root: Path, kind: str) -> list[str]:
-    if kind not in {"files", "directory"}:
+    if kind not in {"files", "directory", "capture_avi"}:
         raise HTTPException(422, "请选择视频文件或目录。")
     if not native_picker_available():
         raise HTTPException(503, "当前系统不支持本机选择窗口，请填写素材完整路径。")
@@ -90,8 +92,11 @@ def _dialog(kind: str, result_path: Path) -> None:
             selected = filedialog.askdirectory(parent=window, title="选择原视频目录（原视频保留在此处）", mustexist=True)
             paths = [selected] if selected else []
         else:
-            paths = list(filedialog.askopenfilenames(parent=window, title="选择视频（直接读取，不复制）",
-                filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.webm *.m4v *.mts *.m2ts *.mpg *.mpeg *.wmv"), ("所有文件", "*.*")]))
+            capture = kind == "capture_avi"
+            paths = list(filedialog.askopenfilenames(parent=window,
+                title="进入采集设备的 video 文件夹，选择本次采集的 AVI" if capture else "选择视频（直接读取，不复制）",
+                filetypes=[("AVI 视频", "*.avi"), ("所有文件", "*.*")] if capture else
+                    [("视频文件", "*.mp4 *.avi *.mov *.mkv *.webm *.m4v *.mts *.m2ts *.mpg *.mpeg *.wmv"), ("所有文件", "*.*")]))
         result = {"paths": paths}
     except Exception:
         result = {"error": True}
