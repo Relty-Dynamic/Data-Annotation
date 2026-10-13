@@ -27,6 +27,7 @@ from .previews import PreviewManager, PreviewSpec, run_ffmpeg
 from .project_storage import ProjectStorage, import_name, checked_tree, link_copy
 from .source_cache import SourceCache, CACHE_FOLDER, check_plain_tree, local_nas_root
 from .session_cache import SessionCache
+from .desktop_cache import DesktopCache, collection_name
 from .remote import RemoteClient
 from .storyboards import StoryboardCache
 from .video_selection import active_videos, skipped_videos
@@ -410,6 +411,7 @@ class ProjectService:
         self.source_cache = SourceCache()
         self.storyboards = StoryboardCache(self.cache, self.storage.root)
         self.previews = PreviewManager(self.render_preview)
+        self.desktop_cache = DesktopCache(self)
         self.sessions = SessionCache(self)
         self.remote = RemoteClient.from_root(self.root) if enable_remote else None
         with self.connection() as con:
@@ -434,6 +436,7 @@ class ProjectService:
             con.close()
 
     def save(self, project: dict) -> None:
+        project.setdefault('collection_folder_name', collection_name(project))
         with self.connection() as con:
             con.execute("INSERT INTO projects VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_key=excluded.source_key, document=excluded.document, updated_at=excluded.updated_at", (project["id"], project.get("_source_key"), json.dumps(project, ensure_ascii=False), project["updated_at"]))
 
@@ -443,12 +446,14 @@ class ProjectService:
         if not row:
             raise HTTPException(404, "找不到这个标注项目。")
         project = json.loads(row[0])
+        project.setdefault('collection_folder_name', collection_name(project))
         if project.get("_deleting") and not allow_deleting:
             raise HTTPException(409, "项目正在删除，若清理未完成请重试删除。")
         return project
 
     def public(self, project: dict) -> dict:
         result = {key: value for key, value in project.items() if not key.startswith("_")}
+        result["collection_folder_name"] = collection_name(project)
         result["videos"] = active_videos(project)
         result["skipped_videos"] = skipped_videos(project)
         result["deletion_pending"] = bool(project.get("_deleting"))
@@ -863,6 +868,7 @@ class ProjectService:
         try:
             # Stop local writers before removing only their managed playback tree.
             self.sessions.invalidate(ident)
+            self.desktop_cache.clear(project, documents)
             directory = playback_directory()
             if directory.exists():
                 shutil.rmtree(directory)

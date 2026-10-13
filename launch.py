@@ -100,6 +100,7 @@ def main():
     if not AuthStore(auth_root).has_admin():
         command = "python -m backend.auth --root .local/s3-mock-app" if mock_mode else "python -m backend.auth"
         raise RuntimeError(f"尚未创建管理员账号。请先在项目虚拟环境运行 {command}，然后重启平台。")
+    os.environ["DATAMARK_DESKTOP_CACHE"] = "1"
     current = health()
     if current and current.get("application") == "datamark" and "account-login" not in current.get("capabilities", []):
         raise RuntimeError("端口 8765 仍由旧版无登录服务占用。请先关闭旧平台的所有网页，等待服务退出后重新启动。")

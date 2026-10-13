@@ -314,7 +314,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     const viewport = tracksViewportRef.current;
     if (viewport && Math.abs(viewport.scrollLeft - left) > 0.5) viewport.scrollLeft = left;
     // Move and clip overlays together before React paints the new scroll state.
-    if (overlaysRef.current) overlaysRef.current.style.left = `${GUTTER + left}px`;
+    if (overlaysRef.current) overlaysRef.current.style.left = `${GUTTER}px`;
     if (overlayContentRef.current) overlayContentRef.current.style.transform = `translateX(${-left}px)`;
     setScrollX(left);
     setHoverTime(null);
@@ -543,12 +543,13 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
         </div>
         <span className="tl-screen-duration" title={`无视频间隔已压缩，悬停查看实际起止时间；每屏录制时间约 ${formatTime(visibleDuration)}；普通滚轮上下滚动，Alt + 滚轮左右浏览，Ctrl + 滚轮缩放`}>录制 {Math.abs(visibleDuration - HOUR_MS) < 1 ? '1小时' : rulerTime(visibleDuration)}</span>
       </header>
-      <div className="tl-scroll" ref={scrollRef} onPointerDownCapture={(event) => {
+      <div className="tl-body" onMouseMove={showHoverTime} onMouseLeave={() => setHoverTime(null)} onPointerDownCapture={(event) => {
         // Capture runs before scrub/segment handlers; toolbar buttons live outside this surface.
         const axis = event.target instanceof Element && event.target.closest('.tl-row, .tl-playhead-handle');
         if (selectedRange && event.button === 0 && event.isPrimary && axis) onRangeDismiss?.();
-      }} onScroll={(event) => syncHorizontalScroll(event.currentTarget.scrollLeft)}>
-        <div className="tl-content" onMouseMove={showHoverTime} onMouseLeave={() => setHoverTime(null)} style={{ width: contentWidth + scrollbarWidth, '--tl-gutter': `${GUTTER}px` } as CSSProperties}>
+      }}>
+      <div className="tl-scroll" ref={scrollRef} onScroll={(event) => syncHorizontalScroll(event.currentTarget.scrollLeft)}>
+        <div className="tl-content" style={{ width: contentWidth + scrollbarWidth, '--tl-gutter': `${GUTTER}px` } as CSSProperties}>
           <div className="tl-fixed-tracks" style={{ width: contentWidth }}>
           <div className="tl-row tl-ruler-row">
             <div className="tl-gutter tl-ruler-gutter">全局时间</div>
@@ -628,7 +629,9 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
               })}
             </div>
           </div>
-          <div className="tl-overlays" ref={overlaysRef} style={{ left: GUTTER + scrollX, width: visibleAxisWidth }}>
+        </div>
+      </div>
+          <div className="tl-overlays" ref={overlaysRef} style={{ left: GUTTER, width: visibleAxisWidth }}>
           <div className="tl-overlays-content" ref={overlayContentRef} style={{ transform: `translateX(${-scrollX}px)` }}>
           {rangeEnd > rangeStart && <div className="tl-range-overlay" aria-label={`锚点选区 ${formatTime(rangeStart)} 到 ${formatTime(rangeEnd)}`} style={{
             left: pixelAt(rangeStart),
@@ -646,7 +649,6 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
           </div>
           </div>
           </div>
-        </div>
       </div>
       {hoverTime && createPortal(<div
         className="tl-hover-tooltip"

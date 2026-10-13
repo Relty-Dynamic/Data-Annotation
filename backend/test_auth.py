@@ -226,6 +226,22 @@ class AccountAccessTests(unittest.TestCase):
         migrated.set_fixed_track_template_visible(self.annotator["id"], "habit", False)
         self.assertNotIn("habit", AuthStore(self.root).visible_fixed_track_templates(self.annotator["id"]))
 
+    def test_cache_collection_setting_preserves_project_permissions_and_csrf(self):
+        csrf = self.login("worker", "another long safe password")
+        path = f"/api/projects/{self.project['id']}/cache-collection"
+        body = {"name": "1010zengl", "expected_revision": 0}
+        self.assertEqual(self.client.put(path, json=body, headers={"X-CSRF-Token": csrf}).status_code, 403)
+        self.auth.assign(self.project['id'], self.annotator['id'])
+        self.assertEqual(self.client.put(path, json=body).status_code, 403)
+        invalid = self.client.put(path, json={**body, "name": "../escape"}, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(invalid.status_code, 422)
+        changed = self.client.put(path, json=body, headers={"X-CSRF-Token": csrf})
+        self.assertEqual(changed.status_code, 200, changed.text)
+        self.assertEqual(changed.json()['collection_folder_name'], '1010zengl')
+        self.assertEqual(changed.json()['annotations'], self.project['annotations'])
+        self.assertEqual(self.client.put(path, json=body, headers={"X-CSRF-Token": csrf}).status_code, 409)
+        self.assertEqual(self.client.put('/api/cache-location', json={'root': '/tmp/unexpected'}, headers={"X-CSRF-Token": csrf}).status_code, 403)
+
     def test_admin_controls_accounts_and_assignments(self):
         csrf = self.login("admin", "correct horse battery staple")
         users = self.client.get("/api/users")

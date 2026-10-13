@@ -598,3 +598,5 @@ html, body, #root { background: var(--bg); }
 .fixed-template-delete { min-width: 30px; border-left: 1px solid #405563; color: #e9aca4; }
 .fixed-template-delete:hover:not(:disabled) { background: #4b2b31; }
 .hidden-fixed-templates { align-items: center; }
+.cache-location-dialog[open] { display:flex; flex-direction:column; gap:14px; }
+.cache-location-dialog label { display:flex; flex-direction:column; gap:8px; }

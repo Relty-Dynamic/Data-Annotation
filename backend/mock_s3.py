@@ -262,7 +262,22 @@ class MockS3Store:
                            "fast_url": asset("fast", "fast.mp4"),
                            "thumbnail_url": asset("thumbnail", "thumbnail.jpg"),
                            "storyboard": {**video["storyboard"], "sheets": sheets}})
-        return {**manifest, "videos": videos}
+        mapping = {}
+        for old, new in zip(manifest['videos'], videos):
+            mapping.update({old['url']: new['url'], old['fast_url']: new['fast_url'], old['thumbnail_url']: new['thumbnail_url']})
+            mapping.update(zip(old['storyboard']['sheets'], new['storyboard']['sheets']))
+        downloads = []
+        normal_paths = {video['url']: self._path(f"{project['_mock_s3_key']}/{relative_paths[video['id']]}")
+                        for video in manifest['videos']} if project.get('_mock_s3_uploaded') else {}
+        for item in manifest.get('assets', []):
+            fresh = {**item, 'url': mapping[item['url']]}
+            if item['url'] in normal_paths:
+                path = normal_paths[item['url']]
+                checksum = file_sha256(path)
+                fresh.update(size=path.stat().st_size, sha256=checksum,
+                             file_name=item['file_name'].replace(item['sha256'], checksum))
+            downloads.append(fresh)
+        return {**manifest, "videos": videos, "assets": downloads}
 
 
 class MockUploadManager:
@@ -438,6 +453,8 @@ class MockUploadManager:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 self._compress_video(service, source, target, lambda percent, index=count: self._progress(job, index, percent))
                 self._check_local_source(record)
+                if service.desktop_cache.enabled:
+                    service.desktop_cache.retain_upload(job['prefix'], source.name, target)
                 with self.lock:
                     job.update(progress=round(count / len(job["records"]) * 99, 1),
                                detail=f"已处理 {count}/{len(job['records'])} 个文件。")

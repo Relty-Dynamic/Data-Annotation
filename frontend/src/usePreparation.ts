@@ -62,15 +62,11 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
             (status.items.length > 0 && status.items.some(item => !manifest.videos.some(video => video.id === item.video_id)))) {
             throw new Error('播放素材列表不完整，请重新准备。');
           }
-          await prepareSessionAssets(id, manifest, abort.signal, (ready, total) => {
-            publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
-              detail: '正在载入预览图片 ' + ready + ' / ' + total});
-          });
-          if (downloadVideos) {
+          if (downloadVideos && manifest.cache_location?.mode !== 'native') {
             try {
               await prepareBrowserVideos(id, manifest, abort.signal, (ready, total) => {
                 publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
-                  detail: '正在下载精简视频到此电脑 ' + ready + ' / ' + total});
+                  detail: '正在保存视频和预览图到缓存目录 ' + ready + ' / ' + total});
               });
               const confirmed = await authFetch('/api/projects/' + id + '/session/browser-ready', {
                 method: 'POST', cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]),
@@ -81,6 +77,10 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
               }
             } catch (error) { localCacheFailed = true; throw error; }
           }
+          await prepareSessionAssets(id, manifest, abort.signal, (ready, total) => {
+            publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
+              detail: '正在载入预览图片 ' + ready + ' / ' + total});
+          });
           if (!stopped) publish({...status, state: 'ready', checking: false, stage: 'ready', progress: 100}, manifest);
           return;
         }

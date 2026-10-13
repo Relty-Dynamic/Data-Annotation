@@ -36,6 +36,11 @@
 .prep-close:hover { background: #29343f; color: #dce5ed; }
 .prep-main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #475563 transparent; }
 .prep-overview { padding: 20px 24px 15px; flex: none; }
+.prep-cache-location { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; padding: 12px 14px; border: 1px solid #354650; border-radius: 8px; background: #1b2831; }
+.prep-cache-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.prep-cache-label { font-size: 11px; line-height: 1.4; color: #91a9b8; }
+.prep-cache-path { font-size: 12px; line-height: 1.6; color: #d0dfe5; overflow-wrap: anywhere; }
+.prep-cache-location > button { flex: none; white-space: nowrap; padding: 6px 12px; font-size: 12px; }
 .prep-project-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
 .prep-project-name { min-width: 0; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #bfd0db; }
 .prep-phase { flex: none; font-size: 10px; color: #98b0c0; background: #24313d; border: 1px solid #344957; border-radius: 4px; padding: 4px 7px; }

@@ -38,6 +38,8 @@ export type PreparePanelProps = {
   status: PreparationStatus | null;
   error: string;
   onRetry: () => void;
+  onCacheLocation?:()=>void;
+  cacheLocation?:string;
   onEnter: () => void;
   onClose: () => void;
   busy: boolean;
@@ -70,7 +72,7 @@ const ITEM_LABELS: Record<Exclude<ItemState, 'unknown'>, string> = {
   ready: '已就绪', running: '处理中', checking: '检查缓存中', failed: '准备失败', queued: '等待中', paused: '已暂停', idle: '尚未准备',
 };
 
-export default function PreparePanel({ projectName, status, error, onRetry, onEnter, onClose, busy, onSkipFailed, onRestoreSkipped, skippedVideos = [] }: PreparePanelProps) {
+export default function PreparePanel({ projectName, status, error, onRetry, onEnter, onClose, busy, onSkipFailed, onRestoreSkipped, skippedVideos = [], onCacheLocation, cacheLocation }: PreparePanelProps) {
   const [confirmation, setConfirmation] = useState<'skip' | 'restore' | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -106,7 +108,7 @@ export default function PreparePanel({ projectName, status, error, onRetry, onEn
   const retry = preparationRetryAction(status, error);
   const phase = presentation.phase;
   const phaseLabel = presentation.activity;
-  const stageLabels = {prepare: '准备播放素材', browser: '载入预览图片', ready: '开始标注'};
+  const stageLabels = {prepare: '准备播放素材', browser: '保存并载入本机缓存', ready: '开始标注'};
   const title = presentation.title;
   const description = presentation.description;
 
@@ -163,6 +165,10 @@ export default function PreparePanel({ projectName, status, error, onRetry, onEn
 
         <main className="prep-main">
           <section className="prep-overview" aria-label="整体准备进度">
+            {onCacheLocation&&<div className="prep-cache-location">
+              <div className="prep-cache-copy"><span className="prep-cache-label">缓存位置</span><span className="prep-cache-path" title={cacheLocation}>{cacheLocation??'桌面 dataMarkProject / 采集目录；首次使用请授权'}</span></div>
+              <button className="secondary" type="button" onClick={onCacheLocation} aria-label="更改缓存位置">更改</button>
+            </div>}
             <div className="prep-project-row">
               <strong className="prep-project-name" title={projectName}>{projectName}</strong>
               <span className={'prep-phase' + (isReady ? ' is-ready' : '')}>{status?.state === 'partial' ? '部分失败' : phaseLabel}</span>

@@ -45,6 +45,7 @@ export interface ContinuityBridge extends VideoGap {
 }
 
 export interface Project {
+  collection_folder_name?: string;
   storage_mode?: 's3-mock' | 'nas';
   playback_generation?: number;
   id: string;
