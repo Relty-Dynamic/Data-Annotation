@@ -40,6 +40,21 @@ def local_nas_root(*, windows: bool | None = None) -> Path | None:
     return None
 
 
+def local_nas_cache_root() -> Path | None:
+    """Select read-only mounted-cache reuse, including explicit local NAS servers.
+
+    A production NAS server keeps publishing its own caches. A locally started
+    NAS UI opts into downloading another server's caches by setting the local
+    mount explicitly; the Windows default alone must not change NAS ownership.
+    """
+    storage = os.getenv("DATAMARK_STORAGE_BACKEND", "local")
+    if storage == "local":
+        return local_nas_root()
+    if storage == "nas" and os.getenv("DATAMARK_LOCAL_NAS_ROOT", "").strip():
+        return local_nas_root()
+    return None
+
+
 def is_reparse(path: Path) -> bool:
     try:
         return path.is_symlink() or bool(path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT) if os.name == "nt" else path.is_symlink()

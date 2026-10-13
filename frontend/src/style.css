@@ -5,3 +5,10 @@
 
 .import-modal{max-height:92vh;overflow-y:auto}.modal-backdrop{overflow-y:auto}.workspace-title p{line-height:1.6}
 .tl-root { margin-top: 17px; }
+
+.subaxis-control{margin-top:8px;padding:6px 8px;border:1px solid #3b505e;border-radius:7px;background:#172631}
+.subaxis-control label{display:flex;align-items:center;gap:6px;width:fit-content;font-size:12px;line-height:1.5;color:#d5e5ec;cursor:pointer}
+.subaxis-control input{width:13px;height:13px;min-height:0;margin:0;padding:0;accent-color:#83ddca;flex:none}
+.subaxis-control input:disabled{cursor:not-allowed;opacity:.5}
+.subaxis-control p{margin-top:4px;color:#a0b4c0;font-size:11px;line-height:1.5}
+.subaxis-enabled{border-color:#73bcae;background:#1d3437}

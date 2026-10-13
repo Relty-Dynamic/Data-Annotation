@@ -14,7 +14,9 @@ from deploy.migrate_projects import apply_bundle, current_source_fingerprint, ex
 
 class ProjectMigrationTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="datamark-move-")
+        local = Path(__file__).resolve().parents[1] / ".local"
+        local.mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(prefix="datamark-move-", dir=local)
         self.root = Path(self.temp.name)
         self.old = self.root / "old"
         self.new = self.root / "new"
@@ -102,6 +104,7 @@ class ProjectMigrationTests(unittest.TestCase):
         apply_bundle(self.bundle, target, self.mapping)
         with sqlite3.connect(target / "annotations.sqlite3") as con:
             moved = json.loads(con.execute("SELECT document FROM projects WHERE id=?", (self.project_id,)).fetchone()[0])
+        con.close()
         self.assertEqual(moved["custom_tracks"], project["custom_tracks"])
         self.assertEqual(moved["_external_hashes"][axis], project["_external_hashes"][axis])
 

@@ -36,20 +36,18 @@ class FourAxisValidationTests(unittest.TestCase):
         self.assertEqual([record["mode"] for record in result["category"]], ["state", "overlay"])
         self.assertEqual(len(result["category"]), 2)
         annotations["scene"].append(interval("bad", "室外", 300, 600))
-        with self.assertRaises(HTTPException):
-            validate_annotations(annotations, 1000)
+        self.assertEqual([item["lane"] for item in validate_annotations(annotations, 1000)["scene"]], [0, 1])
 
-    def test_every_required_axis_rejects_first_middle_last_or_total_gap_only_at_export(self):
-        for axis in ("scene", "posture"):
+    def test_every_axis_allows_first_middle_last_or_total_gap_at_export(self):
+        for axis in ("scene", "posture", "category"):
             for spans in ([], [(1, 1000)], [(0, 999)], [(0, 400), (401, 1000)]):
                 with self.subTest(axis=axis, spans=spans):
                     annotations = self.full()
                     label = annotations[axis][0]["label"]
                     annotations[axis] = [interval(str(i), label, start, end) for i, (start, end) in enumerate(spans)]
                     validate_annotations(annotations, 1000)
-                    with self.assertRaises(HTTPException) as error:
-                        validate_annotations(annotations, 1000, final=True)
-                    self.assertEqual(error.exception.status_code, 422)
+                    result = validate_annotations(annotations, 1000, final=True)
+                    self.assertEqual([(item["start_ms"], item["end_ms"]) for item in result[axis]], spans)
 
     def test_optional_category_allows_first_middle_last_or_total_gaps_without_filling(self):
         for spans in ([], [(1, 1000)], [(0, 999)], [(0, 400), (401, 1000)]):
@@ -59,7 +57,7 @@ class FourAxisValidationTests(unittest.TestCase):
                                            for i, (start, end) in enumerate(spans)]
                 original = copy.deepcopy(annotations)
                 result = validate_annotations(annotations, 1000, final=True)
-                self.assertEqual(result, original)
+                self.assertEqual(result, {axis: [{**item, "lane": 0} for item in records] for axis, records in original.items()})
                 self.assertEqual(annotations, original)
 
     def test_coverage_ignores_real_video_gaps_but_category_cannot_cross_them(self):
@@ -97,20 +95,25 @@ class FourAxisValidationTests(unittest.TestCase):
         result = validate_annotations(legacy, 1000)
         self.assertEqual(legacy, original)
         self.assertEqual(result["category"], [])
-        self.assertEqual(result["scene"], legacy["scene"])
-        with self.assertRaises(HTTPException):
-            validate_annotations(legacy, 1000, final=True)
+        self.assertEqual(result["scene"], [{**item, "lane": 0} for item in legacy["scene"]])
+        self.assertEqual(validate_annotations(legacy, 1000, final=True), result)
 
     def test_adjacent_category_records_preserve_distinct_modes_and_ids(self):
         annotations = self.full()
         annotations["category"] = [interval("a", "专注", 0, 500), interval("b", "专注", 500, 1000, mode="overlay")]
         self.assertEqual([r["id"] for r in validate_annotations(annotations, 1000, final=True)["category"]], ["a", "b"])
 
-    def test_touching_state_records_keep_distinct_authors(self):
+    def test_touching_state_records_merge_with_first_creator_and_latest_contributor(self):
         annotations = self.full()
-        annotations["scene"] = [interval("a", "室内", 0, 500, created_by="user-a", created_at="2026-09-30T00:00:00Z"),
-                                interval("b", "室内", 500, 1000, created_by="user-b", created_at="2026-09-30T01:00:00Z")]
-        self.assertEqual([item["id"] for item in validate_annotations(annotations, 1000)["scene"]], ["a", "b"])
+        annotations["scene"] = [interval("a", "室内", 0, 500, created_by="user-a", created_by_name="甲", created_at="2026-09-30T00:00:00Z"),
+                                interval("b", "室内", 500, 1000, created_by="user-b", created_by_name="乙", created_at="2026-09-30T01:00:00Z")]
+        original = copy.deepcopy(annotations)
+        result = validate_annotations(annotations, 1000)
+        self.assertEqual(result["scene"], [interval("a", "室内", 0, 1000, lane=0,
+            created_by="user-a", created_by_name="甲", created_at="2026-09-30T00:00:00Z",
+            updated_by="user-b", updated_by_name="乙", updated_at="2026-09-30T01:00:00Z")])
+        self.assertEqual(annotations, original)
+        self.assertEqual(validate_annotations(result, 1000), result)
 
     def test_supplement_splits_category_state_and_overlay_without_labelling_added_frames(self):
         old = {"duration_ms": 2000, "videos": [{"id": "a", "name": "a.mp4", "start_ms": 0, "end_ms": 1000}, {"id": "b", "name": "b.mp4", "start_ms": 1000, "end_ms": 2000}], "annotations": empty_annotations()}
@@ -141,7 +144,13 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertTrue(all(saved["annotations"][axis] == [] for axis in AXES))
         with self.assertRaises(HTTPException):
             self.service.update_draft(project["id"], {**saved["annotations"], "posture": annotations["posture"]}, saved["revision"])
-        self.service.writeback(project["id"])
+        with self.assertRaises(HTTPException):
+            self.service.writeback(project["id"])
+        destination = self.source / "timeline"
+        destination.mkdir()
+        _, documents = self.service.export_documents(self.service.load(project["id"]))
+        for axis, payload in documents.items():
+            (destination / FILENAMES[axis]).write_bytes(payload)
         for axis in AXES:
             document = json.loads((self.source / "timeline" / FILENAMES[axis]).read_bytes())
             self.assertEqual(document["segments"], [])
@@ -150,10 +159,12 @@ class FourAxisPersistenceTests(unittest.TestCase):
         restored, _, _, enabled, _ = self.service.read_external(fresh, include_tracks=True)
         self.assertEqual(enabled, [])
         self.assertTrue(all(restored[axis] == [] for axis in AXES))
+        raw = self.service.load(project["id"])
+        raw["_external_hashes"] = self.service.current_external_hashes(self.source)
+        self.service.save(raw)
         added = self.service.set_fixed_track(project["id"], "posture", True, saved["revision"])
         self.assertEqual(added["fixed_tracks"], ["posture"])
-        with self.assertRaises(HTTPException):
-            self.service.export_zip(project["id"])
+        self.assertTrue(self.service.export_zip(project["id"]))
         self.service.writeback(project["id"])
         self.assertEqual(json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())["segments"], [])
         restored, _ = self.service.read_external(self.service.load(project["id"]))
@@ -161,19 +172,31 @@ class FourAxisPersistenceTests(unittest.TestCase):
 
     def test_track_labels_delete_annotations_and_round_trip_with_stable_json(self):
         project = self.annotated_project()
+        project = self.service.set_track_labels(project["id"], "category",
+            [*project["track_labels"]["category"], "临时活动"], project["revision"])
         annotations = project["annotations"]
-        annotations["category"] = [interval("category", "专注", 0, project["duration_ms"])]
+        annotations["category"] = [interval("category", "临时活动", 0, project["duration_ms"])]
         saved = self.service.update_draft(project["id"], annotations, project["revision"])
-        labels = [value for value in saved["track_labels"]["category"] if value != "专注"] + ["阅读"]
+        labels = [value for value in saved["track_labels"]["category"] if value not in ("临时活动", "专注")] + ["阅读"]
         changed = self.service.set_track_labels(project["id"], "category", labels, saved["revision"])
         self.assertEqual(changed["annotations"]["category"], [])
         self.assertEqual(changed["track_labels"]["category"], labels)
         with self.assertRaises(HTTPException) as stale:
             self.service.set_track_labels(project["id"], "category", labels, saved["revision"])
         self.assertEqual(stale.exception.status_code, 409)
-        with self.assertRaises(HTTPException):
-            self.service.update_draft(project["id"], {**changed["annotations"], "category": annotations["category"]}, changed["revision"])
-        relabeled = self.service.update_draft(project["id"], {**changed["annotations"], "category": [interval("new", "阅读", 0, project["duration_ms"])]}, changed["revision"])
+        for removed_label in ("临时活动", "临时活动（备注）"):
+            with self.subTest(label=removed_label), self.assertRaises(HTTPException) as invalid:
+                self.service.update_draft(project["id"], {**changed["annotations"],
+                    "category": [interval("removed", removed_label, 0, project["duration_ms"])]}, changed["revision"])
+            self.assertEqual(invalid.exception.status_code, 422)
+        # Legacy fixed names stay readable/editable even when current buttons
+        # use the new library names. This exception does not admit removed
+        # user-defined names above.
+        legacy = self.service.update_draft(project["id"], {**changed["annotations"],
+            "category": [interval("legacy", "专注（旧备注）", 0, project["duration_ms"])]}, changed["revision"])
+        self.assertEqual(legacy["annotations"]["category"][0]["label"], "专注（旧备注）")
+        self.assertNotIn("专注", legacy["track_labels"]["category"])
+        relabeled = self.service.update_draft(project["id"], {**legacy["annotations"], "category": [interval("new", "阅读", 0, project["duration_ms"])]}, legacy["revision"])
         save_id, documents = self.service.export_documents(self.service.load(project["id"]), for_writeback=True)
         self.assertTrue(save_id)
         category = json.loads(documents["category"])
@@ -191,8 +214,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         project = self.annotated_project()
         changed = self.service.set_track_labels(project["id"], "posture", ["动", "站", "躺", "蹲"], project["revision"])
         self.assertEqual(changed["annotations"]["posture"], [])
-        with self.assertRaises(HTTPException):
-            self.service.export_zip(project["id"])
+        self.assertTrue(self.service.export_zip(project["id"]))
         self.service.writeback(project["id"])
         self.assertEqual(json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())["segments"], [])
         fresh = ProjectService(self.root / "empty-posture-fresh")
@@ -220,23 +242,13 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual(changed["annotations"][axis], [])
         self.assertEqual(json.loads(self.service.export_documents(self.service.load(project["id"]))[1][axis])["segments"], [])
 
-    def test_custom_track_api_adds_to_project_and_rejects_stale_revision(self):
+    def test_project_custom_track_api_requires_library_workflow(self):
         project = self.annotated_project()
-        with TestClient(create_app(self.root, auth_required=False), base_url="http://127.0.0.1") as client:
+        with TestClient(create_app(self.root, auth_required=False), base_url='http://127.0.0.1') as client:
             path = f"/api/projects/{project['id']}/custom-tracks"
-            body = {"name": "环境", "mode": "state", "labels": ["安静", "嘈杂"],
-                    "expected_revision": project["revision"]}
-            response = client.post(path, json=body)
-            self.assertEqual(response.status_code, 200, response.text)
-            added = response.json()
-            axis = added["custom_tracks"][0]["id"]
-            self.assertEqual(added["annotations"][axis], [])
-            self.assertEqual(client.get(f"/api/projects/{project['id']}").json()["custom_tracks"], added["custom_tracks"])
-            self.assertEqual(client.post(path, json=body).status_code, 409)
-            removed = client.request("DELETE", f"{path}/{axis}", json={"confirmed": True, "expected_revision": added["revision"]})
-            self.assertEqual(removed.status_code, 200, removed.text)
-            self.assertEqual(removed.json()["custom_tracks"], [])
-            self.assertEqual(client.request("DELETE", f"{path}/{axis}", json={"confirmed": True, "expected_revision": removed.json()["revision"]}).status_code, 404)
+            body = {'name': '环境', 'mode': 'state', 'labels': ['安静'], 'expected_revision': project['revision']}
+            self.assertEqual(client.post(path, json=body).status_code, 410)
+            self.assertEqual(self.service.load(project['id']).get('custom_tracks', []), [])
 
     def test_project_custom_state_and_event_tracks_export_writeback_and_reopen(self):
         project = self.annotated_project()
@@ -330,12 +342,12 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual({name: (self.source / "timeline" / name).read_bytes() for name in FILENAMES.values()}, fixed_before)
 
-    def test_custom_state_rejects_unknown_or_overlapping_labels(self):
+    def test_custom_state_rejects_unknown_labels_or_same_lane_overlaps(self):
         project = self.annotated_project()
         project = self.service.add_custom_track(project["id"], "环境", "state", ["安静"], project["revision"])
         axis = project["custom_tracks"][0]["id"]
         for segments in ([interval("bad", "嘈杂", 0, 500)],
-                         [interval("a", "安静", 0, 500), interval("b", "安静", 400, 700)]):
+                         [interval("a", "安静", 0, 500, lane=0), interval("b", "安静", 400, 700, lane=0)]):
             annotations = copy.deepcopy(project["annotations"])
             annotations[axis] = segments
             with self.assertRaises(HTTPException) as error:
@@ -470,7 +482,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         annotations["category"] = copy.deepcopy(category)
         updated = self.service.update_draft(project["id"], annotations, project["revision"])
         expected = updated["annotations"]
-        self.assertEqual(expected["category"], category)
+        self.assertEqual([{key: value for key, value in item.items() if key != "lane"} for item in expected["category"]], category)
         with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
             self.assertEqual(set(archive.namelist()), set(FILENAMES.values()))
             documents = {axis: json.loads(archive.read(FILENAMES[axis])) for axis in AXES}
@@ -507,7 +519,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
             interval("extra", "用餐", 800, 2000, mode="overlay"),
         ])
 
-    def test_missing_posture_blocks_export_but_writes_back_and_reopens_without_filling(self):
+    def test_missing_posture_exports_writes_back_and_reopens_without_filling(self):
         project = self.annotated_project()
         label = project["annotations"]["posture"][0]["label"]
         for partial in (False, True):
@@ -516,10 +528,8 @@ class FourAxisPersistenceTests(unittest.TestCase):
                 annotations["category"] = []
                 annotations["posture"] = [interval("partial", label, 100, 3000)] if partial else []
                 project = self.service.update_draft(project["id"], annotations, project["revision"])
-                with self.assertRaises(HTTPException) as error:
-                    self.service.export_zip(project["id"])
-                self.assertEqual(error.exception.status_code, 422)
-                self.assertIn("姿势轴尚未覆盖", error.exception.detail)
+                self.assertTrue(self.service.export_zip(project["id"]))
+                annotations = project["annotations"]
                 self.service.writeback(project["id"])
                 document = json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())
                 self.assertEqual([(item["start_ms"], item["end_ms"]) for item in document["segments"]],
@@ -533,7 +543,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
                     fresh.previews.close()
                 project = self.service.load(project["id"])
 
-    def test_incomplete_scene_blocks_export_but_writes_back_and_reopens_without_filling(self):
+    def test_incomplete_scene_exports_writes_back_and_reopens_without_filling(self):
         project = self.annotated_project()
         for scene in ([], [interval("partial", "室内", 100, 1500)]):
             with self.subTest(scene=scene):
@@ -541,10 +551,8 @@ class FourAxisPersistenceTests(unittest.TestCase):
                 annotations["scene"] = scene
                 updated = self.service.update_draft(project["id"], annotations, project["revision"])
                 project = updated
-                with self.assertRaises(HTTPException) as error:
-                    self.service.export_zip(project["id"])
-                self.assertEqual(error.exception.status_code, 422)
-                self.assertIn("场景轴尚未覆盖", error.exception.detail)
+                self.assertTrue(self.service.export_zip(project["id"]))
+                scene = updated["annotations"]["scene"]
                 self.service.writeback(project["id"])
                 document = json.loads((self.source / "timeline" / FILENAMES["scene"]).read_bytes())
                 self.assertEqual([(item["start_ms"], item["end_ms"]) for item in document["segments"]],
@@ -566,8 +574,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         updated = self.service.update_draft(project["id"], annotations, project["revision"])
         self.assertEqual(updated["annotations"]["scene"][0]["start_ms"], 1500)
         self.assertEqual(updated["annotations"]["category"], [])
-        with self.assertRaises(HTTPException):
-            self.service.export_zip(project["id"])
+        self.assertTrue(self.service.export_zip(project["id"]))
         self.service.writeback(project["id"])
         self.assertTrue(all((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
 
@@ -730,7 +737,8 @@ class FourAxisPersistenceTests(unittest.TestCase):
                          {axis: None for axis in AXES})
         recovery = self.service.storage.directory(project['id']) / 'recoveries' / f"{reset['recovery_id']}.json"
         self.assertEqual(json.loads(recovery.read_text())['annotations']['scene'], dirty['annotations']['scene'])
-        self.assertEqual(recovery.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(recovery.stat().st_mode & 0o777, 0o600)
         changed = self.service.update_draft(project['id'],
             {**reset['annotations'], 'scene': [interval('new-scene', '室内', 0, reset['duration_ms'])]},
             reset['revision'])

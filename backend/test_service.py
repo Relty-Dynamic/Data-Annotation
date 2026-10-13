@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.testing_annotations import complete_annotations, complete_project
-from backend.service import AXES, FILENAMES, ProjectService, empty_annotations, natural_key, parse_recording_start, recording_layout, validate_annotations
+from backend.service import LEGACY_TRACK_LABELS, AXES, FILENAMES, ProjectService, empty_annotations, natural_key, parse_recording_start, recording_layout, validate_annotations
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,11 +32,10 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 parse_recording_start(name)
 
-    def test_scene_overlap_rejected_habit_overlap_allowed(self):
+    def test_legacy_scene_and_habit_overlap_get_separate_lanes(self):
         annotations = empty_annotations()
         annotations["scene"] = [{"id": "a", "label": "室内", "start_ms": 0, "end_ms": 700}, {"id": "b", "label": "室外", "start_ms": 500, "end_ms": 1000}]
-        with self.assertRaises(HTTPException):
-            validate_annotations(annotations, 1000)
+        self.assertEqual([item["lane"] for item in validate_annotations(annotations, 1000)["scene"]], [0, 1])
         annotations["scene"] = []
         annotations["habit"] = [{"id": "a", "label": "吃饭", "start_ms": 0, "end_ms": 700}, {"id": "b", "label": "看手机", "start_ms": 500, "end_ms": 1000}]
         self.assertEqual(len(validate_annotations(annotations, 1000)["habit"]), 2)
@@ -129,14 +129,14 @@ class ValidationTests(unittest.TestCase):
         ]
         annotations["habit"] = [{**item, "label": "抽烟"} for item in annotations["scene"]]
         result = validate_annotations(annotations, 20364767, videos=videos)
-        self.assertEqual(result["scene"], [{"id": "left", "label": "室内", "kind": "interval", "start_ms": 19165033, "end_ms": 20364767}])
+        self.assertEqual(result["scene"], [{"id": "left", "label": "室内", "kind": "interval", "start_ms": 19165033, "end_ms": 20364767, "lane": 0}])
         self.assertEqual(len(result["posture"]), 2)
         self.assertEqual(len(result["habit"]), 2)
         self.assertEqual(annotations["scene"][0]["end_ms"], 19764766)
         annotations["scene"][0]["end_ms"] -= 1
         self.assertEqual(len(validate_annotations(annotations, 20364767, videos=videos)["scene"]), 2)
 
-    def test_touching_equal_states_merge_but_behavior_events_keep_boundaries(self):
+    def test_touching_equal_states_and_behavior_intervals_merge(self):
         annotations = empty_annotations()
         annotations["scene"] = [
             {"id": "left", "label": "室内", "start_ms": 0, "end_ms": 1000},
@@ -144,8 +144,8 @@ class ValidationTests(unittest.TestCase):
         ]
         annotations["habit"] = [{**item, "label": "抽烟"} for item in annotations["scene"]]
         result = validate_annotations(annotations, 2000)
-        self.assertEqual(result["scene"], [{"id": "left", "label": "室内", "kind": "interval", "start_ms": 0, "end_ms": 2000}])
-        self.assertEqual(len(result["habit"]), 2)
+        self.assertEqual(result["scene"], [{"id": "left", "label": "室内", "kind": "interval", "start_ms": 0, "end_ms": 2000, "lane": 0}])
+        self.assertEqual(result["habit"], [{"id": "left", "label": "抽烟", "kind": "interval", "start_ms": 0, "end_ms": 2000, "lane": 0}])
 
     def test_continuous_annotation_crosses_camera_seam_but_not_real_gap(self):
         videos = self.seam_videos()
@@ -178,9 +178,11 @@ class PersistenceTests(unittest.TestCase):
         open_path = self.service.open_path
         def open_legacy_project(*args, **kwargs):
             result = open_path(*args, **kwargs)
-            if result["revision"] == 0 and result["fixed_tracks"] == ["scene", "posture"]:
+            if result["revision"] == 0 and result["fixed_tracks"] == ["scene", "posture", "category"]:
                 project = self.service.load(result["id"])
                 project["fixed_tracks"] = list(AXES)
+                project["track_labels"] = copy.deepcopy(LEGACY_TRACK_LABELS)
+                project.pop("_library_pending", None)
                 self.service.save(project)
                 return self.service.public(project)
             return result
@@ -332,7 +334,7 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(public["gaps"], [{"start_ms": 1199767, "end_ms": 1260000}])
             self.assertEqual(len(public["recording_runs"]), 2)
             self.assertEqual(len(public["annotations"]["scene"]), 2)
-            self.assertEqual(public["annotations"]["habit"], old_annotations["habit"])
+            self.assertEqual(public["annotations"]["habit"], [{**item, "lane": 0} for item in old_annotations["habit"]])
             _, documents = self.service.export_documents(before)
             exported = json.loads(documents["scene"])
             self.assertEqual(exported["timebase"]["gaps"], public["gaps"])

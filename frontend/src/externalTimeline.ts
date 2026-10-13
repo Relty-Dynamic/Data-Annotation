@@ -45,6 +45,7 @@ export function parseExternalTimeline(text: string, track: Track, project: Pick<
     const item = row!;
     if (typeof item.start_ms !== 'number' || !Number.isSafeInteger(item.start_ms) || item.start_ms < 0) fail('start_ms 必须为非负整数毫秒。');
     if (item.kind !== undefined && item.kind !== 'point' && item.kind !== 'interval') fail('kind 仅支持 point 或 interval。');
+    if (item.lane !== undefined && (typeof item.lane !== 'number' || !Number.isSafeInteger(item.lane) || item.lane < 0)) fail('lane 必须为非负整数，0 表示主轴。');
     const start = item.start_ms as number;
     const isPoint = item.kind === 'point' || item.end_ms === start;
     const end = item.end_ms === undefined && item.kind === 'point' ? start : item.end_ms;
@@ -56,7 +57,7 @@ export function parseExternalTimeline(text: string, track: Track, project: Pick<
     const alignedEnd = end === null ? project.duration_ms : (end as number) + offset;
     if (alignedStart > project.duration_ms || alignedEnd < 0 || (!isPoint && (alignedStart === project.duration_ms || alignedEnd === 0))) { outside++; continue; }
     if (alignedStart < 0 || alignedEnd > project.duration_ms) clipped++;
-    segments.push({id: `external-${index}`, label: (item.label as string).trim(), start_ms: Math.max(0, alignedStart), end_ms: end === null ? null : Math.min(project.duration_ms, alignedEnd), kind: isPoint ? 'point' : 'interval'});
+    segments.push({id: `external-${index}`, label: (item.label as string).trim(), start_ms: Math.max(0, alignedStart), end_ms: end === null ? null : Math.min(project.duration_ms, alignedEnd), kind: isPoint ? 'point' : 'interval', ...(item.lane === undefined ? {} : {lane: item.lane as number})});
   }
   if (records.length && !segments.length) throw new Error('外部时间轴与当前项目的时间范围没有交集，请核对项目和录制起点。');
   if (outside) warnings.push(`${outside} 条位于项目时间范围外，未显示。`);

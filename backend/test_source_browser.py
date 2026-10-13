@@ -34,7 +34,12 @@ class SourceBrowserTests(unittest.TestCase):
         (self.nas / ".datamark-cache").mkdir()
         outside = self.root / "outside"
         outside.mkdir()
-        (self.nas / "escape").symlink_to(outside)
+        try:
+            (self.nas / "escape").symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows does not grant symlink privileges")
+            raise
         listing = browse_sources(self.nas)
         self.assertEqual([(item["name"], item["kind"]) for item in listing["entries"]],
                          [("采集", "directory"), ("recording.avi", "file")])

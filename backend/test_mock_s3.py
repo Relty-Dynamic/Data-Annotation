@@ -100,19 +100,20 @@ class MockS3WorkflowTests(unittest.TestCase):
             self.assertEqual(anonymous.get(url, headers={"Range": "bytes=0-31"}).status_code, 206)
             self.assertEqual(anonymous.get(url.replace("signature=", "signature=0")).status_code, 403)
 
+        project = self.client.get(f"/api/projects/{ident}").json()
         annotations = project["annotations"]
         annotations["posture"] = [{"id": "p1", "label": "动", "kind": "interval", "start_ms": 0,
                                    "end_ms": project["duration_ms"]}]
-        saved = self.client.put(f"/api/projects/{ident}/draft", json={"annotations": annotations, "expected_revision": 0},
+        saved = self.client.put(f"/api/projects/{ident}/draft", json={"annotations": annotations, "expected_revision": project["revision"]},
                                 headers=self.csrf)
         self.assertEqual(saved.status_code, 200, saved.text)
         self.assertEqual(self.client.put(f"/api/projects/{ident}/draft", json={"annotations": annotations,
                                "expected_revision": 0}, headers=self.csrf).status_code, 409)
-        submitted = self.client.post(f"/api/projects/{ident}/writeback", json={"expected_revision": 1}, headers=self.csrf)
+        submitted = self.client.post(f"/api/projects/{ident}/writeback", json={"expected_revision": saved.json()["revision"]}, headers=self.csrf)
         self.assertEqual(submitted.status_code, 200, submitted.text)
         store = self.app.state.mock_s3
         pointer = json.loads((store.objects / "daily/1001test/20261010/timeline/.latest.json").read_text())
-        self.assertEqual(len(pointer["keys"]), 4)
+        self.assertEqual(len(pointer["keys"]), len(saved.json()["selected_tracks"]))
         self.assertEqual(pointer["save_id"], submitted.json()["save_id"])
         for key in pointer["keys"]:
             self.assertEqual(json.loads((store.objects / key).read_text())["schema_version"], 3)
@@ -124,35 +125,64 @@ class MockS3WorkflowTests(unittest.TestCase):
             self.assertEqual(other.post("/api/mock-s3/projects/open", headers={"X-CSRF-Token": login.json()["csrf"]},
                                         json={"path": "daily/1001test/20261010"}).status_code, 403)
 
-    def test_named_custom_track_is_written_and_removed_in_mock_timeline(self):
+    def test_named_custom_track_is_written_and_preserved_when_unselected(self):
         opened = self.client.post("/api/storage/projects/open", headers=self.csrf,
                                   json={"path": "daily/1001test/20261010"})
         self.assertEqual(opened.status_code, 200, opened.text)
         project = opened.json()
-        self.assertEqual(project["fixed_tracks"], ["scene", "posture"])
+        self.assertEqual(project["fixed_tracks"], ["scene", "posture", "category"])
         ident = project["id"]
-        created = self.client.post(f"/api/projects/{ident}/custom-tracks", headers=self.csrf,
-                                   json={"name": "饮食", "json_name": "food", "mode": "state",
-                                         "labels": ["进食"], "expected_revision": 0})
+        library = self.client.post("/api/account/track-library", headers=self.csrf,
+                                   json={"id": "food", "name": "饮食", "mode": "state", "labels": ["进食"]})
+        self.assertEqual(library.status_code, 200, library.text)
+        created = self.client.put(f"/api/projects/{ident}/track-selection", headers=self.csrf,
+                                  json={"tracks": [*project["selected_tracks"], "food"], "expected_revision": project["revision"]})
         self.assertEqual(created.status_code, 200, created.text)
         annotations = created.json()["annotations"]
         annotations["posture"] = [{"id": "pose", "label": "坐", "start_ms": 0, "end_ms": project["duration_ms"]}]
         annotations["food"] = [{"id": "meal", "label": "进食", "start_ms": 0, "end_ms": project["duration_ms"]}]
         saved = self.client.put(f"/api/projects/{ident}/draft", headers=self.csrf,
-                                json={"annotations": annotations, "expected_revision": 1})
+                                json={"annotations": annotations, "expected_revision": created.json()["revision"]})
         self.assertEqual(saved.status_code, 200, saved.text)
         submitted = self.client.post(f"/api/projects/{ident}/writeback", headers=self.csrf,
-                                     json={"expected_revision": 2})
+                                     json={"expected_revision": saved.json()["revision"]})
         self.assertEqual(submitted.status_code, 200, submitted.text)
         path = self.app.state.mock_s3.objects / "daily/1001test/20261010/timeline/food.timeline.json"
         self.assertEqual(json.loads(path.read_text())["segments"][0]["label"], "进食")
-        removed = self.client.request("DELETE", f"/api/projects/{ident}/custom-tracks/food", headers=self.csrf,
-                                      json={"confirmed": True, "expected_revision": 2})
+        preserved = path.read_bytes()
+        removed = self.client.put(f"/api/projects/{ident}/track-selection", headers=self.csrf,
+                                  json={"tracks": project["selected_tracks"], "expected_revision": saved.json()["revision"]})
         self.assertEqual(removed.status_code, 200, removed.text)
         resubmitted = self.client.post(f"/api/projects/{ident}/writeback", headers=self.csrf,
-                                       json={"expected_revision": 3})
+                                       json={"expected_revision": removed.json()["revision"]})
         self.assertEqual(resubmitted.status_code, 200, resubmitted.text)
-        self.assertFalse(path.exists())
+        self.assertEqual(path.read_bytes(), preserved)
+
+    def test_mock_writeback_only_selected_axis_preserves_previous_file(self):
+        opened = self.client.post("/api/storage/projects/open", headers=self.csrf,
+                                  json={"path": "daily/1001test/20261010"})
+        self.assertEqual(opened.status_code, 200, opened.text)
+        ident = opened.json()["id"]
+        service = self.app.state.service
+        raw = service.load(ident)
+        raw["selected_tracks"] = ["posture"]
+        service.save(raw)
+        first = self.client.post(f"/api/projects/{ident}/writeback", headers=self.csrf,
+                                 json={"expected_revision": raw["revision"]})
+        self.assertEqual(first.status_code, 200, first.text)
+        folder = self.app.state.mock_s3.objects / "daily/1001test/20261010/timeline"
+        self.assertEqual({path.name for path in folder.glob("*.timeline.json")}, {"posture.timeline.json"})
+        preserved = (folder / "posture.timeline.json").read_bytes()
+        raw = service.load(ident)
+        raw["selected_tracks"] = ["scene"]
+        service.save(raw)
+        second = self.client.post(f"/api/projects/{ident}/writeback", headers=self.csrf,
+                                  json={"expected_revision": raw["revision"]})
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual((folder / "posture.timeline.json").read_bytes(), preserved)
+        pointer = json.loads((folder / ".latest.json").read_bytes())
+        self.assertEqual(pointer["keys"], second.json()["paths"])
+        self.assertEqual(len(pointer["keys"]), 1)
 
     def test_folder_only_selection_does_not_accept_video_uploads(self):
         uploaded = self.client.post("/api/mock-s3/projects", headers=self.csrf,
@@ -221,15 +251,16 @@ class MockS3WorkflowTests(unittest.TestCase):
         manifest = self.client.get(f"/api/projects/{ident}/session/manifest").json()
         self.assertIn(f"/mock-objects/{quote(task['prefix'])}/FPV/", manifest["videos"][0]["url"])
         self.assertEqual(self.client.get(manifest["videos"][0]["url"]).status_code, 200)
+        project = self.client.get(f"/api/projects/{ident}").json()
         annotations = project["annotations"]
         annotations["posture"] = [{"id": "p1", "label": "动", "kind": "interval", "start_ms": 0,
                                    "end_ms": project["duration_ms"]}]
-        saved = self.client.put(f"/api/projects/{ident}/draft", json={"annotations": annotations, "expected_revision": 0},
+        saved = self.client.put(f"/api/projects/{ident}/draft", json={"annotations": annotations, "expected_revision": project["revision"]},
                                 headers=self.csrf)
         self.assertEqual(saved.status_code, 200, saved.text)
-        submitted = self.client.post(f"/api/projects/{ident}/writeback", json={"expected_revision": 1}, headers=self.csrf)
+        submitted = self.client.post(f"/api/projects/{ident}/writeback", json={"expected_revision": saved.json()["revision"]}, headers=self.csrf)
         self.assertEqual(submitted.status_code, 200, submitted.text)
-        self.assertEqual(len(list((capture / "timeline").glob("*.timeline.json"))), 4)
+        self.assertEqual(len(list((capture / "timeline").glob("*.timeline.json"))), len(saved.json()["selected_tracks"]))
         self.assertEqual(json.loads((capture / "timeline/posture.timeline.json").read_text())["schema_version"], 3)
         self.assertEqual(self.client.post("/api/mock-s3/uploads", json=body, headers=self.csrf).status_code, 404)
         with patch("backend.app.choose_local_paths", return_value=[str(self.video)]):
@@ -356,14 +387,15 @@ class MockS3WorkflowTests(unittest.TestCase):
                     self.assertIn(expected_path, manifest.json()["videos"][0]["url"])
                 self.assertEqual(client.post(f"/api/projects/{mock.json()['id']}/videos/open", headers=csrf,
                     json={"path": str(capture), "expected_revision": 0}).status_code, 409)
+                project = client.get(f"/api/projects/{project['id']}").json()
                 annotations = project["annotations"]
                 annotations["posture"] = [{"id": "p1", "label": "动", "kind": "interval", "start_ms": 0,
                                            "end_ms": project["duration_ms"]}]
                 saved = client.put(f"/api/projects/{project['id']}/draft", headers=csrf,
-                    json={"annotations": annotations, "expected_revision": 0})
+                    json={"annotations": annotations, "expected_revision": project["revision"]})
                 self.assertEqual(saved.status_code, 200, saved.text)
                 submitted = client.post(f"/api/projects/{project['id']}/writeback", headers=csrf,
-                    json={"expected_revision": 1})
+                    json={"expected_revision": saved.json()["revision"]})
                 self.assertEqual(submitted.status_code, 200, submitted.text)
                 self.assertTrue((capture / "timeline" / "posture.timeline.json").is_file())
                 self.assertFalse((app.state.mock_s3.objects / "daily/1001test/20261010/timeline").exists())

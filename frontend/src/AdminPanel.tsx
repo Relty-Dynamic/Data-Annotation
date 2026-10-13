@@ -1,6 +1,7 @@
 import {useEffect, useState, type FormEvent} from 'react';
 import {authFetch} from './auth';
 import type {Project} from './domain';
+import {uncoveredSpans} from './domain';
 
 type ManagedUser = {id:string; username:string; display_name:string; email:string|null; role:string; active:number; can_upload:boolean};
 type LocalSegment = {start_ms:number; end_ms:number|null};
@@ -9,7 +10,8 @@ type LocalReport = {id:string; name:string; owner_name:string; revision:number; 
 function coveredPercent(report:LocalReport, axis:string):number {
   const duration=report.videos.reduce((total,video)=>total+video.end_ms-video.start_ms,0);
   if(!duration)return 0;
-  const covered=report.videos.reduce((total,video)=>total+(report.annotations[axis]??[]).reduce((sum,segment)=>sum+Math.max(0,Math.min(video.end_ms,segment.end_ms??video.end_ms)-Math.max(video.start_ms,segment.start_ms)),0),0);
+  const gaps=uncoveredSpans((report.annotations[axis]??[]).map((segment,index)=>({...segment,id:String(index),label:''})),report.videos);
+  const covered=duration-gaps.reduce((total,gap)=>total+gap.end_ms-gap.start_ms,0);
   return Math.min(100,Math.round(covered/duration*100));
 }
 

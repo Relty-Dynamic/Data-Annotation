@@ -114,6 +114,7 @@ class ProjectStorageTests(unittest.TestCase):
         external = self.original / "scene.json"
         external.write_text("separately-saved-result")
         with TestClient(self.app, base_url="http://127.0.0.1") as client:
+            self.assertEqual(client.get("/api/projects/" + p["id"]).status_code, 200)
             p = self.s.load(p["id"])
             directory = self.s.storage.directory(p["id"])
             for relative in ("preview/full.mp4", "preview/fast.mp4", "imports/copy.avi", "results/scene.json", "process.json",
@@ -123,12 +124,12 @@ class ProjectStorageTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"project-local-data")
             url = "/api/projects/" + p["id"]
-            for body, code in [({"confirmed": False, "expected_revision": 9}, 422),
-                               ({"expected_revision": 9}, 422),
-                               ({"confirmed": True, "expected_revision": 8}, 409)]:
+            for body, code in [({"confirmed": False, "expected_revision": p["revision"]}, 422),
+                               ({"expected_revision": p["revision"]}, 422),
+                               ({"confirmed": True, "expected_revision": p["revision"] - 1}, 409)]:
                 self.assertEqual(client.post(url + "/preview-cache/clear", json=body).status_code, code)
                 self.assertTrue(directory.exists())
-            body = {"confirmed": True, "expected_revision": 9}
+            body = {"confirmed": True, "expected_revision": p["revision"]}
             self.assertEqual(client.request("DELETE", url, json=body, headers={"Origin": "https://foreign.example"}).status_code, 403)
             self.assertEqual(client.request("DELETE", url, json=body).status_code, 409)
             self.assertEqual(client.post(url + "/preview-cache/clear", json=body, headers={"Origin": "https://foreign.example"}).status_code, 403)
@@ -139,20 +140,21 @@ class ProjectStorageTests(unittest.TestCase):
             self.assertTrue((directory / "preview/full.mp4").exists())
             self.assertEqual(client.get(url).status_code, 200)
             self.assertEqual(self.s.load(p["id"]), p)
-            self.assertEqual(client.put(url + "/draft", json={"annotations": p["annotations"], "expected_revision": 9}).status_code, 200)
+            self.assertEqual(client.put(url + "/draft", json={"annotations": p["annotations"], "expected_revision": p["revision"]}).status_code, 200)
             self.assertEqual(external.read_text(), "separately-saved-result")
             self.assertEqual(self.source.read_bytes(), b"original-video")
 
     def test_failed_cleanup_preserves_draft_and_rejects_late_preparation(self):
         p = self.project()
         with TestClient(self.app, base_url="http://127.0.0.1") as client:
+            self.assertEqual(client.get("/api/projects/" + p["id"]).status_code, 200)
             p = self.s.load(p["id"])
             local = self.s.storage.directory(p["id"]) / "playback"
             local.mkdir(parents=True, exist_ok=True)
             (local / "preview.mp4").write_bytes(b"preview")
             with patch("backend.service.shutil.rmtree", side_effect=OSError("file in use")):
                 with self.assertRaises(HTTPException) as pending:
-                    self.s.clear_local_previews(p["id"], 9)
+                    self.s.clear_local_previews(p["id"], p["revision"])
                 self.assertEqual(pending.exception.status_code, 409)
                 self.assertIn("重试清理", pending.exception.detail)
             url = "/api/projects/" + p["id"]
@@ -160,7 +162,7 @@ class ProjectStorageTests(unittest.TestCase):
             self.assertEqual(self.s.load(p["id"]), p)
             self.assertEqual(client.post(url + "/session/prepare", json={}).status_code, 409)
             self.assertEqual(client.post(url + "/session/prepare", json={"cache_generation": 0}).status_code, 409)
-            self.assertEqual(client.post(url + "/preview-cache/clear", json={"confirmed": True, "expected_revision": 9}).status_code, 200)
+            self.assertEqual(client.post(url + "/preview-cache/clear", json={"confirmed": True, "expected_revision": p["revision"]}).status_code, 200)
             self.assertFalse(local.exists())
             generation = client.get(url).json()["playback_generation"]
             with patch.object(self.s.sessions, "start", return_value={"state": "running"}) as start:

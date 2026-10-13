@@ -26,9 +26,7 @@ export interface TimelineProps {
 }
 
 const HOUR_MS = DEFAULT_WINDOW_MS;
-const LANE_PITCH = 24;
-const SEGMENT_HEIGHT = 22;
-const OVERLAP_VIEWPORT_MAX = 58;
+const LANE_HEIGHT = 34;
 const NO_ANCHORS: number[] = [];
 const HOVER_WIDTH = 280;
 const HOVER_HEIGHT = 226;
@@ -91,7 +89,7 @@ function positionStyle(start: number, end: number, duration: number): CSSPropert
 }
 
 export default function Timeline({ project, comparison, currentTime, activeTrack, trackRevealVersion = 0, selectedId, anchorControls, anchors = NO_ANCHORS, selectedRange = null, onRangeDismiss, onSeek, onScrubStart, onScrubEnd, onTrackSelect, onSegmentSelect }: TimelineProps) {
-  const GUTTER = comparison ? 138 : 88;
+  const GUTTER = comparison ? 152 : 112;
   const [scrollX, setScrollX] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(720);
   const [plotViewportWidth, setPlotViewportWidth] = useState(710);
@@ -100,7 +98,8 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   const tracksViewportRef = useRef<HTMLDivElement>(null);
   const overlaysRef = useRef<HTMLDivElement>(null);
   const overlayContentRef = useRef<HTMLDivElement>(null);
-  const overlapViewportRefs = useRef<Partial<Record<Track, HTMLDivElement | null>>>({});
+  const trackGroupRefs = useRef<Partial<Record<Track, HTMLDivElement | null>>>({});
+  const selectedSegmentRef = useRef<HTMLButtonElement | null>(null);
   const pendingViewRef = useRef<{ projectId: string; windowMs: number; scrollLeft: number } | null>(null);
   const wheelHandlerRef = useRef<(event: WheelEvent) => void>(() => {});
   const [hoverTime, setHoverTime] = useState<HoverTime | null>(null);
@@ -122,13 +121,10 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   const duration = Math.max(project.duration_ms, 1);
   const displayedTime = scrubTime ?? currentTime;
   const progress = Math.max(0, Math.min(displayedTime / duration, 1));
-  const overlapSegments = useMemo(() => Object.fromEntries(projectTracks(project)
-    .filter(track=>track==='category'||isEventTrack(project,track))
-    .map(track=>[track,arrangeLanes(project.annotations[track]??[],duration)])), [project.annotations,project.custom_tracks,project.fixed_tracks,duration]);
   const rows = useMemo(() => [
     ...(comparison ? [{key: 'external', track: comparison.track, external: true, segments: arrangeLanes(comparison.segments, duration)}] : []),
-    ...(comparison ? [comparison.track] : projectTracks(project)).map(track => ({key: track, track, external: false, segments: track === 'category' || isEventTrack(project,track) ? overlapSegments[track]??[] : (project.annotations[track]??[]).map(segment => ({segment, lane: 0}))})),
-  ], [comparison, project, overlapSegments, duration]);
+    ...(comparison ? [comparison.track] : projectTracks(project)).map(track => ({key: track, track, external: false, segments: arrangeLanes(project.annotations[track] ?? [], duration)})),
+  ], [comparison, project, duration]);
   const visibleAnchors = useMemo(() => anchors.slice(-3).filter((time) => Number.isFinite(time) && time >= 0 && time <= project.duration_ms), [anchors, project.duration_ms]);
   const snapPoints = useMemo(() => timelineSnapPoints(comparison ? {...project, annotations: Object.fromEntries(projectTracks(project).map(track=>[track,track===comparison.track?[...(project.annotations[track]??[]),...comparison.segments]:[]]))} : project, visibleAnchors), [project, visibleAnchors, comparison]);
   const rangeStart = Math.max(0, Math.min(selectedRange?.start_ms ?? 0, project.duration_ms));
@@ -176,7 +172,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     setScrollX(0);
     if (scrollRef.current) scrollRef.current.scrollLeft = 0;
     if (tracksViewportRef.current) tracksViewportRef.current.scrollLeft = 0;
-    for (const viewport of Object.values(overlapViewportRefs.current)) if (viewport) viewport.scrollTop = 0;
+    if (tracksViewportRef.current) tracksViewportRef.current.scrollTop = 0;
   }, [project.id]);
 
   useLayoutEffect(() => {
@@ -190,15 +186,15 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   }, [axisWidth, viewportWidth, project.id]);
 
   useLayoutEffect(() => {
-    if (activeTrack !== 'category' && !isEventTrack(project,activeTrack)) return;
-    const viewport = overlapViewportRefs.current[activeTrack];
-    if (!viewport) return;
-    const selected = overlapSegments[activeTrack].find(({ segment }) => segment.id === selectedId);
-    const top = selected ? 6 + selected.lane * LANE_PITCH : 0;
-    const bottom = selected ? top + SEGMENT_HEIGHT : Math.min(34, viewport.clientHeight);
+    if (comparison) return;
+    const viewport = tracksViewportRef.current;
+    const target = selectedSegmentRef.current ?? trackGroupRefs.current[activeTrack]?.firstElementChild;
+    if (!viewport || !(target instanceof HTMLElement)) return;
+    const top = target.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop;
+    const bottom = top + target.offsetHeight;
     if (top < viewport.scrollTop) viewport.scrollTop = Math.max(0, top - 6);
     else if (bottom > viewport.scrollTop + viewport.clientHeight) viewport.scrollTop = bottom + 6 - viewport.clientHeight;
-  }, [activeTrack, trackRevealVersion, selectedId, overlapSegments, project]);
+  }, [activeTrack, trackRevealVersion, selectedId, rows, comparison]);
 
   useEffect(() => {
     const hide = () => setHoverTime(null);
@@ -487,11 +483,12 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     return (
       <button
         key={segment.id}
+        ref={selected ? selectedSegmentRef : undefined}
         type="button"
         className={`tl-segment tl-segment-${customTrack(project,track)?'custom':track}${selected ? ' tl-segment-selected' : ''}${segment.end_ms === null ? ' tl-segment-open' : ''}${point ? ' tl-segment-point' : ''}`}
-        style={{ ...positionStyle(segment.start_ms, point ? segment.start_ms : end, duration), top: 6 + lane * LANE_PITCH }}
-        title={point ? `${segment.label} · 时点 ${formatTime(segment.start_ms)}` : `${segment.label} · ${formatTime(segment.start_ms)} → ${segment.end_ms === null ? '标注中' : formatTime(segment.end_ms)}`}
-        aria-label={point ? `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}：${segment.label}，时点 ${formatTime(segment.start_ms)}` : `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}：${segment.label}，从 ${formatTime(segment.start_ms)}${segment.end_ms === null ? '，标注中' : ` 到 ${formatTime(segment.end_ms)}`}`}
+        style={{ ...positionStyle(segment.start_ms, point ? segment.start_ms : end, duration), top: lane === 0 ? 11 : 6 }}
+        title={`${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${point ? `${segment.label} · 时点 ${formatTime(segment.start_ms)}` : `${segment.label} · ${formatTime(segment.start_ms)} → ${segment.end_ms === null ? '标注中' : formatTime(segment.end_ms)}`}`}
+        aria-label={point ? `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，时点 ${formatTime(segment.start_ms)}` : `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，从 ${formatTime(segment.start_ms)}${segment.end_ms === null ? '，标注中' : ` 到 ${formatTime(segment.end_ms)}`}`}
         aria-pressed={selected}
         onClick={(event) => {
           event.stopPropagation();
@@ -557,7 +554,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
             </div>
           </div>
           </div>
-          <div className="tl-tracks-viewport" ref={tracksViewportRef} style={{ width: viewportWidth }} role="region" aria-label={comparison ? `外部与项目${trackName(project,comparison.track)}对照轴` : "项目标注时间轴"} onScroll={(event) => {
+          <div className="tl-tracks-viewport" ref={tracksViewportRef} style={{ width: viewportWidth }} role="region" tabIndex={0} aria-label={comparison ? `外部与项目${trackName(project,comparison.track)}对照轴` : "项目标注时间轴，可上下滚动查看主轴和子轴"} onScroll={(event) => {
             const left = event.currentTarget.scrollLeft;
             if (scrollRef.current && Math.abs(scrollRef.current.scrollLeft - left) > 0.5) scrollRef.current.scrollLeft = left;
             setHoverTime(null);
@@ -565,42 +562,33 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
             <div className="tl-tracks-content" style={{ width: contentWidth }}>
               {rows.map(({key, track, external, segments}) => {
                 const active = !comparison && activeTrack === track;
-                const overlapping = external || track === 'category' || isEventTrack(project,track);
-                const laneCount = Math.max(1, ...segments.map(({ lane }) => lane + 1));
-                const contentHeight = overlapping ? laneCount * LANE_PITCH + 10 : 34;
-                return <div className={`tl-row tl-track-row tl-track-${customTrack(project,track)?'custom':track}${external ? ' tl-external-row' : ''}${active ? ' tl-track-active' : ''}`} key={key}>
-                  <button type="button" className="tl-gutter tl-track-select" aria-pressed={active} onClick={() => { if (!comparison) onTrackSelect(track); }} aria-label={`${comparison ? (external ? '外部' : '项目') : '选择'}${trackName(project,track)}标注轴`}>
-                    <span className="tl-track-title"><span className={`tl-row-dot tl-dot-${customTrack(project,track)?'custom':track}`} /><span>{comparison ? (external ? '外部 · ' : '项目 · ') : ''}{trackName(project,track)}</span><span className="tl-count">{segments.length}</span>
-                    {overlapping && laneCount > 1 && <span className="tl-lane-hint" title="普通滚轮上下查看重叠层">{laneCount}层</span>}</span>
-                  </button>
-                  <div className={overlapping ? 'tl-overlap-viewport' : 'tl-state-viewport'}
-                    ref={(element) => { if (overlapping && !external) overlapViewportRefs.current[track] = element; }}
-                    style={{ height: overlapping ? Math.min(contentHeight, OVERLAP_VIEWPORT_MAX) : contentHeight }}
-                    role={overlapping ? 'region' : undefined}
-                    aria-label={overlapping ? `${trackName(project,track)}标注，共 ${laneCount} 层，可上下滚动查看` : undefined}
-                    tabIndex={overlapping ? 0 : undefined}
-                    onScroll={() => setHoverTime(null)}
-                    onKeyDown={(event) => {
-                      if (!overlapping) return;
-                      const viewport = event.currentTarget;
-                      let next: number | undefined;
-                      if (event.key === 'ArrowUp') next = viewport.scrollTop - LANE_PITCH;
-                      if (event.key === 'ArrowDown') next = viewport.scrollTop + LANE_PITCH;
-                      if (event.key === 'PageUp') next = viewport.scrollTop - viewport.clientHeight;
-                      if (event.key === 'PageDown') next = viewport.scrollTop + viewport.clientHeight;
-                      if (event.key === 'Home') next = 0;
-                      if (event.key === 'End') next = viewport.scrollHeight;
-                      if (next !== undefined) { event.preventDefault(); event.stopPropagation(); viewport.scrollTop = next; }
-                    }}>
-                  <div className="tl-track-surface tl-seek-surface" style={{ height: contentHeight }} onPointerDown={(event) => {
-                    if ((event.target as HTMLElement).closest('button')) return;
-                    beginScrub(event);
-                  }} {...scrubPointerHandlers}>
-                    {!segments.length && <span className="tl-empty-track">{comparison ? '暂无记录' : track === 'scene' ? '点击右侧按钮切换室内 / 室外' : track === 'posture' ? 'Z 动 / X 坐 / C 站 / V 躺' : track === 'category' ? '点击标签切换大类，或用锚点选择区间' : track === 'habit' ? '记录习惯，同一时段可叠加' : isEventTrack(project,track) ? '记录事件，支持瞬时和重叠' : '点击右侧标签开始标注状态'}</span>}
-                    {segments.map(({ segment, lane }) => renderSegment(track, segment, lane, external))}
-                    {renderGaps('track')}
-                  </div>
-                  </div>
+                const groupName = `${comparison ? (external ? '外部 · ' : '项目 · ') : ''}${trackName(project,track)}`;
+                const laneSegments = new Map<number, typeof segments>([[0, []]]);
+                for (const item of segments) {
+                  if (!laneSegments.has(item.lane)) laneSegments.set(item.lane, []);
+                  laneSegments.get(item.lane)!.push(item);
+                }
+                const lanes = [...laneSegments.entries()].sort(([left], [right]) => left - right);
+                const laneCount = lanes.length;
+                return <div className={`tl-track-group tl-track-${customTrack(project,track)?'custom':track}${external ? ' tl-external-row' : ''}${active ? ' tl-track-active' : ''}`} key={key}
+                  ref={(element) => { if (!external) trackGroupRefs.current[track] = element; }}
+                  role="group" aria-label={`${groupName}：主轴${laneCount > 1 ? `及 ${laneCount - 1} 条子轴` : ''}`}>
+                  {lanes.map(([lane, items], index) => <div className={`tl-row tl-track-row ${lane === 0 ? 'tl-main-row' : 'tl-child-row'}${index === laneCount - 1 ? ' tl-last-lane' : ''}`} key={lane} data-lane={lane}>
+                    <button type="button" className="tl-gutter tl-track-select" aria-pressed={active} onClick={() => { if (!comparison) onTrackSelect(track); }} aria-label={`${comparison ? '' : '选择'}${groupName}${lane === 0 ? '主轴' : `子轴 ${lane}`}`} title={`${groupName} · ${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${items.length} 条标注`}>
+                      {lane === 0 ? <>
+                        <span className="tl-track-title"><span className={`tl-row-dot tl-dot-${customTrack(project,track)?'custom':track}`} /><span className="tl-track-name">{groupName}</span><span className="tl-count">{segments.length}</span></span>
+                        <span className="tl-lane-name">主轴{laneCount > 1 && <span className="tl-child-count"> · {laneCount - 1} 条子轴</span>}</span>
+                      </> : <span className="tl-child-title"><span className="tl-branch" aria-hidden="true" /><span>子轴 {lane}</span><span className="tl-count">{items.length}</span></span>}
+                    </button>
+                    <div className="tl-track-surface tl-seek-surface" style={{ height: lane === 0 ? 44 : LANE_HEIGHT }} onPointerDown={(event) => {
+                      if ((event.target as HTMLElement).closest('button')) return;
+                      beginScrub(event);
+                    }} {...scrubPointerHandlers}>
+                      {!items.length && <span className="tl-empty-track">{comparison ? '暂无记录' : !segments.length ? isEventTrack(project,track) ? '记录事件，或用锚点添加子轴标注' : '点击右侧标签，或用锚点选择区间' : '主轴留空'}</span>}
+                      {items.map(({segment}) => renderSegment(track, segment, lane, external))}
+                      {renderGaps('track')}
+                    </div>
+                  </div>)}
                 </div>;
               })}
             </div>

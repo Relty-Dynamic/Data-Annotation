@@ -195,6 +195,40 @@ class SourceCacheTests(unittest.TestCase):
                                         for path in cache.rglob('*') if path.is_file()))
         self.assertFalse((cache / MARKER).exists())
 
+    def test_local_nas_ui_import_does_not_claim_unmarked_server_cache(self):
+        source = self.video()
+        cache = source.parent / CACHE_FOLDER
+        cached = cache / 'ubuntu-playback-v1' / uuid.uuid4().hex
+        cached.mkdir(parents=True)
+        (cached / 'existing.mp4').write_bytes(b'keep Ubuntu cache')
+        before = {str(path.relative_to(cache)): path.read_bytes()
+                  for path in cache.rglob('*') if path.is_file()}
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                     'DATAMARK_SOURCE_ROOT': str(self.root),
+                                     'DATAMARK_LOCAL_NAS_ROOT': str(self.root)}):
+            opened = self.service.open_path(str(source.parent))
+            project = self.service.load(opened['id'])
+            self.assertFalse(project['_sources']['v0001'].get('cache_directory'))
+            self.assertTrue(self.service.preview_spec(project, 'v0001').target.is_relative_to(self.service.local))
+            self.assertIsNone(self.service.sessions._nas_playback_directory(project, project['_sources']['v0001'], create=True))
+        self.assertEqual(before, {str(path.relative_to(cache)): path.read_bytes()
+                                 for path in cache.rglob('*') if path.is_file()})
+        self.assertFalse((cache / MARKER).exists())
+        outside = self.video(index=1, folder='other-card')
+        outside_cache = outside.parent / CACHE_FOLDER
+        outside_cache.mkdir()
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                     'DATAMARK_LOCAL_NAS_ROOT': str(source.parent)}):
+            with self.assertRaises(HTTPException) as caught:
+                self.service.open_path(str(outside.parent))
+            self.assertEqual(caught.exception.status_code, 409)
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                     'DATAMARK_LOCAL_NAS_ROOT': ''}):
+            fresh = self.fresh_service('production-nas')
+            with self.assertRaises(HTTPException) as caught:
+                fresh.open_path(str(source.parent))
+            self.assertEqual(caught.exception.status_code, 409)
+
     def test_windows_uses_standard_share_without_global_environment_changes(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(str(local_nas_root(windows=True)), WINDOWS_NAS_ROOT)
@@ -239,7 +273,7 @@ class SourceCacheTests(unittest.TestCase):
             return original_spec(snapshot, video_id, *args, **kwargs)
         annotations = empty_annotations()
         annotations['habit'] = [{'id': 'during-scan', 'label': '喝水', 'kind': 'point',
-                                 'start_ms': 250, 'end_ms': 250}]
+                                 'start_ms': 250, 'end_ms': 250, 'lane': 0}]
         with patch.object(self.service, 'preview_spec', side_effect=slow_remote_spec):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 scan = pool.submit(self.service.preparation_status, project['id'])
@@ -276,7 +310,7 @@ class SourceCacheTests(unittest.TestCase):
             return original_spec(snapshot, video_id, *args, **kwargs)
         annotations = empty_annotations()
         annotations['habit'] = [{'id': 'while-status-loads', 'label': '喝水', 'kind': 'point',
-                                 'start_ms': 250, 'end_ms': 250}]
+                                 'start_ms': 250, 'end_ms': 250, 'lane': 0}]
         with patch.object(self.service, 'preview_spec', side_effect=slow_remote_spec):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 slow = pool.submit(self.service.preview_status, project['id'], 'v0002')
@@ -422,7 +456,7 @@ class SourceCacheTests(unittest.TestCase):
             return original_cached(spec)
         annotations = empty_annotations()
         annotations['habit'] = [{'id': 'while-thumbnail-loads', 'label': '喝水', 'kind': 'point',
-                                 'start_ms': 500, 'end_ms': 500}]
+                                 'start_ms': 500, 'end_ms': 500, 'lane': 0}]
         with patch.object(self.service, 'cached_thumbnail', side_effect=slow_thumbnail):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 thumbnail = pool.submit(self.service.media, project['id'], 'v0002', thumbnail=True)
