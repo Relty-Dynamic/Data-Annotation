@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from .desktop_cache import desktop_directory, safe_name, collection_name, sha256_file
-from . import test_playback_session as fixtures
-from .service import ProjectService
+from backend.desktop_cache import desktop_directory, safe_name, collection_name, sha256_file
+from backend import test_playback_session as fixtures
+from backend.service import ProjectService
 
 class DesktopCacheTests(unittest.TestCase):
     tearDown = fixtures.PlaybackSessionTests.tearDown
