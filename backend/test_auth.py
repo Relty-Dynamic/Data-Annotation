@@ -159,6 +159,73 @@ class AccountAccessTests(unittest.TestCase):
         self.login("admin", "correct horse battery staple")
         self.assertEqual(self.client.get(path).json(), [])
 
+    def test_local_account_deletes_only_its_templates_without_modifying_projects(self):
+        path = "/api/account/track-templates"
+        body = {"name": "饮食", "json_name": "food", "labels": ["进食"]}
+        self.project["custom_tracks"] = [{"id": "food", "name": "饮食", "mode": "state", "labels": ["进食"]}]
+        self.project["annotations"]["food"] = [{"id": "food-1", "label": "进食", "start_ms": 0, "end_ms": 1000}]
+        self.app.state.service.save(self.project)
+        worker_csrf = self.login("worker", "another long safe password")
+        self.assertEqual(self.client.put(path, json=body, headers={"X-CSRF-Token": worker_csrf}).status_code, 200)
+        self.client.post("/api/auth/logout", headers={"X-CSRF-Token": worker_csrf})
+        admin_csrf = self.login("admin", "correct horse battery staple")
+        self.assertEqual(self.client.put(path, json=body, headers={"X-CSRF-Token": admin_csrf}).status_code, 200)
+        self.assertEqual(self.client.delete(path + "/food").status_code, 403)
+        self.assertEqual(self.client.delete(path + "/food", headers={"X-CSRF-Token": admin_csrf}).status_code, 200)
+        self.assertEqual(self.client.get(path).json(), [])
+        self.client.post("/api/auth/logout", headers={"X-CSRF-Token": admin_csrf})
+        worker_csrf = self.login("worker", "another long safe password")
+        self.assertEqual(self.client.get(path).json(), [body])
+        self.assertEqual(self.client.delete(path + "/food", headers={"X-CSRF-Token": worker_csrf}).status_code, 200)
+        self.assertEqual(self.client.get(path).json(), [])
+        stored = self.app.state.service.load(self.project["id"])
+        self.assertEqual(stored["annotations"], self.project["annotations"])
+        self.assertEqual(stored["revision"], self.project["revision"])
+        self.assertEqual(stored["custom_tracks"], self.project["custom_tracks"])
+
+    def test_fixed_axis_entries_are_account_private_persistent_and_recoverable(self):
+        path = "/api/account/fixed-track-templates"
+        axes = ["scene", "posture", "category", "habit"]
+        self.assertEqual(self.client.get(path).status_code, 401)
+        csrf = self.login("worker", "another long safe password")
+        self.assertEqual(self.client.get(path).json(), axes)
+        self.assertEqual(self.client.delete(path + "/category").status_code, 403)
+        self.assertEqual(self.client.put(path + "/category").status_code, 403)
+        before = self.app.state.service.load(self.project["id"])
+        for axis in axes:
+            response = self.client.delete(path + "/" + axis, headers={"X-CSRF-Token": csrf})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertNotIn(axis, response.json())
+        self.assertEqual(self.client.get(path).json(), [])
+        self.assertEqual(AuthStore(self.root).visible_fixed_track_templates(self.annotator["id"]), [])
+        self.assertEqual(self.app.state.service.load(self.project["id"]), before)
+        self.client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
+        admin_csrf = self.login("admin", "correct horse battery staple")
+        self.assertEqual(self.client.get(path).json(), axes)
+        self.client.post("/api/auth/logout", headers={"X-CSRF-Token": admin_csrf})
+        csrf = self.login("worker", "another long safe password")
+        self.assertEqual(self.client.get(path).json(), [])
+        for axis in axes:
+            response = self.client.put(path + "/" + axis, headers={"X-CSRF-Token": csrf})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertIn(axis, response.json())
+        self.assertEqual(self.client.get(path).json(), axes)
+        self.assertEqual(self.app.state.service.load(self.project["id"]), before)
+        for method in (self.client.delete, self.client.put):
+            invalid = method(path + "/food", headers={"X-CSRF-Token": csrf})
+            self.assertEqual(invalid.status_code, 404)
+        self.assertEqual(self.client.get(path).json(), axes)
+
+    def test_existing_account_database_gains_fixed_axis_preferences_without_losing_templates(self):
+        self.auth.save_track_template(self.annotator["id"], "food", "饮食", ["进食"])
+        with self.auth.connection() as con:
+            con.execute("DROP TABLE hidden_fixed_track_templates")
+        migrated = AuthStore(self.root)
+        self.assertEqual(migrated.visible_fixed_track_templates(self.annotator["id"]), ["scene", "posture", "category", "habit"])
+        self.assertEqual(migrated.list_track_templates(self.annotator["id"]), [{"json_name": "food", "name": "饮食", "labels": ["进食"]}])
+        migrated.set_fixed_track_template_visible(self.annotator["id"], "habit", False)
+        self.assertNotIn("habit", AuthStore(self.root).visible_fixed_track_templates(self.annotator["id"]))
+
     def test_admin_controls_accounts_and_assignments(self):
         csrf = self.login("admin", "correct horse battery staple")
         users = self.client.get("/api/users")

@@ -591,3 +591,10 @@ html, body, #root { background: var(--bg); }
 @media (prefers-reduced-motion: reduce) {
   .primary, .secondary, .state-buttons button { transition: none; }
 }
+
+
+.fixed-template-entry { display: inline-flex; align-items: stretch; border: 1px solid #405563; border-radius: 6px; overflow: hidden; }
+.fixed-template-entry > .secondary { border: 0; border-radius: 0; }
+.fixed-template-delete { min-width: 30px; border-left: 1px solid #405563; color: #e9aca4; }
+.fixed-template-delete:hover:not(:disabled) { background: #4b2b31; }
+.hidden-fixed-templates { align-items: center; }

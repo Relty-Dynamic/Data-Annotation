@@ -21,7 +21,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
-from .service import ProjectService
+from .service import AXES, ProjectService
 from .browser_lifetime import BrowserLifetime
 from .native_picker import choose_local_paths, native_picker_available
 from .source_browser import browse_sources
@@ -456,6 +456,24 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         if not auth_required:
             return []
         return auth.list_track_templates(request.state.user["id"])
+
+    @app.get("/api/account/fixed-track-templates")
+    def list_fixed_track_templates(request: Request):
+        if not auth_required:
+            return list(AXES)
+        return auth.visible_fixed_track_templates(request.state.user["id"])
+
+    @app.delete("/api/account/fixed-track-templates/{track_id}")
+    def hide_fixed_track_template(track_id: str, request: Request):
+        if not auth_required:
+            raise HTTPException(404, "本机无账号模板。")
+        return auth.set_fixed_track_template_visible(request.state.user["id"], track_id, False)
+
+    @app.put("/api/account/fixed-track-templates/{track_id}")
+    def restore_fixed_track_template(track_id: str, request: Request):
+        if not auth_required:
+            raise HTTPException(404, "本机无账号模板。")
+        return auth.set_fixed_track_template_visible(request.state.user["id"], track_id, True)
 
     @app.put("/api/account/track-templates")
     def save_track_template(body: TrackTemplateRequest, request: Request):

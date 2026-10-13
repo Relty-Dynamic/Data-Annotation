@@ -34,7 +34,7 @@ export default function TrackLabelsDialog({trackName,initial,annotations,onCance
     <p>这里管理可选标签。要给某一段添加备注，请点击时间轴上的色块，在右侧填写。</p>
     <div className="track-label-list">{labels.map(value=><div key={value}><span>{value}</span><button className="secondary" disabled={saving} aria-label={`删除标签 ${value}`} onClick={()=>setLabels(items=>items.filter(item=>item!==value))}>删除</button></div>)}{labels.length===0&&<p>当前没有标签按钮。</p>}</div>
     <div className="track-label-add"><input aria-label="新标签名称" maxLength={80} value={input} disabled={saving} placeholder="输入新标签" onChange={event=>setInput(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'){event.preventDefault();add();}}}/><button className="secondary" disabled={saving} onClick={add}>添加标签</button></div>
-    {affected>0&&<p className="track-label-warning" role="status">保存后会同时删除「{removed.join('、')}」的 {affected} 条已有标注，含这些标签下带备注的色块。{(trackName==='姿势'||trackName==='场景')&&'留下的空白可写回，导出前须补齐。'}</p>}
+    {affected>0&&<p className="track-label-warning" role="status">保存后会同时删除「{removed.join('、')}」的 {affected} 条已有标注，含这些标签下带备注的色块。{(trackName==='姿势'||trackName==='场景')&&'留下的空白可直接导出和写回。'}</p>}
     {error&&<p role="alert" className="import-error">{error}</p>}
     <div className="custom-track-actions"><button className="secondary" disabled={saving} onClick={onCancel}>取消</button><button className={affected?'delete-custom-track-confirm':'primary'} disabled={saving||labels.join('\0')===initial.join('\0')} onClick={()=>void save()}>{saving?'保存中…':affected?`保存并删除 ${affected} 条标注`:'保存标签'}</button></div>
   </dialog>;

@@ -1707,7 +1707,7 @@ class ProjectService:
 
     def export_documents(self, project: dict, *, for_writeback: bool = False) -> tuple[str, dict[str, bytes]]:
         annotations = validate_annotations(project["annotations"], project["duration_ms"], final=True,
-                                           videos=active_videos(project), require_coverage=not for_writeback,
+                                           videos=active_videos(project), require_coverage=False,
                                            custom_tracks=project.get("custom_tracks", []), enabled_fixed_tracks=fixed_tracks(project), fixed_label_options=track_labels(project))
         save_id = uuid.uuid4().hex
         recording_start = datetime.fromisoformat(project["recording_start"]).astimezone(timezone(timedelta(hours=8)))

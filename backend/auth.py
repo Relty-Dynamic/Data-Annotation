@@ -18,7 +18,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from .service import validate_project_name
+from .service import AXES, validate_project_name
 
 
 SESSION_SECONDS = 12 * 60 * 60
@@ -75,6 +75,10 @@ class AuthStore:
                     user_id TEXT NOT NULL REFERENCES users(id), json_name TEXT NOT NULL,
                     name TEXT NOT NULL, labels_json TEXT NOT NULL, updated_at INTEGER NOT NULL,
                     PRIMARY KEY(user_id, json_name)
+                );
+                CREATE TABLE IF NOT EXISTS hidden_fixed_track_templates (
+                    user_id TEXT NOT NULL REFERENCES users(id), track_id TEXT NOT NULL,
+                    PRIMARY KEY(user_id, track_id)
                 );
             """)
             if "can_upload" not in {row[1] for row in con.execute("PRAGMA table_info(users)")}:
@@ -149,6 +153,22 @@ class AuthStore:
             rows = con.execute("SELECT json_name,name,labels_json FROM track_templates WHERE user_id=? ORDER BY updated_at DESC,json_name",
                                (user_id,)).fetchall()
         return [{"json_name": row["json_name"], "name": row["name"], "labels": json.loads(row["labels_json"])} for row in rows]
+
+    def visible_fixed_track_templates(self, user_id: str) -> list[str]:
+        with self.connection() as con:
+            hidden = {row[0] for row in con.execute(
+                "SELECT track_id FROM hidden_fixed_track_templates WHERE user_id=?", (user_id,))}
+        return [axis for axis in AXES if axis not in hidden]
+
+    def set_fixed_track_template_visible(self, user_id: str, track_id: str, visible: bool) -> list[str]:
+        if track_id not in AXES:
+            raise HTTPException(404, "固定时间轴入口不存在。")
+        with self.connection() as con:
+            if visible:
+                con.execute("DELETE FROM hidden_fixed_track_templates WHERE user_id=? AND track_id=?", (user_id, track_id))
+            else:
+                con.execute("INSERT OR IGNORE INTO hidden_fixed_track_templates VALUES (?,?)", (user_id, track_id))
+        return self.visible_fixed_track_templates(user_id)
 
     def save_track_template(self, user_id: str, json_name: str, name: str, labels: list[str]) -> dict:
         if (not isinstance(json_name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", json_name)
