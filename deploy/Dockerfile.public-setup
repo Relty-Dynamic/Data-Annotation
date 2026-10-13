@@ -1,0 +1,5 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY backend/public_setup.py /app/backend/public_setup.py
+COPY backend/test_public_setup.py /app/backend/test_public_setup.py
+CMD ["/opt/venv/bin/python", "-m", "uvicorn", "backend.public_setup:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]
