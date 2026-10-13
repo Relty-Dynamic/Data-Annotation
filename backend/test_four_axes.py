@@ -596,21 +596,96 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.service.writeback(project["id"])
         self.assertTrue(all((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
 
-    def test_missing_new_category_file_or_mixed_version_batch_is_rejected(self):
+    def test_missing_category_is_blank_but_mixed_version_or_batch_is_rejected(self):
         project = self.annotated_project()
         self.service.writeback(project["id"])
         path = self.source / "timeline" / FILENAMES["category"]
         raw = path.read_bytes()
         path.unlink()
-        with self.assertRaises(HTTPException) as error:
-            self.service.read_external(self.service.load(project["id"]))
-        self.assertEqual(error.exception.status_code, 409)
+        imported, hashes = self.service.read_external(self.service.load(project["id"]))
+        self.assertEqual(imported['category'], [])
+        self.assertIsNone(hashes['category'])
         document = json.loads(raw)
         for changes in ({"schema_version": 1}, {"save_id": "different"}):
             path.write_text(json.dumps({**document, **changes}), encoding="utf-8")
             with self.assertRaises(HTTPException) as error:
                 self.service.read_external(self.service.load(project["id"]))
             self.assertEqual(error.exception.status_code, 409)
+
+    def test_every_partial_fixed_axis_set_imports_only_present_annotations(self):
+        project = self.annotated_project()
+        self.service.writeback(project['id'])
+        directory = self.source / 'timeline'
+        originals = {axis: (directory / FILENAMES[axis]).read_bytes() for axis in AXES}
+        stored = self.service.load(project['id'])
+        for mask in range(1, 2 ** len(AXES)):
+            present = {axis for index, axis in enumerate(AXES) if mask & (1 << index)}
+            with self.subTest(present=present):
+                for axis, raw in originals.items():
+                    path = directory / FILENAMES[axis]
+                    if axis in present:
+                        path.write_bytes(raw)
+                    else:
+                        path.unlink(missing_ok=True)
+                imported, hashes, tracks, enabled, labels = self.service.read_external(stored, include_tracks=True)
+                for axis in AXES:
+                    self.assertEqual(imported[axis], stored['annotations'][axis] if axis in present else [])
+                    self.assertEqual(hashes[axis], digest(originals[axis]) if axis in present else None)
+                self.assertEqual(enabled, stored['fixed_tracks'])
+                self.assertEqual(labels, stored['track_labels'])
+                self.assertEqual(tracks, [])
+
+    def test_partial_nas_continue_can_edit_and_write_complete_batch(self):
+        project = self.annotated_project()
+        self.service.writeback(project['id'])
+        directory = self.source / 'timeline'
+        originals = {axis: (directory / FILENAMES[axis]).read_bytes() for axis in ('scene', 'posture')}
+        for axis in ('category', 'habit'):
+            (directory / FILENAMES[axis]).unlink()
+        inspection = self.service.inspect_source_claim(str(self.source))
+        opened = self.service.open_path(str(self.source), claim_mode='continue', claim_hashes=inspection['hashes'])
+        self.assertEqual(opened['annotations']['scene'], project['annotations']['scene'])
+        self.assertEqual(opened['annotations']['posture'], project['annotations']['posture'])
+        self.assertEqual(opened['annotations']['habit'], [])
+        self.assertEqual(opened['annotations']['category'], [])
+        self.assertTrue((self.service.storage.directory(project['id']) / 'recoveries' / (opened['recovery_id'] + '.json')).is_file())
+        self.assertEqual({axis: (directory / FILENAMES[axis]).read_bytes() for axis in originals}, originals)
+        annotations = copy.deepcopy(opened['annotations'])
+        annotations['category'] = [interval('new-category', '专注', 0, opened['duration_ms'])]
+        self.service.update_draft(opened['id'], annotations, opened['revision'])
+        self.service.writeback(opened['id'])
+        documents = {axis: json.loads((directory / FILENAMES[axis]).read_bytes()) for axis in AXES}
+        self.assertEqual(len({doc['save_id'] for doc in documents.values()}), 1)
+        self.assertEqual(documents['habit']['segments'], [])
+        reread, _ = self.service.read_external(self.service.load(opened['id']))
+        self.assertEqual(reread['category'][0]['label'], '专注')
+
+    def test_missing_custom_file_keeps_axis_blank_and_custom_only_import_retains_metadata(self):
+        project = self.annotated_project()
+        project = self.service.add_custom_track(project['id'], '环境', 'state', ['安静'], project['revision'])
+        axis = project['custom_tracks'][0]['id']
+        annotations = copy.deepcopy(project['annotations'])
+        annotations[axis] = [interval('quiet', '安静', 0, project['duration_ms'])]
+        project = self.service.update_draft(project['id'], annotations, project['revision'])
+        self.service.writeback(project['id'])
+        directory = self.source / 'timeline'
+        path = directory / filename_for_axis(axis)
+        raw = path.read_bytes()
+        path.unlink()
+        stored = self.service.load(project['id'])
+        imported, hashes, tracks, _, _ = self.service.read_external(stored, include_tracks=True)
+        self.assertEqual(imported[axis], [])
+        self.assertNotIn(axis, hashes)
+        self.assertEqual(tracks, project['custom_tracks'])
+        path.write_bytes(raw)
+        for fixed in AXES:
+            (directory / FILENAMES[fixed]).unlink()
+        imported, _, tracks, enabled, labels = self.service.read_external(stored, include_tracks=True)
+        self.assertEqual(imported[axis], stored['annotations'][axis])
+        self.assertTrue(all(imported[fixed] == [] for fixed in AXES))
+        self.assertEqual(tracks, stored['custom_tracks'])
+        self.assertEqual(enabled, stored['fixed_tracks'])
+        self.assertEqual(labels, stored['track_labels'])
 
     def test_external_category_creation_conflicts_with_old_hash_baseline(self):
         stored = self.legacy_files(self.annotated_project())
@@ -792,9 +867,12 @@ class FourAxisPersistenceTests(unittest.TestCase):
         result, _ = self.service.read_external(self.service.load(stored["id"]))
         self.assertEqual(result, self.service.load(stored["id"])["annotations"])
         (self.source / "timeline" / FILENAMES["category"]).unlink()
-        with self.assertRaises(HTTPException) as error:
-            self.service.read_external(stored)
-        self.assertEqual(error.exception.status_code, 409)
+        partial, hashes = self.service.read_external(stored)
+        self.assertEqual(partial['category'], [])
+        self.assertIsNone(hashes['category'])
+        for axis in LEGACY_AXES:
+            self.assertEqual(partial[axis], result[axis])
+        self.assertEqual(originals, {axis: (self.source / FILENAMES[axis]).read_bytes() for axis in LEGACY_AXES})
 
     def test_same_named_file_blocks_writeback_without_changing_it(self):
         project = self.annotated_project()

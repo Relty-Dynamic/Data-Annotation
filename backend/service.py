@@ -1290,24 +1290,31 @@ class ProjectService:
             return (None, hashes, [], list(AXES), copy.deepcopy(DEFAULT_TRACK_LABELS)) if include_tracks else (None, hashes)
         documents = {}
         directory = self.external_directory(Path(source))
-        for axis in AXES:
-            path = directory / FILENAMES[axis]
+        for path in sorted(directory.glob('*.timeline.json')):
+            axis = path.name.removesuffix('.timeline.json')
+            if axis not in AXES and not valid_custom_axis(axis):
+                raise HTTPException(409, "原目录包含无法识别的时间轴文件。")
             try:
+                if path.is_symlink() or not path.is_file():
+                    raise HTTPException(409, "时间轴文件不是普通文件。")
                 if path.exists():
                     raw = path.read_bytes()
                     if len(raw) > 30 * 1024 * 1024:
                         raise HTTPException(422, "已有标注 JSON 过大，无法加载。")
                     hashes[axis] = digest(raw)
                     documents[axis] = json.loads(raw.decode("utf-8-sig"))
+                    if not isinstance(documents[axis], dict) or not isinstance(documents[axis].get('timebase'), dict):
+                        raise ValueError()
             except (OSError, ValueError):
-                raise HTTPException(422, f"无法读取已有标注文件 {FILENAMES[axis]}。")
+                raise HTTPException(422, f"无法读取已有标注文件 {path.name}。")
         if not documents:
             return (None, hashes, [], list(AXES), copy.deepcopy(DEFAULT_TRACK_LABELS)) if include_tracks else (None, hashes)
-        if set(documents) not in (set(LEGACY_AXES), set(AXES)):
-            raise HTTPException(409, "原目录标注文件不齐全。请恢复同一保存批次的完整文件后重新打开。")
-        tracks = validate_custom_tracks(documents["scene"].get("timebase", {}).get("custom_tracks", []))
-        enabled_fixed = validate_fixed_tracks(documents["scene"].get("timebase", {}).get("fixed_tracks", list(AXES)))
-        imported_labels = validate_track_labels(documents["scene"].get("timebase", {}).get("track_labels", DEFAULT_TRACK_LABELS))
+        # Every present file carries the shared metadata. Missing axes stay blank;
+        # never reconstruct them from a platform draft or another save batch.
+        timebase = next(iter(documents.values()))['timebase']
+        tracks = validate_custom_tracks(timebase.get("custom_tracks", []))
+        enabled_fixed = validate_fixed_tracks(timebase.get("fixed_tracks", list(AXES)))
+        imported_labels = validate_track_labels(timebase.get("track_labels", DEFAULT_TRACK_LABELS))
         if any(document.get("timebase", {}).get("custom_tracks", []) != tracks for document in documents.values()):
             raise HTTPException(409, "标注文件中的自定义时间轴清单不一致。")
         if any(document.get("timebase", {}).get("fixed_tracks", list(AXES)) != enabled_fixed for document in documents.values()):
@@ -1315,22 +1322,9 @@ class ProjectService:
         if any(document.get("timebase", {}).get("track_labels", DEFAULT_TRACK_LABELS) != imported_labels for document in documents.values()):
             raise HTTPException(409, "标注文件中的标签清单不一致。")
         expected_custom = {track["id"] for track in tracks}
-        actual_custom = {path.name.removesuffix(".timeline.json") for path in directory.glob("*.timeline.json")
-                         if path.name not in FILENAMES.values()}
-        if actual_custom != expected_custom:
-            raise HTTPException(409, "自定义时间轴文件不齐全或包含其他保存批次。")
-        for axis in expected_custom:
-            path = directory / filename_for_axis(axis)
-            try:
-                if path.is_symlink() or not path.is_file():
-                    raise HTTPException(409, "自定义时间轴文件不是普通文件。")
-                raw = path.read_bytes()
-                if len(raw) > 30 * 1024 * 1024:
-                    raise HTTPException(422, "已有自定义时间轴 JSON 过大，无法加载。")
-                hashes[axis] = digest(raw)
-                documents[axis] = json.loads(raw.decode("utf-8-sig"))
-            except (OSError, ValueError):
-                raise HTTPException(422, f"无法读取已有标注文件 {path.name}。")
+        actual_custom = set(documents) - set(AXES)
+        if not actual_custom <= expected_custom:
+            raise HTTPException(409, "自定义时间轴文件不在项目轴清单中。")
         batch_ids, versions = set(), set()
         annotations = empty_annotations()
         annotations.update({axis: [] for axis in expected_custom})
@@ -1378,8 +1372,8 @@ class ProjectService:
                 raise HTTPException(409, "标注 JSON 不属于同一保存批次或格式版本。请恢复一致的文件后再打开。")
             version = next(iter(versions))
             expected_axes = LEGACY_AXES if version == 1 else AXES
-            if set(documents) != set(expected_axes) | expected_custom:
-                raise HTTPException(409, "原目录标注文件不齐全或格式版本不一致。旧版须有三个文件，新版须有四个文件。")
+            if not set(documents) <= set(expected_axes) | expected_custom:
+                raise HTTPException(409, "原目录标注文件与格式版本不一致。")
             # Written-back files may preserve unannotated intervals on every axis.
             # Validate their contents without imposing the stricter export rule.
             cleaned = validate_annotations(annotations, project["duration_ms"], final=True, videos=active_videos(selected),
