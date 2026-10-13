@@ -1384,6 +1384,48 @@ class ProjectService:
         except (KeyError, ValueError, TypeError):
             raise HTTPException(422, "已有标注文件格式不受支持，或时间基准不正确。")
 
+    def relocated_fpv_project(self, previous: dict, fresh: dict) -> dict | None:
+        """Recognize a root-to-FPV move without accepting changed media or timing."""
+        root = Path(previous['source_dir'])
+        if fresh['source_dir'] != previous['source_dir'] or len(previous['videos']) != len(fresh['videos']):
+            return None
+        normalized = copy.deepcopy(fresh)
+        for old, new in zip(previous['videos'], normalized['videos']):
+            old_source = previous['_sources'][old['id']]
+            new_source = normalized['_sources'][new['id']]
+            old_path, new_path = Path(old_source['path']), Path(new_source['path'])
+            if (old['name'] != new['name'] or old_path != root / old['name']
+                    or new_path.parent.parent != root or new_path.parent.name.casefold() != 'fpv'
+                    or new_path.name != old_path.name or old_path.is_symlink()
+                    or new_path.is_symlink() or new_path.parent.is_symlink()
+                    or any(old_source['stamp'].get(key) != new_source['stamp'].get(key)
+                           for key in ('size', 'sample_sha256'))):
+                return None
+            # Copying may change mtime; compare recorded content identity and
+            # all timeline fields without treating that metadata as new media.
+            new['relative_path'] = old['relative_path']
+            new_source['stamp'] = copy.deepcopy(old_source['stamp'])
+        items = [{**video, 'id': f'v{index + 1:04d}', 'url': None, 'thumbnail_url': None,
+                  'stamp': normalized['_sources'][video['id']]['stamp']}
+                 for index, video in enumerate(normalized['videos'])]
+        if digest(document_bytes(items)) != self.current_source_fingerprint(previous):
+            return None
+        project = copy.deepcopy(previous)
+        for old, new in zip(project['videos'], fresh['videos']):
+            source = project['_sources'][old['id']]
+            # Existing project-local media retain their verified cache identity.
+            source.setdefault('cache_identity_path', source['path'])
+            source.setdefault('cache_identity_stamp', copy.deepcopy(source['stamp']))
+            source['path'] = fresh['_sources'][new['id']]['path']
+            source['stamp'] = copy.deepcopy(fresh['_sources'][new['id']]['stamp'])
+            # A source-adjacent cache at the old location must not be claimed as
+            # belonging to the new directory. Its files remain untouched.
+            source.pop('cache_directory', None)
+            old['relative_path'] = new['relative_path']
+        project['_source_fingerprint_aliases'] = list(dict.fromkeys([
+            *project.get('_source_fingerprint_aliases', []), fresh['source_fingerprint']]))
+        return project
+
     def open_path(self, raw_path: str, name: str | None = None, *, allowed_project_ids: set[str] | None = None,
                   claim_mode: str | None = None, claim_hashes: dict | None = None) -> dict:
         if claim_mode not in (None, "keep", "continue", "restart"):
@@ -1412,6 +1454,8 @@ class ProjectService:
             with self.connection() as con:
                 row = con.execute("SELECT document FROM projects WHERE source_key=? ORDER BY updated_at DESC LIMIT 1", (source_key,)).fetchone()
             previous = json.loads(row[0]) if row else None
+            original_project = previous
+            relocated = False
             if previous and allowed_project_ids is not None and previous["id"] not in allowed_project_ids:
                 raise HTTPException(403, "该采集目录已由其他标注员领取。")
             if self.source_overlap(paths, previous["id"] if previous else None):
@@ -1427,7 +1471,10 @@ class ProjectService:
                 fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None,
                                     default_fixed_tracks=["scene", "posture"])
                 if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
-                    raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
+                    moved = self.relocated_fpv_project(previous, fresh)
+                    if moved is None:
+                        raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
+                    previous, relocated = moved, True
             if claim_mode == "restart":
                 hashes = self.current_external_hashes(source_dir)
                 if claim_hashes is not None and hashes != claim_hashes:
@@ -1439,10 +1486,16 @@ class ProjectService:
                 if claim_hashes is not None and hashes != claim_hashes:
                     raise HTTPException(409, "NAS 时间轴文件在领取期间发生变化，请重新选择目录。")
             if previous:
+                if relocated:
+                    # Only commit the relocation after all external JSON checks
+                    # succeed; archive the original paths and draft for recovery.
+                    self.sessions.invalidate(previous['id'])
+                    relocation_recovery_id = self.archive_project_document(original_project)
+                    previous.update(revision=previous['revision'] + 1, updated_at=now())
                 preserved_alignment_warnings = alignment_warnings(previous["videos"])
                 previous["warnings"] = preserved_alignment_warnings
                 if claim_mode in ("continue", "restart"):
-                    recovery_id = self.archive_project_document(previous)
+                    recovery_id = relocation_recovery_id if relocated else self.archive_project_document(previous)
                     previous["annotations"] = imported or empty_annotations()
                     previous["custom_tracks"] = imported_tracks
                     previous["fixed_tracks"] = imported_fixed
@@ -1470,7 +1523,7 @@ class ProjectService:
                         previous["updated_at"] = now()
                         previous["warnings"] = preserved_alignment_warnings
                 self.save(previous)
-                return self.public(previous)
+                return {**self.public(previous), **({'recovery_id': relocation_recovery_id} if relocated else {})}
             # For directory imports, the selected folder is the default project name.
             # Keep the marker so a later storage migration does not replace it with a date.
             fresh.update(name=name if name is not None else validate_project_name(path.name), _custom_name=True)
