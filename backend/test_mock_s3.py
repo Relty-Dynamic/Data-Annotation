@@ -48,6 +48,29 @@ class MockS3WorkflowTests(unittest.TestCase):
         self.environment.stop()
         self.temporary.cleanup()
 
+    def test_local_mock_uses_native_desktop_media(self):
+        cache = self.app.state.service.desktop_cache
+        cache.enabled = True
+        cache.override = str(self.root / "local-desktop-cache")
+        opened = self.client.post("/api/storage/projects/open", headers=self.csrf,
+                                  json={"path": "daily/1001test/20261010", "name": "本机测试"})
+        self.assertEqual(opened.status_code, 200, opened.text)
+        ident = opened.json()["id"]
+        self.client.post(f"/api/projects/{ident}/session/prepare", json={}, headers=self.csrf)
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            status = self.client.get(f"/api/projects/{ident}/session").json()
+            if status["state"] in {"ready", "partial", "error"}:
+                break
+            time.sleep(.2)
+        self.assertEqual(status["state"], "ready", status)
+        manifest = self.client.get(f"/api/projects/{ident}/session/manifest").json()
+        self.assertEqual(manifest["cache_location"]["mode"], "native")
+        url = manifest["videos"][0]["url"]
+        self.assertIn("/api/session-media/", url)
+        self.assertEqual(self.client.get(url, headers={"Range": "bytes=0-31"}).status_code, 206)
+        self.assertTrue(list((self.root / "local-desktop-cache").rglob("*.mp4")))
+
     def test_catalog_signed_playback_draft_and_submission(self):
         self.assertIn("s3-mock", self.client.get("/api/health").json()["capabilities"])
         self.assertEqual(self.client.post("/api/projects/open", json={"path": "/mnt/nas/anything"}, headers=self.csrf).status_code, 404)
@@ -191,6 +214,9 @@ class MockS3WorkflowTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/projects").json(), [])
 
     def test_authorized_upload_publishes_compressed_fpv_and_timeline(self):
+        if getattr(self, 'native_upload', False):
+            self.app.state.service.desktop_cache.enabled = True
+            self.app.state.service.desktop_cache.override = str(self.root / 'Desktop' / 'dataMarkProject')
         self.assertEqual(self.client.post("/api/mock-s3/uploads/pick", headers=self.csrf).status_code, 403)
         worker = next(user for user in self.app.state.auth.list_users() if user["username"] == "worker")
         self.app.state.auth.set_upload_permission(worker["id"], True)
@@ -229,6 +255,13 @@ class MockS3WorkflowTests(unittest.TestCase):
                          ("张三", "标注员", "例行采集"))
         self.assertEqual(published["uploaded_by_username"], "worker")
         self.assertEqual(self.app.state.service.probe(compressed)["codec"], "h264")
+        if getattr(self, 'native_upload', False):
+            from backend.desktop_cache import sha256_file
+            directory = self.root / 'Desktop' / 'dataMarkProject' / '1010张三'
+            cached = list(directory.glob('*.normal.mp4'))
+            self.assertEqual(len(cached), 1)
+            self.assertEqual(sha256_file(cached[0]), sha256_file(compressed))
+            self.upload_cache = cached[0]
         listing = self.client.get("/api/mock-s3/sources", params={"prefix": task["prefix"]}).json()
         self.assertTrue(listing["can_open"])
         self.assertEqual(listing["capture"]["collector_name"], "张三")
@@ -249,7 +282,13 @@ class MockS3WorkflowTests(unittest.TestCase):
             time.sleep(.2)
         self.assertEqual(state, "ready")
         manifest = self.client.get(f"/api/projects/{ident}/session/manifest").json()
-        self.assertIn(f"/mock-objects/{quote(task['prefix'])}/FPV/", manifest["videos"][0]["url"])
+        if getattr(self, 'native_upload', False):
+            self.assertIn('/api/session-media/', manifest['videos'][0]['url'])
+            self.assertEqual(manifest['collection_name'], '1010张三')
+            self.assertEqual(len(list(directory.glob('*.normal.mp4'))), 1)
+            self.assertTrue(self.upload_cache.exists())
+        else:
+            self.assertIn(f"/mock-objects/{quote(task['prefix'])}/FPV/", manifest["videos"][0]["url"])
         self.assertEqual(self.client.get(manifest["videos"][0]["url"]).status_code, 200)
         project = self.client.get(f"/api/projects/{ident}").json()
         annotations = project["annotations"]
@@ -269,6 +308,10 @@ class MockS3WorkflowTests(unittest.TestCase):
             json={**body, "selection_id": again.json()["selection_id"]}, headers=self.csrf).status_code, 409)
         self.app.state.auth.set_upload_permission(worker["id"], False)
         self.assertEqual(self.client.post("/api/mock-s3/uploads", json={**body,"collector_name":"another"}, headers=self.csrf).status_code, 403)
+
+    def test_native_upload_retains_compressed_cache_for_annotation(self):
+        self.native_upload = True
+        self.test_authorized_upload_publishes_compressed_fpv_and_timeline()
 
     def test_upload_rejects_non_video_files(self):
         worker = next(user for user in self.app.state.auth.list_users() if user["username"] == "worker")

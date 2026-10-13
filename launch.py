@@ -157,6 +157,7 @@ def main():
     if not AuthStore(auth_root).has_admin():
         command = "python -m backend.auth --root .local/s3-mock-app" if mock_mode else "python -m backend.auth"
         raise RuntimeError(f"尚未创建管理员账号。请先在项目虚拟环境运行 {command}，然后重启平台。")
+    os.environ["DATAMARK_DESKTOP_CACHE"] = "1"
     if args.restart:
         restart_running()
     current = health()

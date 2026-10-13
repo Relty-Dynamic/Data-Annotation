@@ -2,6 +2,7 @@ import { isStoryboardManifest } from './storyboard.ts';
 import {apiUrl} from './apiOrigin.ts';
 import {fetchAsset, validAssetUrl} from './objectAsset.ts';
 import type { StoryboardManifest } from './storyboard.ts';
+import {desktopAssetFile} from './browserVideoCache.ts';
 
 export interface SessionVideo {
   id: string;
@@ -10,7 +11,8 @@ export interface SessionVideo {
   thumbnail_url: string;
   storyboard: StoryboardManifest;
 }
-export interface SessionManifest { version: string; videos: SessionVideo[] }
+export interface DesktopAsset {file_name:string;size:number;sha256:string;url:string;media_type:string;owned?:boolean}
+export interface SessionManifest { version: string; videos: SessionVideo[]; profile?:string; collection_name?:string; assets?:DesktopAsset[]; cache_location?:{mode:'native'|'browser';root:string|null} }
 type AssetCache = {version: string; urls: Map<string, string>; objects: string[]; manifests: Map<string, StoryboardManifest>; decoded: Map<string, HTMLImageElement>};
 const caches = new Map<string, AssetCache>();
 
@@ -71,10 +73,13 @@ export async function prepareSessionAssets(
     while (cursor < assets.length) {
       combined.throwIfAborted();
       const url = assets[cursor++];
-      const response = await fetchAsset(url, {cache: 'no-store', signal: AbortSignal.any([combined, AbortSignal.timeout(30000)])});
-      if (!response.ok) throw new Error('预览图片读取失败，请重试准备素材。');
-      const blob = await response.blob();
-      if (!blob.size || !blob.type.startsWith('image/')) throw new Error('预览图片数据不完整，请重试准备素材。');
+      let blob:Blob|undefined=desktopAssetFile(projectId,url);
+      if(!blob){
+        const response = await fetchAsset(url, {cache: 'no-store', signal: AbortSignal.any([combined, AbortSignal.timeout(30000)])});
+        if (!response.ok) throw new Error('预览图片读取失败，请重试准备素材。');
+        blob=await response.blob();
+      }
+      if (!blob.size || (!desktopAssetFile(projectId,url)&&!blob.type.startsWith('image/'))) throw new Error('预览图片数据不完整，请重试准备素材。');
       combined.throwIfAborted();
       urls.set(url, URL.createObjectURL(blob));
       completed += 1;

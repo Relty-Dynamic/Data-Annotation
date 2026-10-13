@@ -1,0 +1,44 @@
+name: datamark-public-setup
+services:
+  api:
+    image: ${DATAMARK_SETUP_IMAGE:?Tested setup image is required}
+    command: ["/opt/venv/bin/python", "-m", "uvicorn", "backend.public_setup:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    environment:
+      DATAMARK_PUBLIC_ORIGIN: https://datamark.reltydynamic.com
+      DATAMARK_PUBLIC_API_ORIGIN: ${DATAMARK_PUBLIC_API_ORIGIN:-https://api-annotate.reltydynamic.com:8443}
+      PYTHONNOUSERSITE: "1"
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=3)); assert d['mode']=='public-setup' and d['storage_ready'] is False"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [private]
+  gateway:
+    image: ghcr.io/caddy-dns/cloudflare@sha256:f46799052f9dfcf7e634326d279d47a58c1ea598f8330c0b77921971f14aeaf0
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
+    ports: ["${DATAMARK_PUBLIC_BIND_IP:?Ubuntu ingress interface is required}:${DATAMARK_PUBLIC_PORT:-8443}:443"]
+    volumes:
+      - ./Caddyfile.public-setup:/etc/caddy/Caddyfile:ro
+      - ${DATAMARK_TLS_DATA:?Managed Caddy TLS directory is required}:/data
+      - ./caddy-config:/config
+      - ${DATAMARK_DNS_TOKEN_FILE:?Managed DNS token file is required}:/run/secrets/cloudflare_api_token:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [private, ingress]
+networks:
+  private:
+    internal: true
+  ingress:

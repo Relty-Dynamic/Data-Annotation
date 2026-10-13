@@ -22,6 +22,7 @@ from .storyboards import StoryboardCache
 from .project_storage import PROJECT_ID, checked_tree
 from .source_cache import is_reparse, local_nas_cache_root
 from .encoding import encoder_threads
+from .desktop_cache import DesktopCache, collection_name, sha256_file, safe_name
 from .video_selection import active_videos
 
 LOGGER = logging.getLogger('uvicorn.error')
@@ -88,6 +89,7 @@ class SessionCache:
         self._current: dict | None = None
         self._worker: threading.Thread | None = None
         self._closed = False
+        self._desktop_hashes: dict[tuple, str] = {}
         self._local_storyboards = StoryboardCache(service.storage.root)
 
     @staticmethod
@@ -596,12 +598,7 @@ class SessionCache:
 
     @staticmethod
     def _write_json(path: Path, value: dict) -> None:
-        temporary = path.with_suffix(path.suffix + '.partial')
-        try:
-            temporary.write_bytes(_document(value))
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        DesktopCache.write_json(path, value)
 
     @staticmethod
     def _file_record(path: Path, directory: Path) -> dict:
@@ -621,6 +618,8 @@ class SessionCache:
                 return None
             stamp = path.stat()
             if stamp.st_size != record['size'] or stamp.st_mtime_ns != record['mtime_ns'] or stamp.st_size < 4:
+                return None
+            if record.get('sha256') and sha256_file(path) != record['sha256']:
                 return None
             with path.open('rb') as handle:
                 head = handle.read(32)
@@ -676,7 +675,20 @@ class SessionCache:
         except (OSError, ValueError, TypeError, AttributeError):
             return previous
 
-    def _save_progress(self, directory: Path, key: str, source: dict, records: dict) -> None:
+    def _save_progress(self, directory: Path, key: str, source: dict, records: dict, project: dict | None = None) -> None:
+        if project is not None and self.service.desktop_cache.enabled:
+            ready = [record for record in [records.get('normal'), records.get('fast'), records.get('thumbnail'), *records.get('sheets', [])] if isinstance(record, dict)]
+            references = []
+            for record in ready:
+                path = directory / record['path']
+                cache_key = (str(path), record['size'], record['mtime_ns'])
+                checksum = self._desktop_hashes.get(cache_key)
+                if checksum is None:
+                    checksum = sha256_file(path)
+                    self._desktop_hashes[cache_key] = checksum
+                record['sha256'] = checksum
+                references.append({'file_name': record['path'], 'size': record['size'], 'sha256': checksum, 'owned': True})
+            self.service.desktop_cache.reference(project, references)
         self._write_json(directory / (key + '.progress.json'),
                          {**records, 'profile': PROFILE, 'key': key, 'duration_ms': source['duration_ms']})
 
@@ -755,7 +767,14 @@ class SessionCache:
             return
         if spec.source.get('precompressed'):
             self.service.check_media_source(spec.path, spec.source)
-            self._copy_asset(spec.path, target, stopping)
+            existing = spec.path
+            if self.service.desktop_cache.enabled:
+                from .desktop_cache import safe_name, sha256_file
+                digest = sha256_file(spec.path)
+                candidate = target.parent / (safe_name(spec.path.stem) + '.' + digest + '.normal.mp4')
+                if not is_reparse(candidate) and candidate.is_file() and sha256_file(candidate) == digest:
+                    existing = candidate
+            self._copy_asset(existing, target, stopping)
             self._write_json(marker, {'profile': PROFILE, 'duration_ms': spec.source['duration_ms'],
                                       'file': self._file_record(target, target.parent)})
             update(100)
@@ -809,6 +828,16 @@ class SessionCache:
         key = self._source_key(source)
         try:
             entry = self._load_entry(directory, key, source)
+            if entry is None and self.service.desktop_cache.enabled:
+                legacy_directories = [self.service.storage.directory(project['id']) / 'playback']
+                old_directory = job.get('previous_desktop_directory')
+                if old_directory is not None and old_directory != directory and not is_reparse(old_directory):
+                    legacy_directories.append(old_directory)
+                for legacy in legacy_directories:
+                    old = self._load_entry(legacy, key, source)
+                    if old is not None:
+                        entry = self.service.desktop_cache.publish_entry(project, video, old, legacy, directory)
+                        break
             if entry is None:
                 found = self._local_nas_entry(source)
                 if found is not None:
@@ -858,6 +887,14 @@ class SessionCache:
             if entry is None:
                 previous = self._restore_progress(directory, key, source, self._read_entry(directory, key, source) or {})
                 target = directory / (key + '.compact-v1.mp4')
+                if self.service.desktop_cache.enabled and target.exists() and not previous.get('normal'):
+                    registered = False
+                    for ref in directory.glob('.datamark-ref.*.json'):
+                        if is_reparse(ref): raise HTTPException(409, '缓存引用含外部链接。')
+                        value = json.loads(ref.read_text(encoding='utf-8'))
+                        registered = registered or any(item.get('owned') and item['file_name'] == target.name for item in value.get('files', []))
+                    if not registered:
+                        raise HTTPException(409, '发现未登记的同名文件，已保留原文件，请更换缓存目录。')
                 normal_ready = self._reuse_file(target, previous.get('normal')) or self._compact_ready(source, target)
                 if not available and not normal_ready:
                     raise HTTPException(404, '本机播放视频尚未完成，原视频目录当前不可访问。请连接原磁盘或共享目录后重新准备。')
@@ -895,7 +932,7 @@ class SessionCache:
                     timings['normal_seconds'] = round(time.monotonic() - started, 3)
                 self._check(job)
                 previous['normal'] = self._file_record(target, directory)
-                self._save_progress(directory, key, source, previous)
+                self._save_progress(directory, key, source, previous, project=project)
                 self._progress(job, video_id, 'local', 80, '正在准备本机高倍速视频和全部缩略图。', operation='assets')
                 if not fast_ready:
                     started = time.monotonic()
@@ -906,7 +943,7 @@ class SessionCache:
                                           job['stop'])
                     timings['fast_seconds'] = round(time.monotonic() - started, 3)
                 previous['fast'] = self._file_record(local_fast, directory)
-                self._save_progress(directory, key, source, previous)
+                self._save_progress(directory, key, source, previous, project=project)
                 self._check(job)
                 if not thumbnail_ready:
                     started = time.monotonic()
@@ -916,7 +953,7 @@ class SessionCache:
                     timings['thumbnail_seconds'] = round(time.monotonic() - started, 3)
                 previous['thumbnail'] = self._file_record(local_thumbnail, directory)
                 previous['sheets'] = [previous_sheets[index] if index < len(previous_sheets) else None for index in range(len(local_sheets))]
-                self._save_progress(directory, key, source, previous)
+                self._save_progress(directory, key, source, previous, project=project)
                 self._progress(job, video_id, 'local', 92, '正在准备本机悬停图片。', operation='assets')
                 generated_directory = None
                 if missing_sheets:
@@ -931,7 +968,7 @@ class SessionCache:
                             generate.append(index)
                         else:
                             previous['sheets'][index] = self._file_record(local_sheets[index], directory)
-                            self._save_progress(directory, key, source, previous)
+                            self._save_progress(directory, key, source, previous, project=project)
                     if generate:
                         work_root = checked_tree(directory / '.storyboard-work', directory)
                         self._local_storyboards.register_directory(key, work_root)
@@ -945,7 +982,7 @@ class SessionCache:
                             self._check(job)
                             self._copy_asset(generated_directory / generated['sheets'][index], local_sheets[index], job['stop'])
                             previous['sheets'][index] = self._file_record(local_sheets[index], directory)
-                            self._save_progress(directory, key, source, previous)
+                            self._save_progress(directory, key, source, previous, project=project)
                     timings['storyboard_seconds'] = round(time.monotonic() - started, 3)
                 self._check(job)
                 # Recheck the original stamp before publishing even when the
@@ -1069,9 +1106,19 @@ class SessionCache:
         ident = project['id']
         self._check(job)
         parent = self.service.storage.directory(ident)
-        directory = checked_tree(parent / 'playback', parent)
+        directory = (self.service.desktop_cache.directory(project) if self.service.desktop_cache.enabled
+                     else checked_tree(parent / 'playback', parent))
+        parent.mkdir(parents=True, exist_ok=True)
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / 'README.md').write_text(README, encoding='utf-8')
+        readme = directory / ('README.datamark.md' if self.service.desktop_cache.enabled else 'README.md')
+        try:
+            with readme.open('x', encoding='utf-8') as stream:
+                stream.write(README)
+        except FileExistsError:
+            pass
+        index_file = parent / 'desktop-cache.json'
+        if self.service.desktop_cache.enabled and index_file.is_file():
+            job['previous_desktop_directory'] = Path(json.loads(index_file.read_text(encoding='utf-8'))['directory'])
         entries = self._prepare_videos(job, directory)
         self._check(job)
         if len(entries) != len(project['videos']):
@@ -1086,9 +1133,14 @@ class SessionCache:
                     detail = job['status']['items'][0]['detail']
                 job['status'].update(state='partial', detail=detail)
             return
+        if self.service.desktop_cache.enabled:
+            video_map = {video['id']: video for video in project['videos']}
+            entries = [(video_id, (self.service.desktop_cache.publish_entry(project, video_map[video_id], entry, asset_directory, directory), directory))
+                       for video_id, (entry, asset_directory) in entries]
         version = _digest([job['signature'], [(video_id, entry) for video_id, (entry, _) in entries]])[:24]
         assets = {}
         videos = []
+        downloads = []
         all_on_nas = True
         for video_id, (entry, asset_directory) in entries:
             all_on_nas = all_on_nas and asset_directory != directory
@@ -1101,8 +1153,25 @@ class SessionCache:
                            'thumbnail_url': f'/api/session-thumbnails/{ident}/{version}/{video_id}',
                            'storyboard': {**entry['storyboard'], 'state': 'ready', 'detail': None,
                                           'sheets': [f'/api/session-storyboards/{ident}/{version}/{video_id}/{index}' for index in range(len(entry['sheets']))]}})
-        manifest = {'project_id': ident, 'version': version, 'profile': PROFILE, 'videos': videos}
-        self._write_json(directory / 'manifest.json', {**manifest, 'signature': job['signature']})
+        video_map = {video['id']: video for video in project['videos']}
+        for video in videos:
+            video_id = video['id']
+            urls = [('normal', None, video['url']), ('fast', None, video['fast_url']), ('thumbnail', None, video['thumbnail_url']),
+                    *[('sheet', index, url) for index, url in enumerate(video['storyboard']['sheets'])]]
+            for kind, index, url in urls:
+                path, record = assets[(kind, video_id, index)]
+                checksum = record.get('sha256') or sha256_file(path)
+                label = f'storyboard-{index:03d}' if kind == 'sheet' else kind
+                name = safe_name(Path(video_map[video_id]['name']).stem) + '.' + checksum + '.' + label + path.suffix
+                downloads.append({'file_name': name, 'size': record['size'], 'sha256': checksum, 'url': url,
+                                  'media_type': 'video/mp4' if kind in {'normal','fast'} else 'image/jpeg'})
+        manifest = {'project_id': ident, 'version': version, 'profile': PROFILE, 'collection_name': collection_name(project), 'videos': videos,
+                    'assets': downloads, 'cache_location': self.service.desktop_cache.settings()}
+
+        if self.service.desktop_cache.enabled:
+            self.service.desktop_cache.register(project, manifest, [{key: item[key] for key in ('file_name','size','sha256')} for item in downloads])
+        else:
+            self._write_json(directory / 'manifest.json', {**manifest, 'signature': job['signature']})
         self._check(job)
         with self._condition:
             if job['stop'].is_set():

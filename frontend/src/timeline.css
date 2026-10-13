@@ -11,7 +11,8 @@
 
 
 
-.tl-scroll { overflow-x: scroll; overflow-y: hidden; scrollbar-color: #647d94 #111a24; scrollbar-width: auto; overscroll-behavior-x: contain; }
+.tl-body { position: relative; isolation: isolate; }
+.tl-scroll { position: relative; z-index: 0; overflow-x: scroll; overflow-y: hidden; scrollbar-color: #647d94 #111a24; scrollbar-width: auto; overscroll-behavior-x: contain; }
 .tl-content { min-width: 100%; position: relative; }
 .tl-fixed-tracks { position: relative; }
 .tl-tracks-viewport { position: sticky; left: 0; max-height: clamp(140px, 35vh, 400px); overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #647d94 #111a24; }
@@ -155,7 +156,8 @@
 .tl-hover-line { position: absolute; top: 0; bottom: 0; width: 1px; z-index: 6; pointer-events: none; background: #e2e9f2b3; box-shadow: 0 0 0 1px #07111d66; }
 .tl-hover-line-snapped { background: #ffda8b; box-shadow: 0 0 0 1px #ffda8b30; }
 .tl-range-overlay { position: absolute; top: 26px; bottom: 0; z-index: 4; pointer-events: none; background: #85c9f014; border-left: 1px solid #8bd2f580; border-right: 1px solid #8bd2f580; box-sizing: border-box; }
-.tl-anchor { position: absolute; top: 0; bottom: 0; width: 0; z-index: 5; border-left: 1px dashed #e7b97eaa; pointer-events: none; }
+/* Anchors remain above the playhead, hover line and selected range. */
+.tl-anchor { position: absolute; top: 0; bottom: 0; width: 1px; z-index: 8; background: #e7b97e; pointer-events: none; }
 .tl-anchor-label { position: absolute; top: 0; left: 2px; width: 16px; height: 20px; padding-top: 1px; background: #e7b97e; color: #302214; font-size: 10px; font-weight: 700; text-align: center; clip-path: polygon(0 0, 100% 0, 100% 74%, 50% 100%, 0 74%); }
 .tl-anchor-label-left { left: -18px; }
 

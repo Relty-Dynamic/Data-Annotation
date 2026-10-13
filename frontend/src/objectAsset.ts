@@ -6,7 +6,7 @@ export function validAssetUrl(value: string): boolean {
   try {
     const url = new URL(value);
     const expected = apiOrigin || (typeof window === 'undefined' ? '' : window.location.origin);
-    return !!expected && url.origin === expected && url.pathname.startsWith('/mock-objects/media/') &&
+    return !!expected && url.origin === expected && (url.pathname.startsWith('/mock-objects/media/')||(url.pathname.startsWith('/mock-objects/daily/')&&url.pathname.endsWith('.mp4'))) &&
       (url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)));
   } catch { return false; }
 }

@@ -164,7 +164,9 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.service.save(raw)
         added = self.service.set_fixed_track(project["id"], "posture", True, saved["revision"])
         self.assertEqual(added["fixed_tracks"], ["posture"])
-        self.assertTrue(self.service.export_zip(project["id"]))
+        with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+            exported = json.loads(archive.read(FILENAMES["posture"]))
+            self.assertEqual(exported["segments"], [])
         self.service.writeback(project["id"])
         self.assertEqual(json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())["segments"], [])
         restored, _ = self.service.read_external(self.service.load(project["id"]))
@@ -214,7 +216,9 @@ class FourAxisPersistenceTests(unittest.TestCase):
         project = self.annotated_project()
         changed = self.service.set_track_labels(project["id"], "posture", ["动", "站", "躺", "蹲"], project["revision"])
         self.assertEqual(changed["annotations"]["posture"], [])
-        self.assertTrue(self.service.export_zip(project["id"]))
+        with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+            exported = json.loads(archive.read(FILENAMES["posture"]))
+            self.assertEqual(exported["segments"], [])
         self.service.writeback(project["id"])
         self.assertEqual(json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())["segments"], [])
         fresh = ProjectService(self.root / "empty-posture-fresh")
@@ -519,6 +523,28 @@ class FourAxisPersistenceTests(unittest.TestCase):
             interval("extra", "用餐", 800, 2000, mode="overlay"),
         ])
 
+    def test_export_with_both_fixed_state_axes_empty_preserves_structural_checks(self):
+        project = self.annotated_project()
+        annotations = copy.deepcopy(project["annotations"])
+        annotations["scene"] = []
+        annotations["posture"] = []
+        updated = self.service.update_draft(project["id"], annotations, project["revision"])
+        with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+            for axis in ("scene", "posture"):
+                self.assertEqual(json.loads(archive.read(FILENAMES[axis]))["segments"], [])
+        stored = self.service.load(project["id"])
+        for invalid in (
+            interval("open", "喝水", 100, None),
+            interval("range", "喝水", 100, project["duration_ms"] + 1),
+            interval("label", "", 100, 200),
+        ):
+            with self.subTest(invalid=invalid):
+                candidate = copy.deepcopy(stored)
+                candidate["annotations"]["habit"] = [invalid]
+                with self.assertRaises(HTTPException) as error:
+                    self.service.export_documents(candidate)
+                self.assertEqual(error.exception.status_code, 422)
+
     def test_missing_posture_exports_writes_back_and_reopens_without_filling(self):
         project = self.annotated_project()
         label = project["annotations"]["posture"][0]["label"]
@@ -528,8 +554,11 @@ class FourAxisPersistenceTests(unittest.TestCase):
                 annotations["category"] = []
                 annotations["posture"] = [interval("partial", label, 100, 3000)] if partial else []
                 project = self.service.update_draft(project["id"], annotations, project["revision"])
-                self.assertTrue(self.service.export_zip(project["id"]))
                 annotations = project["annotations"]
+                with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+                    exported = json.loads(archive.read(FILENAMES["posture"]))
+                    self.assertEqual([(item["start_ms"], item["end_ms"]) for item in exported["segments"]],
+                                     [(item["start_ms"], item["end_ms"]) for item in annotations["posture"]])
                 self.service.writeback(project["id"])
                 document = json.loads((self.source / "timeline" / FILENAMES["posture"]).read_bytes())
                 self.assertEqual([(item["start_ms"], item["end_ms"]) for item in document["segments"]],
@@ -551,8 +580,11 @@ class FourAxisPersistenceTests(unittest.TestCase):
                 annotations["scene"] = scene
                 updated = self.service.update_draft(project["id"], annotations, project["revision"])
                 project = updated
-                self.assertTrue(self.service.export_zip(project["id"]))
                 scene = updated["annotations"]["scene"]
+                with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+                    exported = json.loads(archive.read(FILENAMES["scene"]))
+                    self.assertEqual([(item["start_ms"], item["end_ms"]) for item in exported["segments"]],
+                                     [(item["start_ms"], item["end_ms"]) for item in scene])
                 self.service.writeback(project["id"])
                 document = json.loads((self.source / "timeline" / FILENAMES["scene"]).read_bytes())
                 self.assertEqual([(item["start_ms"], item["end_ms"]) for item in document["segments"]],
@@ -574,7 +606,9 @@ class FourAxisPersistenceTests(unittest.TestCase):
         updated = self.service.update_draft(project["id"], annotations, project["revision"])
         self.assertEqual(updated["annotations"]["scene"][0]["start_ms"], 1500)
         self.assertEqual(updated["annotations"]["category"], [])
-        self.assertTrue(self.service.export_zip(project["id"]))
+        with zipfile.ZipFile(io.BytesIO(self.service.export_zip(project["id"]))) as archive:
+            exported = json.loads(archive.read(FILENAMES["scene"]))
+            self.assertEqual(exported["segments"][0]["start_ms"], 1500)
         self.service.writeback(project["id"])
         self.assertTrue(all((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
 

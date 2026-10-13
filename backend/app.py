@@ -21,7 +21,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
-from .service import ProjectService
+from .service import AXES, ProjectService, now
 from .browser_lifetime import BrowserLifetime
 from .native_picker import choose_local_paths, native_picker_available
 from .source_browser import browse_sources
@@ -74,6 +74,15 @@ class EditingSessionRequest(BaseModel):
 class FixedTrackRequest(BaseModel):
     enabled: bool
     expected_revision: int = Field(ge=0, strict=True)
+
+
+class CacheCollectionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class CacheRootRequest(BaseModel):
+    root: str = Field(min_length=1, max_length=4096)
 
 
 class TrackLabelsRequest(BaseModel):
@@ -402,6 +411,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.get("/api/health")
     def health():
         capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "account-login", "account-track-library", "subaxis-annotations", "selected-track-writeback"]
+        if service.desktop_cache.enabled:
+            capabilities.append("desktop-playback-cache")
         if mock_mode:
             capabilities.append("s3-mock")
             if mock_catalog:
@@ -513,11 +524,65 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         user = require_default_editor(request, True)
         return track_library.set_default(user["id"] if user else None, track_id, body.is_default)
 
+    @app.put("/api/projects/{project_id}/cache-collection")
+    def set_cache_collection(project_id: str, body: CacheCollectionRequest):
+        from .desktop_cache import safe_name
+        if safe_name(body.name) != body.name:
+            raise HTTPException(422, "采集目录名不能使用路径、系统保留名或 Windows 不支持的字符。")
+        with service.lock:
+            project = service.load(project_id)
+            if project['revision'] != body.expected_revision:
+                raise HTTPException(409, "项目已更新，请重新打开后设置采集目录名。")
+            if project.get('collection_folder_name') != body.name:
+                service.sessions.invalidate(project_id)
+                project['collection_folder_name'] = body.name
+                project['revision'] += 1
+                project['updated_at'] = now()
+                service.save(project)
+            return service.public(project)
+
+    @app.get("/api/cache-location")
+    def cache_location():
+        return service.desktop_cache.settings()
+
+    @app.put("/api/cache-location")
+    def set_cache_location(body: CacheRootRequest, request: Request):
+        if not service.desktop_cache.enabled or not request.client or request.client.host not in {"127.0.0.1", "::1", "testclient"}:
+            raise HTTPException(403, "仅本机服务可修改本机缓存根目录。")
+        with service.lock:
+            with service.connection() as con:
+                ids = [row[0] for row in con.execute("SELECT id FROM projects")]
+            service._clearing_playback.update(ids)
+            try:
+                for ident in ids:
+                    service.sessions.invalidate(ident)
+                return service.desktop_cache.configure(body.root)
+            finally:
+                service._clearing_playback.difference_update(ids)
+
     @app.get("/api/account/track-templates")
     def list_track_templates(request: Request):
         if not auth_required:
             return []
         return auth.list_track_templates(request.state.user["id"])
+
+    @app.get("/api/account/fixed-track-templates")
+    def list_fixed_track_templates(request: Request):
+        if not auth_required:
+            return list(AXES)
+        return auth.visible_fixed_track_templates(request.state.user["id"])
+
+    @app.delete("/api/account/fixed-track-templates/{track_id}")
+    def hide_fixed_track_template(track_id: str, request: Request):
+        if not auth_required:
+            raise HTTPException(404, "本机无账号模板。")
+        return auth.set_fixed_track_template_visible(request.state.user["id"], track_id, False)
+
+    @app.put("/api/account/fixed-track-templates/{track_id}")
+    def restore_fixed_track_template(track_id: str, request: Request):
+        if not auth_required:
+            raise HTTPException(404, "本机无账号模板。")
+        return auth.set_fixed_track_template_visible(request.state.user["id"], track_id, True)
 
     @app.put("/api/account/track-templates")
     def save_track_template(body: TrackTemplateRequest, request: Request):
@@ -974,7 +1039,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.get("/api/projects/{project_id}/session/manifest")
     def session_manifest(project_id: str, request: Request):
         manifest = service.sessions.manifest(project_id)
-        if mock_s3 and service.load(project_id).get("_mock_s3"):
+        if mock_s3 and service.load(project_id).get("_mock_s3") and not service.desktop_cache.enabled:
             origin = f"{request.url.scheme}://{request.headers['host']}"
             return mock_s3.media_manifest(service, manifest, origin)
         return manifest
@@ -993,7 +1058,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                                        headers={"Cache-Control": "private, max-age=60", "Referrer-Policy": "no-referrer"})
 
     def session_file(project_id: str, version: str, video_id: str, kind: str, index: int | None = None):
-        if mock_s3 and service.load(project_id).get("_mock_s3"):
+        if mock_s3 and service.load(project_id).get("_mock_s3") and not service.desktop_cache.enabled:
             raise HTTPException(404, "mock 播放素材只通过签名对象地址提供。")
         path = service.sessions.asset(project_id, kind, video_id, index, version=version)
         if path is None:

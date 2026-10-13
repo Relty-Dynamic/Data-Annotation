@@ -63,6 +63,7 @@ class RemoteClientTests(unittest.TestCase):
             probe=Mock(side_effect=AssertionError('Unexpected local probe')),
             tool=Mock(side_effect=AssertionError('Unexpected local FFmpeg lookup')),
         )
+        self.service.desktop_cache = SimpleNamespace(enabled=False, settings=lambda: {'mode': 'browser', 'root': None})
         self.sessions = SessionCache(self.service)
         self.addCleanup(self.sessions.close)
         self.updates = []
