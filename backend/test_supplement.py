@@ -73,7 +73,7 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual(after["revision"], 1)
         self.assertEqual([v["name"] for v in after["videos"]], [first.name, added.name, last.name])
         self.assertEqual([v["id"] for v in after["videos"]], ["v0001", "v0003", "v0002"])
-        self.assertEqual(after["annotations"]["habit"], ann["habit"])
+        self.assertEqual(after["annotations"]["habit"], [{**item, "lane": 0} for item in ann["habit"]])
         self.assertEqual([(v["start_ms"], v["end_ms"]) for v in after["annotations"]["scene"]], [(0, 1000), (2000, 3000)])
         self.assertEqual(after["gaps"], [])
         stored = self.service.load(before["id"])

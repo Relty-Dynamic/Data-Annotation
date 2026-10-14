@@ -31,15 +31,12 @@ import { useMediaBuffering } from './useMediaBuffering';
 import PreparePanel from './PreparePanel';
 import { sessionAssetUrl } from './sessionAssets';
 import { readProjectPreference, readRestorableProjectPreference, writeProjectPreference } from './projectPreferences';
-import { advanceVideoTime, playbackProfile, seekMediaTime, sourceTime } from './playback';
-import { formatTime, parseTime, switchCoveredState, applyAnnotationRange, deleteAnnotation, TRACKS, projectTracks, projectTrackLabels, customTrack, trackName, isEventTrack, isExclusiveTrack, locateVideo, annotationsEqual, normalizeStateSeams, anchorVideoTime, restoreVideoTime, isSegmentDraftDirty, splitAnnotationLabel, annotationLabel } from './domain';
-import { POSTURE_SHORTCUTS, postureShortcutLabel } from './postureShortcuts';
+import { advanceVideoTime, applyPlaybackRate, playbackProfile, seekMediaTime, sourceTime } from './playback';
+import { formatTime, parseTime, switchCoveredState, applyAnnotationRange, applyAnnotationPoint, assignSegmentLanes, deleteAnnotation, TRACKS, projectTracks, projectTrackLabels, projectAnnotationLabels, customTrack, trackName, isEventTrack, locateVideo, annotationsEqual, normalizeStateSeams, anchorVideoTime, restoreVideoTime, isSegmentDraftDirty, splitAnnotationLabel, annotationLabel } from './domain';
 import type { FixedTrack, Project, Segment, Track, VideoTimeAnchor } from './domain';
-import CustomTrackDialog from './CustomTrackDialog';
-import type {TrackTemplate} from './CustomTrackDialog';
-import DeleteCustomTrackDialog from './DeleteCustomTrackDialog';
+import TrackLibraryDialog from './TrackLibraryDialog';
+import TrackSelectionDialog from './TrackSelectionDialog';
 import CacheLocationDialog from './CacheLocationDialog';
-import TrackLabelsDialog from './TrackLabelsDialog';
 type ImportMode = 'new' | 'supplement' | 'relink';
 type ComposerDraft = {label:string; start:string; end:string; kind:'point'|'interval'};
 type SupplementResponse = {project:Project; added_count:number; skipped_names:string[]};
@@ -55,7 +52,7 @@ async function api<T>(url:string,init?:RequestInit):Promise<T>{const r=await aut
 function json(method:string,body:unknown){return {method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};}
 async function requireSourceCapabilities(supplement=false,nativePicker=false){
  const health=await api<{capabilities?:string[]}>('/api/health',{cache:'no-store'});
- const required=['source-local-cache','compact-local-playback','four-axis-annotations',...(supplement?['supplement-import']:[]),...(nativePicker?['native-file-picker']:[])];
+ const required=['source-local-cache','compact-local-playback','four-axis-annotations','subaxis-annotations',...(supplement?['supplement-import']:[]),...(nativePicker?['native-file-picker']:[])];
  if(!required.every(capability=>health.capabilities?.includes(capability)))throw new Error(oldBackendMessage);
 }
 async function requireProjectNaming(){
@@ -73,13 +70,8 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const [passwordOpen,setPasswordOpen]=useState(false);
  const [auditOpen,setAuditOpen]=useState(false);
  const [projects,setProjects]=useState<Project[]>([]),[activeTrack,setActiveTrack]=useState<Track>('scene');
- const [customTrackOpen,setCustomTrackOpen]=useState(false);
+ const [libraryOpen,setLibraryOpen]=useState(false),[selectionOpen,setSelectionOpen]=useState(false);
  const [cacheLocationOpen,setCacheLocationOpen]=useState(false);
- const [trackTemplates,setTrackTemplates]=useState<TrackTemplate[]>([]);
- const [visibleFixedTemplates,setVisibleFixedTemplates]=useState<FixedTrack[]>([]),[templatesLoading,setTemplatesLoading]=useState(false),[templatesError,setTemplatesError]=useState('');
- useEffect(()=>{if(!customTrackOpen)return;let cancelled=false;setTemplatesLoading(true);setTemplatesError('');void Promise.all([api<TrackTemplate[]>('/api/account/track-templates'),api<FixedTrack[]>('/api/account/fixed-track-templates')]).then(([items,fixed])=>{if(!cancelled){setTrackTemplates(items);setVisibleFixedTemplates(fixed);}}).catch(reason=>{if(!cancelled)setTemplatesError(reason instanceof Error?reason.message:'读取账号时间轴入口失败。');}).finally(()=>{if(!cancelled)setTemplatesLoading(false);});return()=>{cancelled=true;};},[customTrackOpen]);
- const [labelsOpen,setLabelsOpen]=useState(false);
- const [deleteTrack,setDeleteTrack]=useState<{id:Track;name:string;fixed:boolean}|null>(null),[deletingTrack,setDeletingTrack]=useState(false),[deleteTrackError,setDeleteTrackError]=useState('');
  const [trackRevealVersion,setTrackRevealVersion]=useState(0);
  const [time,setTime]=useState(0),timeRef=useRef(0),[videoId,setVideoId]=useState('');
  const [playing,setPlaying]=useState(false),wantsPlay=useRef(false),[rate,setRate]=useState(1),[muted,setMuted]=useState(true);
@@ -137,6 +129,8 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const segmentEditorRef=useRef<HTMLDivElement>(null);
  useEffect(()=>{if(manual&&selectedId)segmentEditorRef.current?.scrollIntoView({block:'nearest'});},[manual,selectedId]);
  const [anchors,setAnchors]=useState<number[]>([]),[selectedRange,setSelectedRange]=useState<{start_ms:number;end_ms:number}|null>(null);
+ const [subaxis,setSubaxis]=useState(false);
+ useEffect(()=>{if(!selectedRange||selectedId)setSubaxis(false);},[selectedRange,selectedId]);
  const [behaviorKind,setBehaviorKind]=useState<'point'|'interval'>('interval');
  const [history,setHistory]=useState<Project['annotations'][]>([]),[redoHistory,setRedoHistory]=useState<Project['annotations'][]>([]),[help,setHelp]=useState(false);
  const historyRef=useRef<Project['annotations'][]>([]),redoRef=useRef<Project['annotations'][]>([]);
@@ -152,9 +146,16 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  function updateHistory(past:Project['annotations'][],future:Project['annotations'][]){historyRef.current=past;redoRef.current=future;setHistory(past);setRedoHistory(future);}
  function activateVideo(id:string){videoIdRef.current=id;setVideoId(id);}
  function pausePlayback(){wantsPlay.current=false;videoRef.current?.pause();syncNativeTime();setPlaying(false);}
- function playNative(v:HTMLVideoElement){v.play().catch(()=>{if(videoRef.current!==v||!wantsPlay.current)return;pausePlayback();setError('视频尚未就绪，请稍后点击播放。');});}
+ function applyPlayerRate(v:HTMLVideoElement){
+  const desired=playbackProfile(rateRef.current,wantsPlay.current);
+  if(v!==videoRef.current||(Number(v.dataset.timeScale)||1)!==desired.scale)return false;
+  applyPlaybackRate(v,desired.nativeRate);return true;
+ }
+ function playNative(v:HTMLVideoElement){if(!applyPlayerRate(v))return;v.play().catch(()=>{if(videoRef.current!==v||!wantsPlay.current)return;pausePlayback();setError('视频尚未就绪，请稍后点击播放。');});}
+ function changeRate(value:number){rateRef.current=value;setRate(value);const v=videoRef.current;if(v)applyPlayerRate(v);}
 
- const selected=project?.annotations[activeTrack]?.find(s=>s.id===selectedId);
+ const activeSegments=useMemo(()=>assignSegmentLanes(project?.annotations[activeTrack]??[],project?.duration_ms??0),[project?.annotations,project?.duration_ms,activeTrack]);
+ const selected=activeSegments.find(s=>s.id===selectedId);
  const eventTrack=!!project&&isEventTrack(project,activeTrack);
  const hasEventDraft=!manual&&eventTrack&&activeTrack!=='habit'&&Boolean(label.trim()||(!selectedRange&&(startText.trim()||endText.trim())));
  const hasPendingEdit=hasEventDraft||(manual&&isSegmentDraftDirty(selected,{label,start:startText,end:endText,kind:behaviorKind}));
@@ -187,15 +188,17 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const showBuffering=useMediaBuffering(videoRef,wantsPlay,!!activeVideo&&!previewPending&&!previewError&&!scrubbing,`${project?.id}/${videoId}/${mediaVersion}/${profile.fast}`);
  const count=project?Object.values(project.annotations).reduce((n,a)=>n+a.length,0):0;
  const running=project?.annotations.habit.filter(s=>s.end_ms===null)??[];
+ const unfinishedCount=project?Object.values(project.annotations).flat().filter(s=>s.end_ms===null).length:0;
  const spans=project?.recording_runs??project?.videos??[];
  const fixedLabels=project?projectTrackLabels(project,activeTrack):[];
- const currentStates=project?.annotations[activeTrack]?.filter(s=>s.start_ms<=time&&(s.end_ms===null||time<s.end_ms))??[];
+ const editorLabelOptions=project&&!eventTrack?projectAnnotationLabels(project,activeTrack):[];
+ const currentStates=activeSegments.filter(s=>s.start_ms<=time&&(s.end_ms===null||time<s.end_ms));
  const refresh=()=>api<Project[]>('/api/projects').then(setProjects).catch(e=>setError(e.message));
  useEffect(()=>{requireSourceCapabilities().then(()=>api<Project[]>('/api/projects')).then(ps=>{setProjects(ps);const last=readRestorableProjectPreference(lastProjectKey,previewsClearedKey);if(last&&ps.some(p=>p.id===last))api<Project>(`/api/projects/${last}`).then(p=>{if(!projectRef.current)adopt(p,true);}).catch(e=>setError(e.message));}).catch(e=>setError(e.message));},[]);
  useEffect(()=>{if(project&&activeTrack==='habit'&&!manual){try{localStorage.setItem(composerKey(project.id),JSON.stringify({label,start:startText,end:endText,kind:behaviorKind}));}catch{}}},[project?.id,activeTrack,manual,label,startText,endText,behaviorKind]);
  useEffect(()=>{if(notice&&!prepareOpen&&!importOpen&&!busy){const t=setTimeout(()=>setNotice(''),9000);return()=>clearTimeout(t);}},[notice,prepareOpen,importOpen,busy]);
  useEffect(()=>{const warn=(e:BeforeUnloadEvent)=>{if(pendingSaves.current||saveFailedRef.current||busyRef.current||hasPendingEdit){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);},[hasPendingEdit]);
- function resetEditorFields(){setSelectedId(null);setLabel('');setStartText('');setEndText('');setManual(false);setBehaviorKind('interval');}
+ function resetEditorFields(){setSelectedId(null);setLabel('');setStartText('');setEndText('');setManual(false);setBehaviorKind('interval');setSubaxis(false);}
  function clearEditor(){resetEditorFields();if(selectedRange){setStartText(formatTime(selectedRange.start_ms));setEndText(formatTime(selectedRange.end_ms));}else if(activeTrack==='habit'&&project)restoreComposer(project.id);}
  function clearComposer(){if(project){try{localStorage.removeItem(composerKey(project.id));}catch{}}resetEditorFields();}
  function restoreComposer(id:string){try{const d=JSON.parse(localStorage.getItem(composerKey(id))??'null');if(d){setLabel(d.label??'');setStartText(d.start??'');setEndText(d.end??'');setBehaviorKind(d.kind==='point'?'point':'interval');}}catch{}}
@@ -237,7 +240,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   setMediaError('');
   const scale=Number(v.dataset.timeScale)||1;
   const source=projectRef.current?.videos.find(item=>item.id===videoIdRef.current);if(!source)return;
-  v.playbackRate=wantsPlay.current?rateRef.current/scale:1;
+  if(!applyPlayerRate(v))return;
   const local=pendingSeek.current??Math.max(0,(timeRef.current-source.start_ms)/1000);
   pendingSeek.current=null;seekMediaTime(v,local,scale);
   
@@ -259,7 +262,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  }
  useEffect(()=>{
   const v=videoRef.current;if(!v)return;
-  v.playbackRate=profile.nativeRate;
+  if(!applyPlayerRate(v))return;
   if(wantsPlay.current&&v.readyState>0)playNative(v);
  },[rate,profile.fast,playing]);
  useEffect(()=>{
@@ -290,7 +293,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   }).catch((e:Error)=>{if(projectRef.current?.id===p.id){saveFailedRef.current=true;setSaveFailed(true);setError(e.message);}})
    .finally(()=>{pendingSaves.current--;if(projectRef.current?.id===p.id)setSaveState(saveFailedRef.current?'保存失败，改动保留在此页':pendingSaves.current?'正在保存…':'已保存到平台');});
  }
- function commit(annotations:Project['annotations'],record=true){const p=projectRef.current;if(!p||p.deletion_pending||busyRef.current)return false;annotations=normalizeStateSeams(annotations,p.continuity_bridges??[],p.videos,p.custom_tracks);if(annotationsEqual(p.annotations,annotations))return true;if(record)updateHistory([...historyRef.current.slice(-49),p.annotations],[]);const next={...p,annotations};projectRef.current=next;setProject(next);persist(next,annotations);return true;}
+ function commit(annotations:Project['annotations'],record=true){const p=projectRef.current;if(!p||p.deletion_pending||busyRef.current)return false;annotations=normalizeStateSeams(annotations,p.continuity_bridges??[],p.videos,p.custom_tracks,p.duration_ms);if(annotationsEqual(p.annotations,annotations,p.duration_ms))return true;if(record)updateHistory([...historyRef.current.slice(-49),p.annotations],[]);const next={...p,annotations};projectRef.current=next;setProject(next);persist(next,annotations);return true;}
  async function flush(){await saveQueue.current;if(saveFailedRef.current)throw new Error('请先重试保存平台草稿，再继续操作。');}
  async function connectCloud(username:string,password:string){
   await doBusy('正在连接 Ubuntu 公网账号…',async()=>{
@@ -320,7 +323,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   }
   try{await flush();logoutNow();}catch(error){setError(error instanceof Error?error.message:'草稿尚未保存，暂不能退出登录。');}
  }
- async function retrySave(){await doBusy('正在核对草稿保存状态…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);if(annotationsEqual(normalizeStateSeams(remote.annotations,remote.continuity_bridges??[],remote.videos,remote.custom_tracks),normalizeStateSeams(local.annotations,remote.continuity_bridges??[],remote.videos,remote.custom_tracks))){serverRevision.current=remote.revision;projectRef.current={...local,name:remote.name,revision:remote.revision,updated_at:remote.updated_at,annotations:remote.annotations};setProject(projectRef.current);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setNotice('已确认当前标注保存成功');return;}if(remote.revision===serverRevision.current){saveFailedRef.current=false;setSaveFailed(false);persist(local,local.annotations);await saveQueue.current;return;}setSaveState('版本冲突，改动保留在此页');setError('草稿已在其他窗口更新。当前改动仍保留在此页；请点击「保存恢复副本并重新载入」，下载包含本页标注的恢复 JSON 后读取服务器草稿。');});}
+ async function retrySave(){await doBusy('正在核对草稿保存状态…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);if(annotationsEqual(normalizeStateSeams(remote.annotations,remote.continuity_bridges??[],remote.videos,remote.custom_tracks,remote.duration_ms),normalizeStateSeams(local.annotations,remote.continuity_bridges??[],remote.videos,remote.custom_tracks,remote.duration_ms),remote.duration_ms)){serverRevision.current=remote.revision;projectRef.current={...local,name:remote.name,revision:remote.revision,updated_at:remote.updated_at,annotations:remote.annotations};setProject(projectRef.current);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setNotice('已确认当前标注保存成功');return;}if(remote.revision===serverRevision.current){saveFailedRef.current=false;setSaveFailed(false);persist(local,local.annotations);await saveQueue.current;return;}setSaveState('版本冲突，改动保留在此页');setError('草稿已在其他窗口更新。当前改动仍保留在此页；请点击「保存恢复副本并重新载入」，下载包含本页标注的恢复 JSON 后读取服务器草稿。');});}
  async function recoverAndReload(){await doBusy('正在生成恢复副本并重新载入…',async()=>{await saveQueue.current;const local=projectRef.current;if(!local)return;const remote=await api<Project>(`/api/projects/${local.id}`);const content=JSON.stringify(local,null,2);const blob=new Blob([content],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=`${local.name.replace(/[<>:"/\\|?*]/g,'_')}-未保存草稿-恢复副本-${Date.now()}.json`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);adopt(remote);setNotice('恢复副本已开始下载，已重新载入服务器草稿。原有未保存改动保留在恢复 JSON 中。');});}
  function adopt(p:Project,restore=false){setComparison(null);setComparisonOpen(false);setTimelineImportOpen(false);setClearedPreviewId('');p={...p,annotations:{...p.annotations,category:p.annotations.category??[]}};if(!projectTracks(p).includes(activeTrack))setActiveTrack(projectTracks(p)[0]??'scene');setAnchors([]);setSelectedRange(null);restoreOnReady.current=restore?p.id:null;setSessionEntered(false);setPrepareOpen(!restore);if(!restore)preparation.refresh();scrubbingRef.current=false;setScrubbing(false);writeProjectPreference(previewsClearedKey,null);writeProjectPreference(lastProjectKey,p.id);setMediaVersion(v=>v+1);wantsPlay.current=false;setPlaying(false);videoRef.current?.pause();serverRevision.current=p.revision;projectRef.current=p;setProject(p);setCurrent(0);pendingSeek.current=0;activateVideo(p.videos[0]?.id??'');setMediaError('');resetEditorFields();updateHistory([],[]);saveFailedRef.current=false;setSaveFailed(false);setSaveState('已保存到平台');setError('');if(activeTrack==='habit'&&projectTracks(p).includes('habit'))restoreComposer(p.id);queueCloudSync(p.id);if((p as Project & {warnings?:string[]}).warnings?.length)setNotice((p as Project & {warnings:string[]}).warnings.join('；'));}
  async function doBusy(message:string,fn:()=>Promise<void>,inImport=false){if(busyRef.current)return;busyRef.current=true;setBusy(message);setError('');if(inImport)setImportError('');try{await fn();}catch(e){if(inImport)setImportError((e as Error).message);else setError((e as Error).message);}finally{busyRef.current=false;setBusy('');}}
@@ -566,61 +569,17 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   window.addEventListener('storage',removed);return()=>window.removeEventListener('storage',removed);
  },[]);
  async function chooseProject(id:string){if(!id)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再切换项目；当前输入已保留。');return;}await doBusy('正在打开草稿…',async()=>{await flush();adopt(await api<Project>(`/api/projects/${id}`));});}
- async function addCustomTrack(name:string,jsonName:string,labels:string[],remember:boolean){
+ async function saveTrackSelection(ids:string[]){
   const current=projectRef.current;if(!current)return;
   await flush();
-  const updated=await api<Project>(`/api/projects/${current.id}/custom-tracks`,json('POST',{name,json_name:jsonName,mode:'state',labels,expected_revision:serverRevision.current}));
-  serverRevision.current=updated.revision;projectRef.current={...(projectRef.current??current),custom_tracks:updated.custom_tracks,annotations:updated.annotations,revision:updated.revision,updated_at:updated.updated_at};
-  setProject(projectRef.current);setActiveTrack(updated.custom_tracks!.at(-1)!.id);setTrackRevealVersion(value=>value+1);resetEditorFields();setSelectedRange(null);updateHistory([],[]);
-  queueCloudSync(updated.id);
-  let templateError='';
-  if(remember){try{const template=await api<TrackTemplate>('/api/account/track-templates',json('PUT',{name,json_name:jsonName,labels}));setTrackTemplates(current=>[template,...current.filter(item=>item.json_name!==jsonName)]);}catch(reason){templateError=`；账号历史保存失败：${reason instanceof Error?reason.message:'请稍后重试'}`;}}
-  setCustomTrackOpen(false);setNotice(`已添加「${name}」时间轴，写回文件为 ${jsonName}.timeline.json${templateError}`);
- }
- async function deleteTrackTemplate(jsonName:string){await api(`/api/account/track-templates/${encodeURIComponent(jsonName)}`,json('DELETE',{}));setTrackTemplates(items=>items.filter(item=>item.json_name!==jsonName));}
- async function deleteTemplateLabel(template:TrackTemplate,labelToRemove:string){
-  const labels=template.labels.filter(value=>value!==labelToRemove);
-  const updated=await api<TrackTemplate>('/api/account/track-templates',json('PUT',{name:template.name,json_name:template.json_name,labels}));
-  setTrackTemplates(items=>items.map(item=>item.json_name===updated.json_name?updated:item));
- }
- async function setFixedTemplateVisible(track:FixedTrack,visible:boolean){
-  const updated=await api<FixedTrack[]>(`/api/account/fixed-track-templates/${track}`,json(visible?'PUT':'DELETE',{}));
-  setVisibleFixedTemplates(updated);
- }
- async function addFixedTrack(track:FixedTrack){
-  const current=projectRef.current;if(!current)return;
-  await flush();
-  const updated=await api<Project>(`/api/projects/${current.id}/fixed-tracks/${track}`,json('PUT',{enabled:true,expected_revision:serverRevision.current}));
-  serverRevision.current=updated.revision;projectRef.current=updated;setProject(updated);setActiveTrack(track);setTrackRevealVersion(value=>value+1);resetEditorFields();setSelectedRange(null);updateHistory([],[]);
-  queueCloudSync(updated.id);setCustomTrackOpen(false);setNotice(`已添加「${names[track]}」时间轴`);
- }
- async function saveTrackLabels(labels:string[]){
-  const current=projectRef.current;if(!current)return;
-  await flush();
-  const updated=await api<Project>(`/api/projects/${current.id}/tracks/${activeTrack}/labels`,json('PUT',{labels,expected_revision:serverRevision.current}));
+  const updated=await api<Project>(`/api/projects/${current.id}/track-selection`,json('PUT',{tracks:ids,expected_revision:serverRevision.current}));
   serverRevision.current=updated.revision;projectRef.current=updated;setProject(updated);
-  if(selectedId&&!updated.annotations[activeTrack].some(item=>item.id===selectedId))resetEditorFields();
-  else if(!isEventTrack(updated,activeTrack)&&!labels.includes(splitAnnotationLabel(label,projectTrackLabels(current,activeTrack)).base))setLabel('');
-  updateHistory([],[]);queueCloudSync(updated.id);
-  setLabelsOpen(false);setNotice(`已更新「${trackName(updated,activeTrack)}」的标签按钮。`);
- }
- async function confirmDeleteTrack(){
-  const current=projectRef.current,track=deleteTrack;
-  if(!current||!track||deletingTrack)return;
-  setDeletingTrack(true);setDeleteTrackError('');
-  try{
-   await flush();
-   const updated=track.fixed
-    ?await api<Project>(`/api/projects/${current.id}/fixed-tracks/${track.id}`,json('PUT',{enabled:false,expected_revision:serverRevision.current}))
-    :await api<Project>(`/api/projects/${current.id}/custom-tracks/${track.id}`,json('DELETE',{confirmed:true,expected_revision:serverRevision.current}));
-   serverRevision.current=updated.revision;
-   projectRef.current=updated;
-   setProject(updated);setActiveTrack(projectTracks(updated)[0]??'scene');setTrackRevealVersion(value=>value+1);resetEditorFields();setSelectedRange(null);updateHistory([],[]);
-   queueCloudSync(updated.id);
-   if(comparison?.track===track.id){setComparison(null);setComparisonOpen(false);}
-   setDeleteTrack(null);setNotice(`已删除「${track.name}」时间轴；${track.fixed?'对应标注已清空，导出仍保留空 JSON':project?.storage_mode==='s3-mock'?'下次保存将更新模拟存储中的 JSON':'下次写回将清理其 NAS JSON'}`);
-  }catch(reason){setDeleteTrackError(reason instanceof Error?reason.message:'删除时间轴失败，请重试。');}
-  finally{setDeletingTrack(false);}
+  // Old undo snapshots also need empty entries for newly attached axes.
+  const complete=(value:Project['annotations'])=>({...Object.fromEntries(Object.keys(updated.annotations).map(axis=>[axis,[]])),...value});
+  updateHistory(historyRef.current.map(complete),redoRef.current.map(complete));
+  if(!projectTracks(updated).includes(activeTrack)){setActiveTrack(projectTracks(updated)[0]??'scene');resetEditorFields();setSelectedRange(null);}
+  setTrackRevealVersion(value=>value+1);setSelectionOpen(false);setNotice('项目时间轴选择已保存，未勾选轴的标注仍保留。');
+  queueCloudSync(updated.id);
  }
  function selectSegment(track:Track,s:Segment,seekTime=s.start_ms){
   if(hasPendingEdit){if(track===activeTrack&&s.id===selectedId){seek(seekTime);return;}setError('请先保存或取消正在编辑的标注，再选择其他记录；当前输入已保留。');return;}
@@ -634,7 +593,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   });setSelectedRange(null);
  }
  function selectAnchorRange(firstIndex:0|1){
-  if(anchors.length<firstIndex+2)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再选择锚点区间。');return;}
+  if(anchors.length<firstIndex+2)return;if(manual&&hasPendingEdit){setError('请先保存或取消正在编辑的标注，再选择锚点区间。');return;}
   const [start,end]=anchors.slice(firstIndex,firstIndex+2).sort((a,b)=>a-b);
   if(start===end||!spans.some(span=>Math.max(start,span.start_ms)<Math.min(end,span.end_ms))){setError('锚点之间没有可标注的视频。');return;}
   pausePlayback();const draftLabel=!manual&&eventTrack?label:'';resetEditorFields();setLabel(draftLabel);setSelectedRange({start_ms:start,end_ms:end});setStartText(formatTime(start));setEndText(formatTime(end));if(eventTrack)setBehaviorKind('interval');setNotice(`已选中锚点 ${firstIndex+1}–${firstIndex+2} 区间，请在标注面板选择内容。`);
@@ -649,51 +608,48 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   else if(activeTrack==='habit'&&!manual)clearComposer();
   else clearEditor();
  }
- function changePostureAtCursor(value:string){
-  const p=projectRef.current;if(!p||scrubbingRef.current||!projectTracks(p).includes('posture'))return;
-  if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再切换姿势；当前输入已保留。');return;}
-  syncNativeTime();const point=timeRef.current,recordings=p.recording_runs??p.videos;
-  if(point>=p.duration_ms){setError('已到视频末尾，请先定位到要切换姿势的位置。');return;}
-  if(!recordings.some(span=>point>=span.start_ms&&point<span.end_ms)){setError('此处为录制间隔，请在有视频的位置标注姿势。');return;}
-  const next=switchCoveredState(p.annotations.posture,point,value,p.duration_ms,recordings);
-  if(!commit({...p.annotations,posture:next}))return;
-  setActiveTrack('posture');setTrackRevealVersion(version=>version+1);setSelectedRange(null);resetEditorFields();
-  const changed=next.find(segment=>segment.start_ms<=point&&point<(segment.end_ms??p.duration_ms));
-  setNotice(p.annotations.posture.length?`已从 ${formatTime(point)} 向后标注「${value}」至 ${formatTime(changed?.end_ms??p.duration_ms)}`:`已用「${value}」覆盖全部已录制时间，可在变化处继续切换`);
- }
  function changeState(value:string){
   if(!project)return;
   if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再切换状态；当前输入已保留。');return;}
   if(!selectedRange&&time>=project.duration_ms){setError('已到视频末尾，请先定位到要切换状态的位置。');return;}
-  const next=selectedRange?applyAnnotationRange(project.annotations[activeTrack],selectedRange.start_ms,selectedRange.end_ms,value,spans,activeTrack,undefined,isExclusiveTrack(project,activeTrack)||activeTrack==='category'):switchCoveredState(project.annotations[activeTrack],time,value,project.duration_ms,spans,activeTrack==='category');
-  if(!commit({...project.annotations,[activeTrack]:next}))return;clearAfterAnnotation();setNotice(selectedRange?'已标注选中区间，选区已取消':'状态已更新');
+  if(subaxis&&!selectedRange){setError('请先选择锚点区间，再勾选子轴标注。');return;}
+  try{
+   const next=selectedRange?applyAnnotationRange(activeSegments,selectedRange.start_ms,selectedRange.end_ms,value,spans,activeTrack,undefined,true,subaxis):switchCoveredState(activeSegments,time,value,project.duration_ms,spans,activeTrack==='category');
+   if(!commit({...project.annotations,[activeTrack]:next}))return;
+   setError('');clearAfterAnnotation();setNotice(selectedRange?'已标注选中区间，选区已取消':'主轴状态已更新');
+  }catch(error){setError((error as Error).message);}
  }
- function finishBehavior(s:Segment){if(!project)return;if(time<=s.start_ms){setError('结束时间必须晚于开始时间。');return;}const next=applyAnnotationRange(project.annotations.habit,s.start_ms,time,s.label,spans,'habit',s.id);commit({...project.annotations,habit:next});if(selectedId===s.id){clearEditor();}}
+ function finishBehavior(s:Segment){if(!project)return;if(time<=s.start_ms){setError('结束时间必须晚于开始时间。');return;}try{const next=applyAnnotationRange(project.annotations.habit,s.start_ms,time,s.label,spans,'habit',s.id);commit({...project.annotations,habit:next});setError('');if(selectedId===s.id){clearEditor();}}catch(error){setError((error as Error).message);}}
  function saveSegment(){
   if(!project)return;const point=eventTrack&&behaviorKind==='point';const a=parseTime(startText),b=point?a:(endText.trim()?parseTime(endText):null);
   if(a===null||a<0||a>project.duration_ms||(!point&&(b===null||b<=a||b>project.duration_ms))){setError(point?'请填写有效发生时间（秒数或 HH:MM:SS.mmm）。':'请填写有效时间：0 ≤ 开始 < 结束 ≤ 时间线总时长。');return;}
   if(!label.trim()){setError('请选择或填写标注内容。');return;}
-  if(!splitAnnotationLabel(label,eventTrack?[]:fixedLabels).base.trim()){setError('请先填写标注内容，再添加备注。');return;}
+  if(!splitAnnotationLabel(label,editorLabelOptions).base.trim()){setError('请先填写标注内容，再添加备注。');return;}
   if(!eventTrack&&label.length>80){setError('标签和备注合计不能超过 80 个字符。');return;}
   if(point&&!spans.some(v=>a>=v.start_ms&&a<=v.end_ms)){setError('这个时间位于录制间隔，请在有视频的位置标注。');return;}
   if(!point&&!spans.some(v=>Math.max(a,v.start_ms)<Math.min(b!,v.end_ms))){setError('这个时间段没有视频，请重新选择。');return;}
+  if(subaxis&&(!selectedRange||point||selectedId)){setError('新增子轴标注须先选择锚点区间。');return;}
+  try{
   const noteOnly=selected&&selected.start_ms===a&&selected.end_ms===b&&(selected.kind??'interval')===(point?'point':'interval');
-  const next=noteOnly?project.annotations[activeTrack].map(item=>item.id===selected.id?{...item,label:label.trim()}:item)
-   :point?[...project.annotations[activeTrack].filter(x=>x.id!==selectedId),{id:selectedId??crypto.randomUUID(),label:label.trim(),start_ms:a,end_ms:a,kind:'point' as const}].sort((x,y)=>x.start_ms-y.start_ms)
-   :applyAnnotationRange(project.annotations[activeTrack],a,b!,label.trim(),spans,activeTrack,selectedId??undefined,isExclusiveTrack(project,activeTrack));
+  const next=noteOnly?activeSegments.map(item=>item.id===selected.id?{...item,label:label.trim()}:item)
+   :point?applyAnnotationPoint(activeSegments,a,label.trim(),project.duration_ms,selectedId??undefined)
+   :applyAnnotationRange(activeSegments,a,b!,label.trim(),spans,activeTrack,selectedId??undefined,!eventTrack,subaxis);
   if(!commit({...project.annotations,[activeTrack]:next}))return;
-  clearAfterAnnotation();
+  setError('');clearAfterAnnotation();
   setNotice('标注已保存，录制断档保持留空');
+  }catch(error){setError((error as Error).message);}
  }
  function remove(){if(!project||!selectedId)return;commit({...project.annotations,[activeTrack]:deleteAnnotation(project.annotations[activeTrack],selectedId,spans,activeTrack,eventTrack)});clearEditor();}
  function undo(){if(busyRef.current)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再撤销；当前输入已保留。');return;}const past=historyRef.current,p=projectRef.current;if(!past.length||!p)return;updateHistory(past.slice(0,-1),[...redoRef.current.slice(-49),p.annotations]);commit(past[past.length-1],false);clearEditor();}
  function redo(){if(busyRef.current)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再恢复；当前输入已保留。');return;}const future=redoRef.current,p=projectRef.current;if(!future.length||!p)return;updateHistory([...historyRef.current.slice(-49),p.annotations],future.slice(0,-1));commit(future[future.length-1],false);clearEditor();}
- async function exportFiles(){if(!project)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再导出；当前输入尚未写入结果。');return;}await doBusy('正在生成时间轴文件…',async()=>{await flush();const r=await authFetch(`/api/projects/${project.id}/export`);if(!r.ok){const j=await r.json();throw new Error(j.detail);}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${projectDownloadName(project.name)}-timelines.zip`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);setNotice(`已导出 ZIP，内含 ${projectTracks(project).length} 个独立时间轴 JSON`);});}
+ async function exportFiles(){if(!project)return;if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再导出；当前输入尚未写入结果。');return;}await doBusy('正在生成时间轴文件…',async()=>{await flush();const r=await authFetch(`/api/projects/${project.id}/export`);if(!r.ok){const j=await r.json();throw new Error(j.detail);}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${projectDownloadName(project.name)}-timelines.zip`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);setNotice(`已导出 ZIP，内含 ${TRACKS.length+(project.custom_tracks?.length??0)} 个独立时间轴 JSON`);});}
  async function writeback(){
   const current=projectRef.current;if(!current)return;
   await doBusy(current.storage_mode==='s3-mock'?'正在保存到 S3 mock…':'正在写回 timeline 文件夹…',async()=>{
    await flush();
-   await api(`/api/projects/${current.id}/writeback`,json('POST',{expected_revision:serverRevision.current}));
+   const health=await api<{capabilities?:string[]}>('/api/health',{cache:'no-store'});
+   if(!health.capabilities?.includes('selected-track-writeback'))throw new Error('后台尚未支持按勾选时间轴写回，请关闭平台并重新启动后再试。');
+   const written=await api<{paths:string[]}>(`/api/projects/${current.id}/writeback`,json('POST',{expected_revision:serverRevision.current}));
    setSubmitOpen(false);
    const savedProject=await api<Project>(`/api/projects/${current.id}`);
    if(projectRef.current?.id===current.id){projectRef.current=savedProject;setProject(savedProject);}
@@ -709,8 +665,8 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
     }
    }
    await refresh();
-   setNotice(current.storage_mode==='s3-mock'?`${TRACKS.length+(current.custom_tracks?.length??0)} 个 JSON 已保存到 S3 mock 并读回核验。`:
-    `${TRACKS.length+(current.custom_tracks?.length??0)} 个 JSON 已写回原采集目录的 timeline 文件夹。${!sharedServer?'NAS 副本已写入并读回核验。':''}`);
+   setNotice(current.storage_mode==='s3-mock'?`${written.paths.length} 个 JSON 已保存到 S3 mock 并读回核验。`:
+    `${written.paths.length} 个 JSON 已写回原采集目录的 timeline 文件夹。${!sharedServer?'NAS 副本已写入并读回核验。':''}`);
   });
  }
  async function resetAnnotationsFromEmptySource(){
@@ -728,12 +684,9 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  }
  useEffect(()=>{
   const key=(e:KeyboardEvent)=>{
-   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||deleteTrack||labelsOpen||renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||settingsOpen||cacheLocationOpen||timelineImportOpen||e.isComposing||e.keyCode===229)return;
+   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||libraryOpen||selectionOpen||adminOpen||passwordOpen||auditOpen||renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||settingsOpen||cacheLocationOpen||timelineImportOpen||e.isComposing||e.keyCode===229)return;
    const target=e.target instanceof Element?e.target:null;
    if(comparisonOpen&&['Home','End'].includes(e.code)){e.preventDefault();e.stopImmediatePropagation();seek(e.code==='Home'?0:projectRef.current.duration_ms);return;}
-   const posture=!comparisonOpen&&projectTracks(projectRef.current).includes('posture')&&postureShortcutLabel(e,!!target?.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]'));
-   const postureLabel=posture&&projectTrackLabels(projectRef.current,'posture').find(value=>value===posture||value.startsWith(`${posture}（`));
-   if(postureLabel){e.preventDefault();e.stopImmediatePropagation();changePostureAtCursor(postureLabel);return;}
    if(!comparisonOpen&&e.code==='Space'&&(e.ctrlKey||e.metaKey)&&!e.altKey&&!e.shiftKey){
     e.preventDefault();e.stopImmediatePropagation();if(!e.repeat)addAnchor();return;
    }
@@ -759,7 +712,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    const delta=wheelSeekDelta(e,seekSettings);if(delta===null)return;
    // Capture before timeline zoom, horizontal browsing or native Shift scrolling.
    e.preventDefault();e.stopImmediatePropagation();
-   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||deleteTrack||renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||settingsOpen||cacheLocationOpen||timelineImportOpen||scrubbingRef.current)return;
+   if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||libraryOpen||selectionOpen||adminOpen||passwordOpen||auditOpen||renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||settingsOpen||cacheLocationOpen||timelineImportOpen||scrubbingRef.current)return;
    if(delta!==0)moveCursor(delta);
   };
   const release=(e:KeyboardEvent)=>{if(transportKeys.current.delete(e.code)){e.preventDefault();e.stopImmediatePropagation();}};
@@ -778,51 +731,50 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    {project&&<button className="secondary prepare-action" title="检查全部精简播放缓存、封面和悬停图片" onClick={openPreparation} disabled={!!busy||preparation.busy}>{preparation.status?.state==='ready'?<Check size={15}/>:preparation.status?.state==='running'&&preparation.status.requested?<LoaderCircle className="spin" size={15}/>:<Film size={15}/>}<span>{preparation.status?.checking?'检查缓存中':preparation.status?.state==='ready'?'本机播放就绪':preparation.status?.state==='running'&&preparation.status.requested?`准备中 ${preparation.status.ready}/${preparation.status.total}`:'准备全部预览'}</span></button>}
    {project&&<div className="project-output-actions" aria-label="标注输出"><span>标注输出</span><button className="secondary" disabled={!sessionEntered||!!busy||projectTracks(project).length===0} onClick={event=>{pausePlayback();comparisonTrigger.current=event.currentTarget;if(comparison)setComparisonOpen(true);else setTimelineImportOpen(true);}}><ScanLine size={16}/>时间轴对照</button><button className="primary" disabled={!!busy} onClick={exportFiles}><Download size={16}/>导出 JSON</button>{(project.source_dir||project.storage_mode==='s3-mock')&&<button className="secondary writeback-action" disabled={!!busy} title={project.source_dir??'S3 mock'} onClick={()=>{if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再提交。');return;}pausePlayback();setSubmitOpen(true);}}><Save size={14}/>{project.storage_mode==='s3-mock'?'保存到 S3 mock':'写回原目录'}</button>}</div>}
   </div>
-  {project&&running.length>0&&<div className="output-status" role="status" title="导出和写回允许未标注时段留空，但须结束所有事件区间。"><span>{running.length} 项习惯未结束</span></div>}
+  {project&&unfinishedCount>0&&<div className="output-status" role="status" title="所有时间轴均允许留空；ZIP 导出前须结束全部事件，写回前须结束已勾选轴的事件。"><span>{unfinishedCount} 项事件未结束</span></div>}
  </section>;
  return <div className={'app-shell '+(user.role==='admin'?'is-admin':'is-annotator')}>
   {adminOpen&&<AdminPanel projects={projects} mockMode={mockMode} onClose={()=>setAdminOpen(false)}/>}
   {passwordOpen&&<PasswordDialog onClose={()=>setPasswordOpen(false)} onChanged={logoutNow}/>}
   {auditOpen&&project&&<HistoryPanel projectId={project.id} onClose={()=>setAuditOpen(false)}/>}
-  {customTrackOpen&&project&&<CustomTrackDialog availableFixed={TRACKS.filter(track=>visibleFixedTemplates.includes(track)&&!projectTracks(project).includes(track))} hiddenFixed={TRACKS.filter(track=>!visibleFixedTemplates.includes(track))} accountLoading={templatesLoading} accountError={templatesError} onDeleteFixed={track=>setFixedTemplateVisible(track,false)} onRestoreFixed={track=>setFixedTemplateVisible(track,true)} templates={trackTemplates} canRemember={true} onAddFixed={addFixedTrack} onCancel={()=>setCustomTrackOpen(false)} onCreate={addCustomTrack} onAddTemplate={template=>addCustomTrack(template.name,template.json_name,template.labels,false)} onDeleteTemplate={deleteTrackTemplate} onDeleteTemplateLabel={deleteTemplateLabel}/>}
-  {deleteTrack&&project&&<DeleteCustomTrackDialog track={deleteTrack} count={project.annotations[deleteTrack.id]?.length??0} deleting={deletingTrack} error={deleteTrackError} onCancel={()=>{setDeleteTrack(null);setDeleteTrackError('');}} onConfirm={confirmDeleteTrack}/>}
-  {labelsOpen&&project&&<TrackLabelsDialog trackName={trackName(project,activeTrack)} initial={projectTrackLabels(project,activeTrack)} annotations={project.annotations[activeTrack]??[]} onCancel={()=>setLabelsOpen(false)} onSave={saveTrackLabels}/>}
+  {libraryOpen&&<TrackLibraryDialog admin={user.role==='admin'} onClose={()=>setLibraryOpen(false)}/>}
+  {selectionOpen&&project&&<TrackSelectionDialog project={project} onClose={()=>setSelectionOpen(false)} onSave={saveTrackSelection}/>}
   {timelineImportOpen&&project&&<TimelineImportDialog project={project} initialTrack={comparison?.track??activeTrack} onCancel={()=>{setTimelineImportOpen(false);if(!comparisonOpen)queueMicrotask(()=>comparisonTrigger.current?.focus());}} onOpen={value=>{setComparison(value);setTimelineImportOpen(false);setComparisonOpen(true);}}/>}
   {comparisonOpen&&<div className="comparison-backdrop"/>}
   {cacheLocationOpen&&<CacheLocationDialog project={project} onClose={()=>setCacheLocationOpen(false)} onChanged={updated=>{if(updated&&projectRef.current?.id===updated.id){serverRevision.current=updated.revision;projectRef.current={...projectRef.current,collection_folder_name:updated.collection_folder_name,revision:updated.revision,updated_at:updated.updated_at};setProject(projectRef.current);}pausePlayback();setSessionEntered(false);preparation.refresh();setNotice('缓存位置已设置，请重新准备播放素材。');}}/>}
   {settingsOpen&&<SeekSettingsDialog value={seekSettings} onCancel={()=>setSettingsOpen(false)} onSave={saveSeekSettings}/>}
   {renameProject&&<RenameProjectDialog name={renameProject.name} saving={renaming} error={renameError} onCancel={()=>{setRenameProject(null);setRenameError('');}} onConfirm={confirmRenameProject}/>}
-  {submitOpen&&project&&<SubmitProjectDialog projectName={project.name} submitting={!!busy} remoteProject={sharedServer} mockProject={project.storage_mode==='s3-mock'} onCancel={()=>setSubmitOpen(false)} onConfirm={()=>void writeback()}/>}
+  {submitOpen&&project&&<SubmitProjectDialog projectName={project.name} trackNames={projectTracks(project).map(axis=>trackName(project,axis))} submitting={!!busy} remoteProject={sharedServer} mockProject={project.storage_mode==='s3-mock'} onCancel={()=>setSubmitOpen(false)} onConfirm={()=>void writeback()}/>}
   {resetAnnotationsOpen&&project&&<ResetAnnotationsDialog projectName={project.name} resetting={!!busy} onCancel={()=>setResetAnnotationsOpen(false)} onConfirm={()=>void resetAnnotationsFromEmptySource()}/>}
   {cloudDialogOpen&&<CloudAccountDialog busy={!!busy} error={cloudDialogError} onCancel={()=>setCloudDialogOpen(false)} onConnect={(username,password)=>void connectCloud(username,password)}/>}
   {deleteProject&&<DeleteProjectDialog project={deleteProject} deleting={deleting} error={deleteError} onCancel={()=>{setDeleteProject(null);setDeleteError('');}} onConfirm={confirmDeleteProject}/>}
-  <header className="topbar" inert={comparisonOpen||timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||prepareOpen||settingsOpen||adminOpen||passwordOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions"><span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><span>{user.display_name}</span>{!sharedServer&&!mockMode&&<button className='quiet' onClick={()=>{setCloudDialogError('');setCloudDialogOpen(true);}}>{cloudConnected?'Ubuntu 已连接':'连接 Ubuntu 账号'}</button>}{user.role==='admin'&&<button className="quiet" onClick={()=>setAdminOpen(true)}>账号管理</button>}<button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} title="请先保存或取消当前编辑" onClick={()=>setPasswordOpen(true)}>修改密码</button><button className="quiet" onClick={()=>void onLogout()}>退出登录</button><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>{pausePlayback();setCacheLocationOpen(true);}}>缓存位置</button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>
+  <header className="topbar" inert={comparisonOpen||timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||prepareOpen||settingsOpen||cacheLocationOpen||adminOpen||passwordOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions"><button className="secondary" aria-haspopup="dialog" onClick={()=>{pausePlayback();setLibraryOpen(true);}}><Layers3 size={16}/>时间轴库</button><span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><span>{user.display_name}</span>{!sharedServer&&!mockMode&&<button className='quiet' onClick={()=>{setCloudDialogError('');setCloudDialogOpen(true);}}>{cloudConnected?'Ubuntu 已连接':'连接 Ubuntu 账号'}</button>}{user.role==='admin'&&<button className="quiet" onClick={()=>setAdminOpen(true)}>账号管理</button>}<button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} title="请先保存或取消当前编辑" onClick={()=>setPasswordOpen(true)}>修改密码</button><button className="quiet" onClick={()=>void onLogout()}>退出登录</button><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>{pausePlayback();setCacheLocationOpen(true);}}>缓存位置</button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>
   {project&&(editingPresence.others.length>0||editingPresence.error)&&<div className="editing-presence-warning" role="status">{editingPresence.others.length>0?`正在同时编辑：${editingPresence.others.map(item=>item.display_name).join('、')}。保存时如有冲突，平台会保留本页改动并提示恢复。`:editingPresence.error}</div>}
   {project?.source_dir&&project.warnings?.some(warning=>warning.includes('原目录 JSON 已被修改'))&&<div className="editing-presence-warning" role="status"><span>原目录的时间轴文件已变化，平台保留了尚未写回的草稿。若已主动删除 NAS 中的时间轴文件，可以保存旧草稿后重新标注。</span><button className="secondary" disabled={!!busy} onClick={()=>{if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再清空旧标注。');return;}pausePlayback();setResetAnnotationsOpen(true);}}>清空旧标注并重来</button></div>}
   {!sharedServer&&project&&(cloudSyncError||!cloudConnected)&&<div className="editing-presence-warning" role="status">{cloudSyncError||'本机项目尚未连接 Ubuntu 公网账号；管理员暂时看不到进度。'}{cloudConnected&&<button className="secondary" disabled={!!busy} onClick={()=>void retryCloudSync()}>重新同步</button>}</div>}
   {error&&<div className="message error" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={()=>setError('')}><X size={16}/></button></div>}
   {notice&&<div className="message success" role="status"><Check size={16}/><span>{notice}</span><button aria-label="关闭提示" onClick={()=>setNotice('')}><X size={16}/></button></div>}
   {project?.needs_source_relink&&user.role==='admin'&&<div className="source-relink-notice" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen}><FolderOpen size={16}/><span>此项目仍使用平台内的视频副本。关联原目录后，缓存会移到原视频旁，释放重复存储。</span><button className="secondary" disabled={!!busy||project.deletion_pending} onClick={()=>beginImport('relink')}>关联原目录</button></div>}
-  {help&&<div className="help-panel"><Keyboard size={18}/><span>顶部全屏按钮 进入工作台全屏，Esc 退出</span><span>空格 播放／暂停</span><span>Ctrl + 空格 添加锚点</span><span>← → 前后 {seekSettings.arrowMs/1000} 秒</span><span>Shift + ← → 前后 {seekSettings.shiftArrowMs/1000} 秒</span><span>Ctrl + ← → 前后 {seekSettings.ctrlArrowMs/1000} 秒</span><span>Ctrl + Alt + 滚轮 上退下进，每次 {seekSettings.wheelMs/1000} 秒</span><span>Shift + 滚轮 上退下进，每次 {seekSettings.shiftWheelMs/1000} 秒</span><span>右上角设置按钮 可调整移动步长</span><span>调整视频进度会暂停，松开后保持暂停</span><span>Ctrl + 滚轮 缩放时间轴（最细每屏5分钟）</span><span>Ctrl + + / - / 0 已禁用浏览器缩放</span><span>普通滚轮 上下滚动，重叠轴内查看其它层</span><span>Alt + 滚轮 左右浏览时间轴</span><span>拖动蓝色光标定位视频</span><span>Delete 删除选中色块</span><span>Z 动 / X 坐 / C 站 / V 躺：从当前播放位置向后切换姿势</span><span>Ctrl + Z 撤销</span><span>Ctrl + Shift + Z 恢复</span><span>点击轴名或右侧类型切换；点击色块可编辑备注。左右键和空格固定控制视频。</span></div>}
+  {help&&<div className="help-panel"><Keyboard size={18}/><span>顶部全屏按钮 进入工作台全屏，Esc 退出</span><span>空格 播放／暂停</span><span>Ctrl + 空格 添加锚点</span><span>← → 前后 {seekSettings.arrowMs/1000} 秒</span><span>Shift + ← → 前后 {seekSettings.shiftArrowMs/1000} 秒</span><span>Ctrl + ← → 前后 {seekSettings.ctrlArrowMs/1000} 秒</span><span>Ctrl + Alt + 滚轮 上退下进，每次 {seekSettings.wheelMs/1000} 秒</span><span>Shift + 滚轮 上退下进，每次 {seekSettings.shiftWheelMs/1000} 秒</span><span>右上角设置按钮 可调整移动步长</span><span>调整视频进度会暂停，松开后保持暂停</span><span>Ctrl + 滚轮 缩放时间轴（最细每屏5分钟）</span><span>Ctrl + + / - / 0 已禁用浏览器缩放</span><span>普通滚轮 上下查看主轴和子轴</span><span>Alt + 滚轮 左右浏览时间轴</span><span>拖动蓝色光标定位视频</span><span>Delete 删除选中色块</span><span>Ctrl + Z 撤销</span><span>Ctrl + Shift + Z 恢复</span><span>点击轴名或右侧类型切换；点击色块可编辑备注。左右键和空格固定控制视频。</span></div>}
   <main ref={comparisonRef} tabIndex={comparisonOpen?-1:undefined} role={comparisonOpen?"dialog":undefined} aria-modal={comparisonOpen?true:undefined} aria-label={comparisonOpen?"时间轴对照查看":undefined} className={"editor-grid"+(comparisonOpen?" comparison-view":"")} inert={timelineImportOpen||importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||prepareOpen||settingsOpen}>
   {comparisonOpen&&comparison&&project&&<header className="comparison-heading"><div><h2>时间轴对照 · {trackName(project,comparison.track)}</h2><p title={[comparison.name,comparison.alignment,...comparison.warnings].join(' · ')}>{comparison.name} · {comparison.alignment}{comparison.warnings.length>0?' · '+comparison.warnings.join(' '):''}</p></div><button className="secondary" onClick={()=>{pausePlayback();setTimelineImportOpen(true);}}>更换时间轴</button><button className="icon-button" aria-label="进度快捷键设置" onClick={()=>{pausePlayback();setSettingsOpen(true);}}><Settings size={16}/></button><button className="secondary" onClick={closeComparison}><X size={16}/>关闭查看</button></header>}
   {project&&!sessionEntered?<section className="session-start-screen"><Film size={34}/><h2>{clearedPreviewId===project.id?'本机预览已清理':restoreOnReady.current===project.id?'正在载入项目':'预览尚未就绪'}</h2><p>{clearedPreviewId===project.id?'项目和标注草稿仍在。需要继续这个项目时，再主动准备预览；也可以从右侧新建项目选择新素材。':restoreOnReady.current===project.id?(preparation.status?.detail||'正在检查已有播放素材。'):'需要先准备视频、封面和悬停图片，才能进入标注工作台。'}</p><button className="primary" onClick={openPreparation}>{clearedPreviewId===project.id?'重新准备此项目预览':'查看素材准备'}<ArrowRight size={16}/></button></section>:<section className="left-column"><div className="preview-panel"><div className="panel-heading"><div><Film size={16}/><h2>视频预览</h2></div><span className="muted-text">{activeVideo?`${project!.videos.findIndex(v=>v.id===videoId)+1} / ${project!.videos.length} · ${activeVideo.name}`:'等待选择素材'}</span></div>
-   <div className={'video-stage'+(!project?' empty':'')}>{project&&activeVideo?<><video key={`${project.id}-${videoId}-${mediaVersion}-${profile.fast}`} ref={videoRef} data-video-id={activeVideo.id} data-time-scale={profile.scale} crossOrigin={separateApiOrigin&&playableUrl&&!playableUrl.startsWith('blob:')?'use-credentials':undefined} src={playableUrl} poster={activeVideo.thumbnail_url?sessionAssetUrl(project.id,activeVideo.thumbnail_url):undefined} muted={muted||profile.fast} playsInline preload="auto" onLoadedMetadata={e=>{if(e.currentTarget===videoRef.current)onReady();}} onPlaying={e=>{if(e.currentTarget===videoRef.current&&wantsPlay.current)setPlaying(true);}} onPlay={e=>{if(e.currentTarget!==videoRef.current)return;if(!wantsPlay.current)e.currentTarget.pause();else setPlaying(true);}} onPause={e=>{if(e.currentTarget===videoRef.current&&!wantsPlay.current)setPlaying(false);}} onTimeUpdate={e=>{if(e.currentTarget===videoRef.current)syncNativeTime();}} onEnded={e=>{if(e.currentTarget===videoRef.current)ended();}} onError={e=>{if(e.currentTarget!==videoRef.current||preview.state!=='ready')return;pausePlayback();setMediaError('预览读取失败，请检查素材可读性后重试。');}} onClick={toggle}/><div className="video-tag"><span className="live-dot"/> {profile.fast?'高倍速预览 · 本机缓存':'流畅预览 · 270p'}</div><div className="video-clock">{formatTime(time)}</div>{previewPending&&(preview.state!=='idle'||showPreviewWait)&&!previewError&&<div className="media-cover preview-preparation" role="status"><LoaderCircle className="spin"/><p>{preview.state==='running'?(profile.fast?'正在准备流畅快进预览':'正在生成此片段的预览'):preview.state==='queued'?'此片段正在排队':'正在读取预览缓存'}</p>{preview.state==='running'&&preview.progress!==null&&<><progress aria-label="预览生成进度" max={100} value={preview.progress}/><strong>{Math.floor(preview.progress)}%</strong></>}<small>{preview.detail||(preview.state==='running'?'仅首次准备，完成后可直接复用缓存，并提前准备后续片段':'可以继续浏览时间轴和其他片段')}</small></div>}{showBuffering&&!previewPending&&!previewError&&<div className="media-buffering" role="status"><LoaderCircle className="spin" size={14}/>正在缓冲…</div>}{scrubbing&&<div className="media-scrubbing">拖动定位 · 松开后显示目标画面</div>}{previewError&&<div className="media-cover"><p>{previewError}</p><button className="secondary" onClick={()=>{pendingSeek.current=Math.max(0,(timeRef.current-activeVideo.start_ms)/1000);setMediaError('');forgetProjectPreviews(project.id);setMediaVersion(v=>v+1);setSessionEntered(false);setPrepareOpen(true);void preparation.start(project.id,true);}}>重新加载</button></div>}</>:<div className="empty-preview"><div className="empty-film"><Film size={34}/><span>＋</span></div><h2>选择素材，开始标注</h2><p>{mockMode?'选择测试视频，新建模拟 S3 项目。上传后会生成标注预览。':sharedServer?'从已挂载的 NAS 选择完整采集目录。':'选择本机视频文件或原视频目录。'}{!mockMode&&<> <br/>原视频留在原位置，系统会准备标注用预览。</>}</p><button className="primary" onClick={()=>beginImport('new')}><Upload size={17}/>新建项目并选择素材</button><span className="format-hint">支持 MP4 · AVI · MOV · MKV · WEBM</span></div>}</div>
-   <div className="player-controls"><div className="play-controls"><button className="icon-button" aria-label="后退1秒" disabled={!project} onClick={()=>moveCursor(-1000)}><SkipBack size={17}/></button><button className="play-button" aria-label={playing?'暂停':'播放'} disabled={!project} onClick={toggle}>{playing?<Pause size={19}/>:<Play size={19} fill="currentColor"/>}</button><button className="icon-button" aria-label="前进1秒" disabled={!project} onClick={()=>moveCursor(1000)}><SkipForward size={17}/></button><span className="player-time">{formatTime(time)}<b>/</b><span>{formatTime(project?.duration_ms??0)}</span></span></div><div className="play-options"><PlaybackSpeed value={rate} onChange={setRate}/><button className="icon-button" aria-label={muted?'开启声音':'静音'} onClick={()=>setMuted(!muted)}>{muted?<VolumeX size={17}/>:<Volume2 size={17}/>}</button><button className="icon-button" aria-label="全屏视频" disabled={!project} onClick={()=>videoRef.current?.requestFullscreen()}><Maximize size={17}/></button></div></div>
+   <div className={'video-stage'+(!project?' empty':'')}>{project&&activeVideo?<><video key={`${project.id}-${videoId}-${mediaVersion}-${profile.fast}`} ref={videoRef} data-video-id={activeVideo.id} data-time-scale={profile.scale} crossOrigin={separateApiOrigin&&playableUrl&&!playableUrl.startsWith('blob:')?'use-credentials':undefined} src={playableUrl} poster={activeVideo.thumbnail_url?sessionAssetUrl(project.id,activeVideo.thumbnail_url):undefined} muted={muted||profile.fast} playsInline preload="auto" onLoadedMetadata={e=>{if(e.currentTarget===videoRef.current)onReady();}} onRateChange={e=>{if(e.currentTarget===videoRef.current)applyPlayerRate(e.currentTarget);}} onPlaying={e=>{if(e.currentTarget===videoRef.current&&wantsPlay.current){applyPlayerRate(e.currentTarget);setPlaying(true);}}} onPlay={e=>{if(e.currentTarget!==videoRef.current)return;if(!wantsPlay.current)e.currentTarget.pause();else setPlaying(true);}} onPause={e=>{if(e.currentTarget===videoRef.current&&!wantsPlay.current)setPlaying(false);}} onTimeUpdate={e=>{if(e.currentTarget===videoRef.current)syncNativeTime();}} onEnded={e=>{if(e.currentTarget===videoRef.current)ended();}} onError={e=>{if(e.currentTarget!==videoRef.current||preview.state!=='ready')return;pausePlayback();setMediaError('预览读取失败，请检查素材可读性后重试。');}} onClick={toggle}/><div className="video-tag"><span className="live-dot"/> {profile.fast?'高倍速预览 · 本机缓存':'流畅预览 · 270p'}</div><div className="video-clock">{formatTime(time)}</div>{previewPending&&(preview.state!=='idle'||showPreviewWait)&&!previewError&&<div className="media-cover preview-preparation" role="status"><LoaderCircle className="spin"/><p>{preview.state==='running'?(profile.fast?'正在准备流畅快进预览':'正在生成此片段的预览'):preview.state==='queued'?'此片段正在排队':'正在读取预览缓存'}</p>{preview.state==='running'&&preview.progress!==null&&<><progress aria-label="预览生成进度" max={100} value={preview.progress}/><strong>{Math.floor(preview.progress)}%</strong></>}<small>{preview.detail||(preview.state==='running'?'仅首次准备，完成后可直接复用缓存，并提前准备后续片段':'可以继续浏览时间轴和其他片段')}</small></div>}{showBuffering&&!previewPending&&!previewError&&<div className="media-buffering" role="status"><LoaderCircle className="spin" size={14}/>正在缓冲…</div>}{scrubbing&&<div className="media-scrubbing">拖动定位 · 松开后显示目标画面</div>}{previewError&&<div className="media-cover"><p>{previewError}</p><button className="secondary" onClick={()=>{pendingSeek.current=Math.max(0,(timeRef.current-activeVideo.start_ms)/1000);setMediaError('');forgetProjectPreviews(project.id);setMediaVersion(v=>v+1);setSessionEntered(false);setPrepareOpen(true);void preparation.start(project.id,true);}}>重新加载</button></div>}</>:<div className="empty-preview"><div className="empty-film"><Film size={34}/><span>＋</span></div><h2>选择素材，开始标注</h2><p>{mockMode?'选择测试视频，新建模拟 S3 项目。上传后会生成标注预览。':sharedServer?'从已挂载的 NAS 选择完整采集目录。':'选择本机视频文件或原视频目录。'}{!mockMode&&<> <br/>原视频留在原位置，系统会准备标注用预览。</>}</p><button className="primary" onClick={()=>beginImport('new')}><Upload size={17}/>新建项目并选择素材</button><span className="format-hint">支持 MP4 · AVI · MOV · MKV · WEBM</span></div>}</div>
+   <div className="player-controls"><div className="play-controls"><button className="icon-button" aria-label="后退1秒" disabled={!project} onClick={()=>moveCursor(-1000)}><SkipBack size={17}/></button><button className="play-button" aria-label={playing?'暂停':'播放'} disabled={!project} onClick={toggle}>{playing?<Pause size={19}/>:<Play size={19} fill="currentColor"/>}</button><button className="icon-button" aria-label="前进1秒" disabled={!project} onClick={()=>moveCursor(1000)}><SkipForward size={17}/></button><span className="player-time">{formatTime(time)}<b>/</b><span>{formatTime(project?.duration_ms??0)}</span></span></div><div className="play-options"><PlaybackSpeed value={rate} onChange={changeRate}/><button className="icon-button" aria-label={muted?'开启声音':'静音'} onClick={()=>setMuted(!muted)}>{muted?<VolumeX size={17}/>:<Volume2 size={17}/>}</button><button className="icon-button" aria-label="全屏视频" disabled={!project} onClick={()=>videoRef.current?.requestFullscreen()}><Maximize size={17}/></button></div></div>
   </div>
-  {project?<Timeline comparison={comparisonOpen?comparison:null} project={playbackProject!} currentTime={time} activeTrack={activeTrack} trackRevealVersion={trackRevealVersion} selectedId={selectedId} anchors={comparisonOpen?[]:anchors} selectedRange={comparisonOpen?null:selectedRange} anchorControls={comparisonOpen?undefined:anchorControls} onRangeDismiss={dismissTimelineRange} onSeek={seek} onScrubStart={beginScrub} onScrubEnd={endScrub} onTrackSelect={selectTrack} onSegmentSelect={selectSegment}/>:<div className="empty-timeline"><div className="panel-heading"><div><Layers3 size={16}/><h2>标注时间线</h2></div><span>导入视频后开始标注</span></div>{(['scene','posture'] as const).map((t,i)=><div className={'placeholder-track '+t} key={t}><span><i/>{names[t]}</span><div><span>{['室内 / 室外','动 / 坐 / 站 / 躺'][i]}</span></div></div>)}</div>}
+  {project?<Timeline comparison={comparisonOpen?comparison:null} project={playbackProject!} currentTime={time} activeTrack={activeTrack} trackRevealVersion={trackRevealVersion} selectedId={selectedId} anchors={comparisonOpen?[]:anchors} selectedRange={comparisonOpen?null:selectedRange} anchorControls={comparisonOpen?undefined:anchorControls} onRangeDismiss={dismissTimelineRange} onSeek={seek} onScrubStart={beginScrub} onScrubEnd={endScrub} onTrackSelect={selectTrack} onSegmentSelect={selectSegment}/>:<div className="empty-timeline"><div className="panel-heading"><div><Layers3 size={16}/><h2>标注时间线</h2></div><span>导入视频后开始标注</span></div>{(['scene','posture','category'] as const).map((t,i)=><div className={'placeholder-track '+t} key={t}><span><i/>{names[t]}</span><div><span>{['室内 / 室外 / 半开放 / 隧道 / 电梯 / 交通工具内 / Unknown','坐 / 站 / 躺 / 移动 / 骑行 / 交通工具坐 / 交通工具站 / 交通工具躺 / Unknown','工作学习 / 运动锻炼 / 饮食 / 出行 / 社交 / 休闲娱乐 / 休息 / 日常事务 / Unknown'][i]}</span></div></div>)}</div>}
   </section>}
-  <aside className="workspace-sidebar" inert={comparisonOpen}>{workspaceTools}{sessionEntered&&project&&projectTracks(project).length>0&&<section className="annotation-panel"><div className="panel-heading"><div><span className="heading-mark"/><h2>标注面板</h2></div><div className="panel-heading-actions"><span className="small-badge">{count} 条</span><button className="icon-button delete-custom-track-button" aria-label="删除当前时间轴" title="删除当前时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setDeleteTrackError('');setDeleteTrack({id:activeTrack,name:trackName(project,activeTrack),fixed:!customTrack(project,activeTrack)});}}><Trash2 size={15}/></button><button className="icon-button" aria-label="查看标注编辑历史" title="查看标注编辑历史" onClick={()=>setAuditOpen(true)}><History size={15}/></button></div></div><div className="track-tabs" role="tablist" aria-label="标注轨道">{projectTracks(project).map(t=><button key={t} role="tab" aria-selected={activeTrack===t} className={activeTrack===t?'active '+(customTrack(project,t)?'custom':t):''} onClick={()=>selectTrack(t)}><i/>{trackName(project,t)}</button>)}<button className="add-custom-track" aria-label="添加时间轴" title="添加时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setCustomTrackOpen(true);}}><Plus size={14}/>添加</button></div>
-   <div className="annotation-content"><div className="section-caption"><span>{trackName(project,activeTrack)}标注</span><span className="accent-text">{eventTrack?'可重叠事件':activeTrack==='category'?'可留空 · 互斥状态':customTrack(project,activeTrack)?'可留空 · 互斥状态':'可留空 · 互斥状态'}</span><button className="text-button manage-track-labels" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setLabelsOpen(true);}}>管理标签</button></div><div className="cursor-card"><span>当前时间</span><strong>{formatTime(time)}</strong>{project&&<div className="cursor-progress"><i style={{width:`${100*time/project.duration_ms}%`}}/></div>}</div>
+  <aside className="workspace-sidebar" inert={comparisonOpen}>{workspaceTools}{sessionEntered&&project&&projectTracks(project).length>0&&<section className="annotation-panel"><div className="panel-heading"><div><span className="heading-mark"/><h2>标注面板</h2></div><div className="panel-heading-actions"><span className="small-badge">{count} 条</span><button className="icon-button" aria-label="查看项目操作记录" title="查看项目操作记录" onClick={()=>setAuditOpen(true)}><History size={15}/></button></div></div><div className="track-tabs" role="tablist" aria-label="标注轨道">{projectTracks(project).map(t=><button key={t} role="tab" aria-selected={activeTrack===t} className={activeTrack===t?'active '+(customTrack(project,t)?'custom':t):''} onClick={()=>selectTrack(t)}><i/>{trackName(project,t)}</button>)}<button className="add-custom-track" aria-label="选择时间轴" title="选择本项目使用的时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setSelectionOpen(true);}}><Layers3 size={14}/>选择时间轴</button></div>
+   <div className="annotation-content"><div className="section-caption"><span>{trackName(project,activeTrack)}标注</span><span className="accent-text">可留空 · 支持多状态</span></div><div className="cursor-card"><span>当前时间</span><strong>{formatTime(time)}</strong>{project&&<div className="cursor-progress"><i style={{width:`${100*time/project.duration_ms}%`}}/></div>}</div>
     {selectedRange&&<div className="selected-range-card"><span>选中区间</span><strong>{formatTime(selectedRange.start_ms)} → {formatTime(selectedRange.end_ms)}</strong><button className="text-button" onClick={cancelRange}>取消选区</button></div>}
+    <div className={'subaxis-control'+(subaxis?' subaxis-enabled':'')}><label><input type="checkbox" checked={selected?(selected.lane??0)>0:subaxis} disabled={manual||!selectedRange} onChange={event=>setSubaxis(event.target.checked)} aria-describedby="subaxis-hint"/><span>子轴</span></label><p id="subaxis-hint">{selected?`正在编辑${selected.lane?`子轴 ${selected.lane}`:'主轴'}，保存时保留所在轴。`:!selectedRange?'先用锚点选择区间，即可勾选子轴添加重叠标注。':subaxis?'优先写入主轴空白；有重叠时复用空闲子轴，全部冲突才新建。':'保存将覆盖主轴选区内的内容，已有子轴保留。'}</p></div>
     {!eventTrack?<>
-     <p className="instruction">{selectedRange?'选择标签，标注选中区间。':project&&!project.annotations[activeTrack].length?'选择初始标签，覆盖全部已录制时间，再在变化处切换。':'在变化发生的位置，点击按钮切换状态。'}<br/>选区标注覆盖区间内内容，区间外保持不变。</p>
-     <div className={'state-buttons '+(customTrack(project,activeTrack)?'custom':activeTrack)}>{fixedLabels.map(s=>{const shortcut=activeTrack==='posture'?POSTURE_SHORTCUTS.find(item=>s===item.label||s.startsWith(`${item.label}（`)):undefined;return <button key={s} disabled={!project} title={shortcut?`${shortcut.key}：从当前播放位置向后标注${s}`:undefined} className={(eventTrack?label===s:currentStates.some(state=>state.label===s))?'chosen':''} onClick={()=>eventTrack?setLabel(s):changeState(s)}><strong>{s}</strong>{shortcut&&<kbd>{shortcut.key}</kbd>}</button>;})}</div>
-     {!fixedLabels.length&&<p className="input-hint">当前没有标签按钮，可点击“管理标签”添加。</p>}
-     {activeTrack==='posture'&&<p className="input-hint">Z / X / C / V 对应仍存在的“动 / 坐 / 站 / 躺”及其带备注标签；新增姿势可点击按钮。快捷键不使用锚点选区，输入文字时不触发。</p>}
+     <p className="instruction">{selectedRange?'选择标签，标注选中区间。':!activeSegments.some(segment=>segment.lane===0)?'选择初始标签，覆盖主轴全部已录制时间；也可用锚点只标注一段。':'在变化发生的位置，点击按钮切换主轴状态。'}<br/>各时间轴均可留空，重叠状态通过锚点选区和子轴标注。</p>
+     <div className={'state-buttons '+(customTrack(project,activeTrack)?'custom':activeTrack)}>{fixedLabels.map(s=><button key={s} disabled={!project} className={(eventTrack?label===s:currentStates.some(state=>state.label===s))?'chosen':''} onClick={()=>eventTrack?setLabel(s):changeState(s)}><strong>{s}</strong></button>)}</div>
+     {!fixedLabels.length&&<p className="input-hint">此项目的时间轴副本没有标签，请从时间轴库选择其他时间轴。</p>}
      <div className="current-label"><i/>{currentStates.length?`当前位置：${[...new Set(currentStates.map(state=>state.label))].join('＋')}`:'当前位置尚未标注'}</div>
     </>:<>
-     <p className="instruction">先输入内容或先标时间都可以。<br/>支持瞬时事件、持续区间和时间重叠。</p>
+     <p className="instruction">先输入内容或先标时间都可以。<br/>主轴支持瞬时事件和持续区间；重叠区间请使用锚点并勾选子轴。</p>
      <div className="kind-tabs" aria-label="事件记录方式"><button className={behaviorKind==='interval'?'active':''} onClick={()=>setBehaviorKind('interval')}>持续区间</button><button className={behaviorKind==='point'?'active':''} onClick={()=>{setBehaviorKind('point');setSelectedRange(null);}}>瞬时事件</button></div>
      {fixedLabels.length>0&&<div className="state-buttons event-label-buttons" aria-label="事件快捷标签">{fixedLabels.map(value=><button key={value} className={label===value?'chosen':''} onClick={()=>setLabel(value)}>{value}</button>)}</div>}
      {!manual&&<><label className="field-label" htmlFor="behavior-label">事件内容</label><input id="behavior-label" placeholder="例如：抽烟、喝咖啡、使用手机" value={label} maxLength={500} onChange={e=>setLabel(e.target.value)} disabled={!project}/><div className="capture-fields"><label>{behaviorKind==='point'?'发生时间':'开始时间'}<input aria-label="习惯开始时间" placeholder="00:00:00.000" value={startText} onChange={e=>editStart(e.target.value)}/><button className="secondary" disabled={!project} onClick={()=>editStart(formatTime(time))}>{behaviorKind==='point'?'标记发生时点':'标记开始'}</button></label>{behaviorKind==='interval'&&<label>结束时间<input aria-label="习惯结束时间" placeholder="00:00:00.000" value={endText} onChange={e=>editEnd(e.target.value)}/><button className="secondary" disabled={!project} onClick={()=>editEnd(formatTime(time))}>标记结束</button></label>}</div><button className="primary wide" disabled={!project||!label.trim()||!startText||(behaviorKind==='interval'&&!endText)} onClick={saveSegment}><Check size={15}/>保存标注</button><p className="input-hint">{behaviorKind==='point'?'瞬时事件的开始和结束为同一时刻。':'跨越录制间隔的标注会在断档处分段保存。'}</p></>}
@@ -832,11 +784,11 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
     {manual&&<div className="segment-editor" ref={segmentEditorRef}><div className="section-caption"><span>编辑标注</span><button className="icon-button" aria-label="取消编辑" onClick={clearEditor}><X size={15}/></button></div>
      <label className="field-label">标注内容</label>
      {eventTrack?<input aria-label="编辑标注内容" value={splitAnnotationLabel(label,[]).base} maxLength={500} onChange={e=>setLabel(annotationLabel(e.target.value,splitAnnotationLabel(label,[]).note))}/>
-      :<select aria-label="编辑状态内容" value={splitAnnotationLabel(label,fixedLabels).base} onChange={e=>setLabel(annotationLabel(e.target.value,splitAnnotationLabel(label,fixedLabels).note))}>{!fixedLabels.includes(splitAnnotationLabel(label,fixedLabels).base)&&label&&<option value={label} disabled>{label}</option>}{fixedLabels.map(s=><option key={s}>{s}</option>)}</select>}
-     <label className="field-label" htmlFor="segment-note">这段标注的备注</label><input id="segment-note" aria-label="这段标注的备注" placeholder="例如：餐厅；留空则只显示标签" maxLength={80} value={splitAnnotationLabel(label,eventTrack?[]:fixedLabels).note} onChange={e=>setLabel(annotationLabel(splitAnnotationLabel(label,eventTrack?[]:fixedLabels).base,e.target.value))}/><p className="input-hint">仅修改当前选中的色块，保存后显示为“标签（备注）”。</p>
+      :<select aria-label="编辑状态内容" value={splitAnnotationLabel(label,editorLabelOptions).base} onChange={e=>setLabel(annotationLabel(e.target.value,splitAnnotationLabel(label,editorLabelOptions).note))}>{!fixedLabels.includes(splitAnnotationLabel(label,editorLabelOptions).base)&&label&&<option value={splitAnnotationLabel(label,editorLabelOptions).base} disabled>{splitAnnotationLabel(label,editorLabelOptions).base}（历史标签）</option>}{fixedLabels.map(s=><option key={s}>{s}</option>)}</select>}
+     <label className="field-label" htmlFor="segment-note">这段标注的备注</label><input id="segment-note" aria-label="这段标注的备注" placeholder="例如：餐厅；留空则只显示标签" maxLength={80} value={splitAnnotationLabel(label,editorLabelOptions).note} onChange={e=>setLabel(annotationLabel(splitAnnotationLabel(label,editorLabelOptions).base,e.target.value))}/><p className="input-hint">仅修改当前选中的色块，保存后显示为“标签（备注）”。</p>
      <div className="time-fields"><label>开始时间<input aria-label="开始时间" value={startText} onChange={e=>editStart(e.target.value)}/><button onClick={()=>editStart(formatTime(time))}>使用当前时间</button></label><label>{behaviorKind==='point'&&eventTrack?'瞬时事件（同一时刻）':'结束时间'}<input disabled={behaviorKind==='point'&&eventTrack} aria-label="结束时间" placeholder="进行中" value={behaviorKind==='point'&&eventTrack?startText:endText} onChange={e=>editEnd(e.target.value)}/><button disabled={behaviorKind==='point'&&eventTrack} onClick={()=>editEnd(formatTime(time))}>使用当前时间</button></label></div><div className="edit-actions"><button className="primary" onClick={saveSegment}><Check size={15}/>保存标注</button>{selected&&<button className="danger-icon" aria-label="删除此标注" onClick={remove}><Trash2 size={16}/></button>}</div></div>}
    </div><div className="annotation-footer"><button className="secondary" disabled={!history.length||!!busy} onClick={undo} title="Ctrl + Z"><RotateCcw size={14}/>撤销</button><button className="secondary" disabled={!redoHistory.length||!!busy} onClick={redo} title="Ctrl + Shift + Z"><RotateCw size={14}/>恢复</button></div>
-  </section>}{sessionEntered&&project&&projectTracks(project).length===0&&<section className="annotation-panel"><div className="panel-heading"><h2>标注面板</h2></div><p className="instruction">此项目还没有时间轴。添加固定轴或自定义轴后开始标注。</p><button className="primary wide" disabled={!!busy||pendingSaves.current>0||saveFailed} onClick={()=>setCustomTrackOpen(true)}><Plus size={15}/>添加时间轴</button></section>}</aside></main>
+  </section>}{sessionEntered&&project&&projectTracks(project).length===0&&<section className="annotation-panel"><div className="panel-heading"><h2>标注面板</h2></div><p className="instruction">当前项目没有勾选时间轴。已有标注保留，可重新选择时间轴继续标注。</p><button className="primary wide" disabled={!!busy||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setSelectionOpen(true);}}><Layers3 size={15}/>选择时间轴</button></section>}</aside></main>
   {saveFailed&&<div className="save-recovery" role="alert" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen}><span>{saveState}</span><button className="text-button" disabled={!!busy} onClick={retrySave}>重试保存</button><button className="text-button" disabled={!!busy} title="先下载包含本页未保存改动的恢复 JSON，再读取服务器草稿" onClick={recoverAndReload}>保存恢复副本并重新载入</button></div>}
   {importOpen&&<div className="modal-backdrop" inert={!!pendingClaim} onClick={()=>!busy&&!mockUploading&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className={'import-modal'+(nasPickerKind||mockListing?' nas-picker-open':'')} onClick={e=>e.stopPropagation()}>
    <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy||mockUploading} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>

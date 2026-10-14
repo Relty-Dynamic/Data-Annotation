@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -13,6 +15,60 @@ import webbrowser
 
 ROOT = Path(__file__).resolve().parent
 BASE_URL = "http://127.0.0.1:8765"
+
+def owned_windows_process(pid):
+    query = f"Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' | Select-Object Name,CommandLine | ConvertTo-Json -Compress"
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
+                            capture_output=True, text=True, check=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+    process = json.loads(result.stdout) if result.stdout.strip() else {}
+    if not isinstance(process, dict):
+        return False
+    script_argument = r'(?:^|[\s"])' + re.escape(str(ROOT / "launch.py")) + r'(?=$|[\s"])'
+    return (process.get("Name", "").lower() in {"python.exe", "pythonw.exe"}
+            and re.search(script_argument, process.get("CommandLine") or "", re.IGNORECASE) is not None)
+
+
+def restart_running():
+    """Stop only the server recorded by this checkout before starting anew."""
+    current = health()
+    if not current:
+        return
+    if current.get("application") != "datamark":
+        raise RuntimeError("8765 端口由其他应用占用，未停止该应用。")
+    pid_file = ROOT / ".local/server.pid"
+    if not pid_file.is_file():
+        raise RuntimeError("当前服务没有本项目的进程记录，无法自动重启。")
+    value = pid_file.read_text(encoding="ascii").strip()
+    if not value.isdecimal() or int(value) <= 0:
+        raise RuntimeError("本机后端进程记录无效。")
+    pid = int(value)
+    if os.name != "nt":
+        raise RuntimeError("自动重启入口仅用于 Windows 本机。")
+    # A stale PID file must never stop a different program or checkout.
+    if not owned_windows_process(pid):
+        raise RuntimeError("进程记录与本项目启动器不符，未停止任何进程。")
+    stop_file = ROOT / ".local/server.stop"
+    stop_file.write_text(value, encoding="ascii")
+    # Updated launchers exit gracefully. Older launchers do not watch the file;
+    # only those verified above need a one-time process stop.
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if not health():
+            break
+        time.sleep(.25)
+    else:
+        if not owned_windows_process(pid):
+            raise RuntimeError("旧进程身份已变更，未停止任何其他进程。")
+        subprocess.run(["taskkill.exe", "/PID", value, "/T", "/F"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    deadline = time.monotonic() + 30
+    while health():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("旧服务仍在退出，请稍后重试。")
+        time.sleep(.25)
+    stop_file.unlink(missing_ok=True)
 
 def health():
     try:
@@ -83,6 +139,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-browser", action="store_true", help="Manual diagnostic mode; keep running without a page")
     parser.add_argument("--no-open", action="store_true", help="Reuse an already-open page while keeping browser-controlled lifetime")
+    parser.add_argument("--restart", action="store_true", help="Restart the server owned by this Windows checkout")
     args = parser.parse_args()
     settings = {
         "PYTHONNOUSERSITE": "1", "PIP_REQUIRE_VIRTUALENV": "1",
@@ -101,6 +158,8 @@ def main():
         command = "python -m backend.auth --root .local/s3-mock-app" if mock_mode else "python -m backend.auth"
         raise RuntimeError(f"尚未创建管理员账号。请先在项目虚拟环境运行 {command}，然后重启平台。")
     os.environ["DATAMARK_DESKTOP_CACHE"] = "1"
+    if args.restart:
+        restart_running()
     current = health()
     if current and current.get("application") == "datamark" and "account-login" not in current.get("capabilities", []):
         raise RuntimeError("端口 8765 仍由旧版无登录服务占用。请先关闭旧平台的所有网页，等待服务退出后重新启动。")
@@ -141,6 +200,16 @@ def main():
     pid_file = ROOT / ".local" / "server.pid"
     pid_file.write_text(str(os.getpid()), encoding="ascii")
     stop_open = threading.Event()
+    stop_file = ROOT / ".local/server.stop"
+    def stop_when_requested():
+        while not stop_open.wait(.25):
+            try:
+                if stop_file.read_text(encoding="ascii").strip() == str(os.getpid()):
+                    server.should_exit = True
+                    return
+            except FileNotFoundError:
+                pass
+    threading.Thread(target=stop_when_requested, daemon=True).start()
     if not args.no_browser and not args.no_open:
         threading.Thread(target=open_when_ready, args=(server, stop_open), daemon=True).start()
     try:

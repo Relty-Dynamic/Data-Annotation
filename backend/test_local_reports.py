@@ -82,7 +82,7 @@ class LocalReportTests(unittest.TestCase):
             store.documents(admin, snapshot["id"])
         self.assertEqual(readback.exception.status_code, 409)
 
-    def test_local_project_with_removed_posture_writes_empty_json_to_nas(self):
+    def test_local_project_with_removed_posture_does_not_write_posture_json_to_nas(self):
         auth = AuthStore(self.root)
         owner = auth.create_user("owner", "本机标注员", "correct horse battery staple")
         store = LocalReportStore(auth, self.nas_root)
@@ -94,9 +94,10 @@ class LocalReportTests(unittest.TestCase):
                               for video in project["videos"]]
         _, raw = self.service.export_documents(project, for_writeback=True)
         result = store.put(owner, snapshot, {axis: value.decode("utf-8") for axis, value in raw.items()})
-        saved = json.loads((self.nas_root / result["nas_relative_path"] / "posture.timeline.json").read_bytes())
-        self.assertEqual(saved["segments"], [])
-        self.assertEqual(saved["timebase"]["fixed_tracks"], project["fixed_tracks"])
+        folder = self.nas_root / result["nas_relative_path"]
+        self.assertFalse((folder / "posture.timeline.json").exists())
+        self.assertEqual({path.name for path in folder.glob("*.timeline.json")},
+                         {"scene.timeline.json", "category.timeline.json", "habit.timeline.json"})
 
     def test_stale_revision_and_inconsistent_batch_are_rejected(self):
         auth = AuthStore(self.root)
@@ -124,6 +125,29 @@ class LocalReportTests(unittest.TestCase):
             store.put(owner, snapshot, altered)
         self.assertEqual(content_mismatch.exception.status_code, 422)
 
+    def test_selected_only_nas_submission_preserves_previous_unselected_files(self):
+        auth = AuthStore(self.root)
+        owner = auth.create_user("owner", "本机标注员", "correct horse battery staple")
+        store = LocalReportStore(auth, self.nas_root)
+        snapshot, documents = self.report()
+        first = store.put(owner, snapshot, documents)
+        folder = self.nas_root / first["nas_relative_path"]
+        preserved = {axis: (folder / f"{axis}.timeline.json").read_bytes() for axis in ("scene", "category", "habit")}
+        snapshot = {**snapshot, "revision": snapshot["revision"] + 1, "selected_tracks": ["posture"]}
+        snapshot["annotations"]["habit"] = [{"id": "ongoing", "label": "吸烟", "start_ms": 0, "end_ms": None}]
+        posture = json.loads(documents["posture"])
+        posture["save_id"] = uuid.uuid4().hex
+        posture["timebase"]["selected_tracks"] = ["posture"]
+        posture["timebase"]["written_tracks"] = ["posture"]
+        documents = {"posture": json.dumps(posture, ensure_ascii=False)}
+        store.put(owner, snapshot, documents)
+        store.put(owner, snapshot, documents)
+        for axis, payload in preserved.items():
+            self.assertEqual((folder / f"{axis}.timeline.json").read_bytes(), payload)
+        with zipfile.ZipFile(io.BytesIO(store.documents(owner, snapshot["id"]))) as archive:
+            self.assertEqual(archive.namelist(), ["posture.timeline.json"])
+        self.assertIsNone(store.list(owner)[0]["annotations"]["habit"][0]["end_ms"])
+
     def test_final_sync_needs_nas_and_does_not_publish_on_failure(self):
         auth = AuthStore(self.root)
         owner = auth.create_user("owner", "本机标注员", "correct horse battery staple")
@@ -149,7 +173,12 @@ class LocalReportTests(unittest.TestCase):
         outside = self.root / "outside"
         outside.mkdir()
         parent = self.nas_root / "habit" / "smoking"
-        (parent / f'{snapshot["name"]}-{snapshot["id"]}').symlink_to(outside, target_is_directory=True)
+        try:
+            (parent / f'{snapshot["name"]}-{snapshot["id"]}').symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows does not grant this test process symlink privileges")
+            raise
         with self.assertRaises(HTTPException) as unsafe:
             store.put(owner, snapshot, documents)
         self.assertEqual(unsafe.exception.status_code, 409)
@@ -218,6 +247,7 @@ class LocalReportTests(unittest.TestCase):
             mirror.connect("local-user", "owner", "password")
             mirror.sync("local-user", self.service.load(project["id"]), self.service)
             completed = complete_project(self.service.load(project["id"]))
+            completed["selected_tracks"] = ["posture"]
             self.service.save(completed)
             self.service.writeback(project["id"])
             with self.assertRaises(HTTPException) as old_server:
@@ -226,8 +256,8 @@ class LocalReportTests(unittest.TestCase):
             mirror.sync("local-user", self.service.load(project["id"]), self.service, final=True)
             mirror.disconnect("local-user")
         self.assertIsNone(captured[0]["documents"])
-        self.assertEqual(len(captured[1]["documents"]), 4)
-        self.assertEqual(len(captured[2]["documents"]), 4)
+        self.assertEqual(set(captured[1]["documents"]), {"posture"})
+        self.assertEqual(set(captured[2]["documents"]), {"posture"})
         self.assertNotIn(str(self.source), json.dumps(captured, ensure_ascii=False))
 
     def test_authenticated_admin_can_list_and_export_local_result(self):

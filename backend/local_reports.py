@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from .service import AXES, FILENAMES, DEFAULT_TRACK_LABELS, validate_annotations, validate_custom_tracks, validate_fixed_tracks, validate_track_labels
+from .service import AXES, FILENAMES, LEGACY_TRACK_LABELS, assign_annotation_lanes, selected_tracks, validate_project_name, validate_annotations, validate_custom_tracks, validate_fixed_tracks, validate_track_labels
 
 PROJECT_ID = re.compile(r"[0-9a-f]{32}\Z")
 
@@ -52,17 +52,26 @@ def validate_report(snapshot: dict, documents: dict[str, str] | None) -> dict:
             raise HTTPException(422, "本机视频时间范围无效。")
     tracks = validate_custom_tracks(snapshot.get("custom_tracks", []))
     fixed = validate_fixed_tracks(snapshot.get("fixed_tracks", list(AXES)))
-    labels = validate_track_labels(snapshot.get("track_labels", DEFAULT_TRACK_LABELS))
-    annotations = validate_annotations(snapshot.get("annotations"), duration, videos=videos,
+    labels = validate_track_labels(snapshot.get("track_labels", LEGACY_TRACK_LABELS))
+    selected = selected_tracks({"fixed_tracks": fixed, "custom_tracks": tracks,
+                                **({"selected_tracks": snapshot["selected_tracks"]} if "selected_tracks" in snapshot else {})})
+    names = snapshot.get("track_names", {})
+    if not isinstance(names, dict) or any(axis not in AXES for axis in names):
+        raise HTTPException(422, "时间轴名称无效。")
+    names = {axis: validate_project_name(title) for axis, title in names.items()}
+    annotations = validate_annotations(snapshot.get("annotations"), duration, final=False, videos=videos,
                                        custom_tracks=tracks, enabled_fixed_tracks=fixed, fixed_label_options=labels)
     safe = {"id": snapshot["id"], "name": name.strip(), "source_folder_name": source_folder.strip(),
             "revision": revision,
             "duration_ms": duration, "videos": [{key: video.get(key) for key in ("id", "name", "start_ms", "end_ms", "duration_ms", "recording_start")}
                                                  for video in videos], "fixed_tracks": fixed, "track_labels": labels, "custom_tracks": tracks, "annotations": annotations,
-            "submitted_at": None}
+            "selected_tracks": selected, "track_names": names, "submitted_at": None}
     if documents is not None:
-        expected = set(AXES) | {item["id"] for item in tracks}
-        if (not isinstance(documents, dict) or set(documents) != expected
+        expected = set(selected)
+        validate_annotations({axis: records if axis in expected else [] for axis, records in annotations.items()},
+                             duration, final=True, videos=videos, custom_tracks=tracks,
+                             enabled_fixed_tracks=fixed, fixed_label_options=labels)
+        if (not expected or not isinstance(documents, dict) or set(documents) != expected
                 or any(not isinstance(value, str) for value in documents.values())
                 or sum(len(value) for value in documents.values()) > 20_000_000):
             raise HTTPException(422, "本机时间轴文件不齐全或过大。")
@@ -75,14 +84,17 @@ def validate_report(snapshot: dict, documents: dict[str, str] | None) -> dict:
                         or item["collection_id"] != safe["id"] or item["collection_name"] != safe["name"]
                         or timebase["duration_ms"] != duration
                         or timebase.get("fixed_tracks", list(AXES)) != fixed
-                        or timebase.get("track_labels", DEFAULT_TRACK_LABELS) != labels
+                        or timebase.get("track_labels", LEGACY_TRACK_LABELS) != labels
+                        or timebase.get("selected_tracks", selected) != selected
+                        or timebase.get("written_tracks", selected) != selected
+                        or timebase.get("track_names", {}) != names
                         or timebase.get("custom_tracks", []) != tracks):
                     raise ValueError("mismatch")
                 exported = [
-                    {key: segment[key] for key in record}
+                    {key: segment[key] for key in record if key != "lane" or "lane" in segment}
                     for segment, record in zip(item["segments"], annotations[axis])
                 ]
-                if len(item["segments"]) != len(annotations[axis]) or exported != annotations[axis]:
+                if len(item["segments"]) != len(annotations[axis]) or assign_annotation_lanes(exported, duration) != annotations[axis]:
                     raise ValueError("segments mismatch")
                 save_ids.add(item["save_id"])
                 saved_ats.append(item["saved_at"])
@@ -132,7 +144,7 @@ class LocalReportStore:
                 folder.mkdir(exist_ok=True)
                 if not folder.is_dir():
                     raise OSError("not a directory")
-            return folder, str(relative)
+            return folder, relative.as_posix()
         except OSError as error:
             raise HTTPException(503, "无法在 NAS 建立本机项目目录，请检查挂载及写入权限。") from error
 
@@ -140,7 +152,7 @@ class LocalReportStore:
     def _write_nas(self, user: dict, safe: dict, documents: dict[str, str],
                    old_documents: dict[str, str] | None, previous: str | None):
         folder, relative = self._timeline_directory(user, safe, previous)
-        desired = {_file_name(axis): value.encode("utf-8") for axis, value in documents.items()}
+        desired = {_file_name(axis): value.encode("utf-8") for axis, value in {**(old_documents or {}), **documents}.items()}
         old = {_file_name(axis): value.encode("utf-8") for axis, value in (old_documents or {}).items()}
         names = set(desired) | set(old)
         touched: list[str] = []
@@ -244,7 +256,7 @@ class LocalReportStore:
             serialized = json.dumps(safe, ensure_ascii=False)
             if len(serialized) > 20_000_000:
                 raise HTTPException(422, "本机项目摘要过大。")
-            stored_documents = documents or old_documents
+            stored_documents = {**(old_documents or {}), **documents} if documents is not None else old_documents
             updated = datetime.now().astimezone().isoformat()
             relative = old[4] if old else None
             def save() -> None:
@@ -279,7 +291,8 @@ class LocalReportStore:
             raise HTTPException(409, "此本机项目尚未写回 NAS 最终时间轴文件。")
         if self.nas_root is None:
             raise HTTPException(503, "Ubuntu 尚未配置 NAS 标注输出目录。")
-        documents = json.loads(row[2])
+        snapshot = json.loads(row[1])
+        documents = {axis: value for axis, value in json.loads(row[2]).items() if axis in selected_tracks(snapshot)}
         relative = Path(row[3])
         if (relative.is_absolute() or len(relative.parts) != 4 or ".." in relative.parts
                 or relative.parts[:2] != ("habit", "smoking") or relative.parts[-1] != "timeline"

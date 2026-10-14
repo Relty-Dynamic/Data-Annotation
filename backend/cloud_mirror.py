@@ -73,7 +73,7 @@ class CloudMirror:
                 raise HTTPException(409, "请先连接公网标注账号，再同步本机项目。")
             client, _, csrf = session
             public = service.public(project)
-            snapshot = {key: public[key] for key in ("id", "name", "revision", "duration_ms", "fixed_tracks", "track_labels", "custom_tracks", "annotations")}
+            snapshot = {key: public[key] for key in ("id", "name", "revision", "duration_ms", "fixed_tracks", "selected_tracks", "track_names", "track_labels", "custom_tracks", "annotations")}
             snapshot["source_folder_name"] = Path(project["source_dir"]).name if project.get("source_dir") else public["name"]
             snapshot["videos"] = [{key: video.get(key) for key in ("id", "name", "start_ms", "end_ms", "duration_ms", "recording_start")}
                                   for video in public["videos"]]
@@ -86,7 +86,7 @@ class CloudMirror:
                 source = service.external_directory(source_root)
                 if service.current_external_hashes(source_root) != service.expected_external_hashes(project):
                     raise HTTPException(409, "原目录时间轴文件已变化，未同步最终结果。")
-                axes = (*AXES, *(item["id"] for item in project.get("custom_tracks", [])))
+                axes = public["selected_tracks"]
                 documents = {axis: (source / FILENAMES.get(axis, axis + ".timeline.json")).read_text(encoding="utf-8") for axis in axes}
             try:
                 response = client.put("/api/local-reports", json={"snapshot": snapshot, "documents": documents},

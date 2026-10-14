@@ -20,7 +20,7 @@ from .io_rate import read_rates
 from .local_playback import render_local_fast, render_local_thumbnail
 from .storyboards import StoryboardCache
 from .project_storage import PROJECT_ID, checked_tree
-from .source_cache import is_reparse, local_nas_root
+from .source_cache import is_reparse, local_nas_cache_root
 from .encoding import encoder_threads
 from .desktop_cache import DesktopCache, collection_name, sha256_file, safe_name
 from .video_selection import active_videos
@@ -132,8 +132,8 @@ class SessionCache:
 
     def _local_nas_entry(self, source: dict) -> tuple[dict, Path] | None:
         """Find an intranet cache on an explicitly mounted NAS, without claiming it."""
-        root = local_nas_root()
-        if root is None or os.getenv('DATAMARK_STORAGE_BACKEND', 'local') != 'local':
+        root = local_nas_cache_root()
+        if root is None:
             return None
         path = Path(source['path'])
         if not path.is_relative_to(root):
@@ -211,6 +211,11 @@ class SessionCache:
         if not configured or os.getenv('DATAMARK_STORAGE_BACKEND') != 'nas':
             return None
         path = Path(source['path'])
+        local_root = local_nas_cache_root()
+        if local_root is not None and path.is_relative_to(local_root):
+            # Local NAS UI instances download into .local; their independent
+            # project IDs must never publish into the Ubuntu server's cache.
+            return None
         try:
             if (path.is_symlink() or path.parent.is_symlink()
                     or not path.resolve(strict=True).is_relative_to(Path(configured).resolve(strict=True))):

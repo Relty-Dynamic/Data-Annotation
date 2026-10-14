@@ -64,3 +64,11 @@ test('empty and mismatched axes are visible warnings and user selection is honor
 test('UTF-8 BOM files are accepted',()=>{
   assert.equal(parseExternalTimeline('\uFEFF'+JSON.stringify([segment()]),'posture',project,'x').segments.length,1);
 });
+
+test('comparison imports preserve main and child assignments, including sparse rows',()=>{
+  const result=parse([{...segment(0,1000),lane:0},{...segment(0,1000),lane:8}]);
+  assert.deepEqual(result.segments.map(item=>item.lane),[0,8]);
+  for(const lane of [-1,1.5,'1',null,Number.MAX_SAFE_INTEGER+1]) {
+    assert.throws(()=>parse([{...segment(),lane}]),/lane 必须为非负整数/);
+  }
+});

@@ -306,6 +306,17 @@ class RemoteWorkerTests(unittest.TestCase):
         restored, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
         self.assertEqual(restored['scene'], [])
 
+    def test_writeback_only_selected_posture_and_replay_returns_one_path(self):
+        project = self.project()
+        project['selected_tracks'] = ['posture']
+        response = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['result']['paths'], [str(self.nas / 'timeline' / FILENAMES['posture'])])
+        self.assertEqual({path.name for path in (self.nas / 'timeline').glob('*.timeline.json')}, {FILENAMES['posture']})
+        replay = self.client.post('/v1/writeback', json={'project': project})
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json(), response.json())
+
     def test_writeback_accepts_partial_posture_and_reopens_it(self):
         project = self.project()
         posture = project['annotations']['posture'][0]
@@ -318,15 +329,13 @@ class RemoteWorkerTests(unittest.TestCase):
         restored, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']))
         self.assertEqual([(item['start_ms'], item['end_ms']) for item in restored['posture']], [(100, 300)])
 
-    def test_writeback_accepts_removed_posture_with_empty_fixed_json(self):
+    def test_writeback_omits_removed_posture_json(self):
         project = self.project()
         project['fixed_tracks'] = ['scene', 'category', 'habit']
         project['annotations']['posture'] = []
         response = self.client.post('/v1/writeback', json={'project': project})
         self.assertEqual(response.status_code, 200, response.text)
-        document = json.loads((self.nas / 'timeline' / FILENAMES['posture']).read_bytes())
-        self.assertEqual(document['segments'], [])
-        self.assertEqual(document['timebase']['fixed_tracks'], project['fixed_tracks'])
+        self.assertFalse((self.nas / 'timeline' / FILENAMES['posture']).exists())
         _, _, _, enabled, _ = self.worker.service.read_external(self.worker.writeback_service.load(project['id']), include_tracks=True)
         self.assertEqual(enabled, project['fixed_tracks'])
 

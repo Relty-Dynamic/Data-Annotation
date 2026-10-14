@@ -13,9 +13,9 @@ const runs = [{ start_ms: 0, end_ms: 10000 }, { start_ms: 15000, end_ms: 25000 }
 test('annotation dimensions and fixed choices use the requested order', () => {
   assert.deepEqual(TRACKS, ['scene', 'posture', 'category', 'habit']);
   assert.deepEqual(TRACKS.map(track => TRACK_LABELS[track]), ['场景', '姿势', '大类', '习惯']);
-  assert.deepEqual(SCENE_LABELS, ['室内', '室外']);
-  assert.deepEqual(POSTURE_LABELS, ['动', '坐', '站', '躺']);
-  assert.deepEqual(CATEGORY_LABELS, ['专注', '活动', '用餐', '通勤', '社交', '放松', '休息', '其他']);
+  assert.deepEqual(SCENE_LABELS, ['室内', '室外', '半开放', '隧道', '电梯', '交通工具内', 'Unknown']);
+  assert.deepEqual(POSTURE_LABELS, ['坐', '站', '躺', '移动', '骑行', '交通工具坐', '交通工具站', '交通工具躺', 'Unknown']);
+  assert.deepEqual(CATEGORY_LABELS, ['工作学习', '运动锻炼', '饮食', '出行', '社交', '休闲娱乐', '休息', '日常事务', 'Unknown']);
 });
 
 test('the first state selection covers every recording run and later switches preserve gaps', () => {
@@ -46,13 +46,13 @@ test('category single-point changes retain overlays and later state changes', ()
   const copy = structuredClone(original);
   const changed = switchCoveredState(original, 3000, '专注', 10000, [{ start_ms: 0, end_ms: 10000 }], true);
   assert.deepEqual(compact(changed), [['活动', 0, 3000], ['社交', 1000, 9000], ['专注', 3000, 6000], ['用餐', 6000, 10000]]);
-  assert.deepEqual(changed.find(item => item.id === 'overlay'), original[1]);
+  assert.deepEqual(changed.find(item => item.id === 'overlay'), {...original[1], lane: 1});
   assert.deepEqual(original, copy);
   assert.ok(changed.filter(item => item.id !== 'overlay').every(item => item.mode === 'state'));
 });
 
-test('the first category state can initialize recorded time while retaining an existing range', () => {
-  const overlay = segment('overlay', '社交', 1000, 3000, { mode: 'overlay' });
+test('the first main category state initializes recorded time while retaining an existing child', () => {
+  const overlay = segment('overlay', '社交', 1000, 3000, { mode: 'overlay', lane: 1 });
   const result = switchCoveredState([overlay], 5000, '其他', 25000, runs, true);
   assert.deepEqual(uncoveredSpans(result, runs), []);
   assert.deepEqual(result.find(item => item.id === 'overlay'), overlay);
@@ -72,13 +72,14 @@ test('range replacement splits states and retains content outside the selection'
   assert.equal(new Set(split.map(item => item.id)).size, 3);
 });
 
-test('range annotations split at real gaps and category/habit ranges preserve overlaps', () => {
+test('child ranges split at real gaps and preserve overlaps for category and habit', () => {
   for (const track of ['category', 'habit']) {
     const original = [segment('original', '活动', 0, 10000)];
-    const result = applyAnnotationRange(original, 5000, 20000, '社交', runs, track);
+    const result = applyAnnotationRange(original, 5000, 20000, '社交', runs, track, undefined, false, true);
     assert.deepEqual(compact(result), [['活动', 0, 10000], ['社交', 5000, 10000], ['社交', 15000, 20000]]);
     assert.equal(new Set(result.map(item => item.id)).size, 3);
-    if (track === 'category') assert.ok(result.filter(item => item.id !== 'original').every(item => item.mode === 'overlay'));
+    assert.ok(result.filter(item => item.id !== 'original').every(item => item.lane === 1));
+    if (track === 'category') assert.ok(result.filter(item => item.id !== 'original').every(item => item.mode === 'state'));
   }
 });
 
@@ -103,11 +104,11 @@ test('editing removes only the old range and keeps category mode and first ID', 
   assert.deepEqual(applyAnnotationRange(original, 9000, 2000, '社交', runs, 'category', 'edit'), original);
 });
 
-test('deletion extends an adjacent predecessor but leaves first and sole segments unannotated', () => {
+test('deletion leaves every removed segment unannotated without extending neighbors', () => {
   const original = [segment('a', '坐', 0, 3000), segment('b', '站', 3000, 6000), segment('c', '动', 6000, 10000)];
   const copy = structuredClone(original);
-  assert.deepEqual(compact(deleteAnnotation(original, 'b', runs, 'posture')), [['坐', 0, 6000], ['动', 6000, 10000]]);
-  assert.deepEqual(compact(deleteAnnotation(original, 'c', runs, 'posture')), [['坐', 0, 3000], ['站', 3000, 10000]]);
+  assert.deepEqual(compact(deleteAnnotation(original, 'b', runs, 'posture')), [['坐', 0, 3000], ['动', 6000, 10000]]);
+  assert.deepEqual(compact(deleteAnnotation(original, 'c', runs, 'posture')), [['坐', 0, 3000], ['站', 3000, 6000]]);
   assert.deepEqual(compact(deleteAnnotation(original, 'a', runs, 'posture')), [['站', 3000, 6000], ['动', 6000, 10000]]);
   assert.deepEqual(deleteAnnotation([original[0]], 'a', runs, 'posture'), []);
   assert.deepEqual(original, copy);
@@ -119,19 +120,19 @@ test('deletion never bridges pre-existing blank time or a true recording gap', (
   assert.deepEqual(compact(deleteAnnotation(original, 'c', runs, 'scene')), [['室内', 0, 3000], ['室外', 5000, 10000]]);
 });
 
-test('category deletion fills only newly uncovered time, preserving all surviving overlaps', () => {
+test('category deletion preserves blank time and all surviving overlaps', () => {
   const original = [
     segment('previous', '活动', 0, 3000, { mode: 'state' }),
     segment('removed', '专注', 3000, 10000, { mode: 'state' }),
     segment('overlay', '社交', 5000, 10000, { mode: 'overlay' }),
   ];
   const result = deleteAnnotation(original, 'removed', runs, 'category');
-  assert.deepEqual(compact(result), [['活动', 0, 5000], ['社交', 5000, 10000]]);
-  assert.deepEqual(result.find(item => item.id === 'overlay'), original[2]);
+  assert.deepEqual(compact(result), [['活动', 0, 3000], ['社交', 5000, 10000]]);
+  assert.deepEqual(result.find(item => item.id === 'overlay'), {...original[2], lane: 1});
   const fullyCovered = [...original, segment('cover', '通勤', 3000, 10000, { mode: 'overlay' })];
   assert.equal(deleteAnnotation(fullyCovered, 'removed', runs, 'category').find(item => item.id === 'previous').end_ms, 3000);
-  assert.deepEqual(deleteAnnotation(original, 'overlay', runs, 'category'), original.slice(0, 2));
-  assert.deepEqual(deleteAnnotation(original, 'removed', runs, 'habit'), [original[0], original[2]]);
+  assert.deepEqual(deleteAnnotation(original, 'overlay', runs, 'category'), original.slice(0, 2).map(item => ({...item, lane: 0})));
+  assert.deepEqual(deleteAnnotation(original, 'removed', runs, 'habit'), [{...original[0], lane: 0}, {...original[2], lane: 1}]);
 });
 
 test('coverage unions overlaps and ignores point events and unrecorded time', () => {
@@ -155,7 +156,7 @@ test('legacy annotations default category to empty and category normalization ne
     segment('c', '活动', 8000, 10000, { mode: 'overlay' }),
   ];
   const annotations = { ...legacy, category };
-  assert.strictEqual(normalizeStateSeams(annotations).category, category);
+  assert.deepEqual(normalizeStateSeams(annotations).category, category.map((item, index) => ({...item, lane: index === 1 ? 1 : 0})));
   const changed = structuredClone(annotations);
   changed.category[1].mode = 'state';
   assert.equal(annotationsEqual(annotations, changed), false);
@@ -194,7 +195,7 @@ test('deleting the first category never extends an overlay nested inside it', ()
     segment('nested', '社交', 2000, 4000, { mode: 'overlay' }),
   ];
   const result = deleteAnnotation(original, 'first', runs, 'category');
-  assert.deepEqual(result, [original[1]]);
+  assert.deepEqual(result, [{...original[1], lane: 1}]);
   assert.deepEqual(uncoveredSpans(result, [runs[0]]), [
     { start_ms: 0, end_ms: 2000 }, { start_ms: 4000, end_ms: 10000 },
   ]);
@@ -203,5 +204,5 @@ test('deleting the first category never extends an overlay nested inside it', ()
     segment('resumed-first', '通勤', 15000, 25000, { mode: 'state' }),
     segment('resumed-overlay', '社交', 17000, 19000, { mode: 'overlay' }),
   ];
-  assert.deepEqual(deleteAnnotation(resumed, 'resumed-first', runs, 'category'), [resumed[0], resumed[2]]);
+  assert.deepEqual(deleteAnnotation(resumed, 'resumed-first', runs, 'category'), [{...resumed[0], lane: 0}, {...resumed[2], lane: 1}]);
 });

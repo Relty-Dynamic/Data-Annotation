@@ -19,7 +19,7 @@ from urllib.parse import quote
 from fastapi import HTTPException
 
 from .previews import run_ffmpeg
-from .service import VIDEO_EXTENSIONS, ProjectService, alignment_warnings, digest, filename_for_axis, now, parse_recording_start
+from .service import AXES, VIDEO_EXTENSIONS, ProjectService, alignment_warnings, digest, filename_for_axis, now, parse_recording_start
 
 
 PART = re.compile(r"[\w.-]{1,120}\Z")
@@ -184,7 +184,7 @@ class MockS3Store:
     def _file_digest(path: Path) -> str:
         return file_sha256(path)
 
-    def put_submission(self, project_id: str, save_id: str, documents: dict[str, bytes], prefix: str = "") -> list[str]:
+    def put_submission(self, project_id: str, save_id: str, documents: dict[str, bytes], prefix: str = "", *, available_axes: set[str] | None = None) -> list[str]:
         keys = [(f"{prefix}/timeline/{filename_for_axis(axis)}" if prefix else
                  f"submissions/{project_id}/{save_id}/{filename_for_axis(axis)}", payload)
                 for axis, payload in documents.items()]
@@ -192,8 +192,10 @@ class MockS3Store:
         pointer.parent.mkdir(parents=True, exist_ok=True)
         targets = {self._path(key): payload for key, payload in keys}
         if prefix:
+            available = available_axes if available_axes is not None else set(AXES) | set(documents)
             for old in pointer.parent.glob("*.timeline.json"):
-                targets.setdefault(self._path(old.relative_to(self.objects).as_posix()), None)
+                if old.name.removesuffix(".timeline.json") not in available:
+                    targets.setdefault(self._path(old.relative_to(self.objects).as_posix()), None)
         targets[pointer] = json.dumps({"save_id": save_id, "keys": [key for key, _ in keys]}).encode()
         previous = {path: path.read_bytes() if path.exists() else None for path in targets}
         try:
@@ -542,7 +544,8 @@ class MockProjectService(ProjectService):
                 raise HTTPException(409, "项目已更新，请重新打开后提交。")
             save_id, documents = self.export_documents(project, for_writeback=True)
             self.verify_sources(project)
-            keys = self.mock_store.put_submission(ident, save_id, documents, project.get("_mock_s3_key", ""))
+            keys = self.mock_store.put_submission(ident, save_id, documents, project.get("_mock_s3_key", ""),
+                                                  available_axes=set(AXES) | {track["id"] for track in project.get("custom_tracks", [])})
             project["draft_dirty"] = False
             project["warnings"] = alignment_warnings(project["videos"])
             project["last_writeback"] = {"save_id": save_id, "saved_at": now()}

@@ -4,6 +4,7 @@ import { annotationLabel, annotationsEqual, applyAnnotationRange, arrangeLanes, 
 
 const segment = (id, label, start_ms, end_ms) => ({ id, label, start_ms, end_ms });
 const compact = (segments) => segments.map(({ label, start_ms, end_ms }) => [label, start_ms, end_ms]);
+const mainRows = segments => segments.map(segment => ({...segment, lane: 0}));
 
 test('a segment note composes into the same label and can be edited or removed',()=>{
   const choices=['室内','室外'];
@@ -64,7 +65,7 @@ test('switching a label at an existing boundary replaces it without duplicating 
 test('same-label click does not introduce an unnecessary switch', () => {
   const original = [segment('a', '室内', 0, 20000)];
   const changed = switchState(original, 5000, '室内', 20000);
-  assert.deepEqual(changed, original);
+  assert.deepEqual(changed, mainRows(original));
 });
 
 test('switch before first annotation leaves earlier time unannotated', () => {
@@ -180,7 +181,7 @@ test('a state spans confirmed file seams but still stops at a real recording bre
 test('repeating the same state after a confirmed file seam keeps one annotation', () => {
   const runs = [{ start_ms: 0, end_ms: 1200000 }];
   const original = [segment('continuous', '坐', 0, 1200000)];
-  assert.deepEqual(switchState(original, 600234, '坐', 1200000, runs), original);
+  assert.deepEqual(switchState(original, 600234, '坐', 1200000, runs), mainRows(original));
 });
 
 
@@ -202,8 +203,8 @@ test('custom state seam repair matches server normalization without changing eve
   const tracks = [{ id: stateId, name: '环境', mode: 'state', labels: ['安静'] },
     { id: eventId, name: '干扰', mode: 'event', labels: [] }];
   const result = normalizeStateSeams(input, stateBridges, seamVideos, tracks);
-  assert.deepEqual(result[stateId], [segment('first', '安静', 0, 15000)]);
-  assert.deepEqual(result[eventId], input[eventId]);
+  assert.deepEqual(result[stateId], mainRows([segment('first', '安静', 0, 15000)]));
+  assert.deepEqual(result[eventId], mainRows(input[eventId]));
 });
 
 test('state seam repair retains the first ID and leaves overlapping behavior events untouched', () => {
@@ -214,9 +215,9 @@ test('state seam repair retains the first ID and leaves overlapping behavior eve
   };
   const original = structuredClone(input);
   const result = normalizeStateSeams(input, stateBridges, seamVideos);
-  assert.deepEqual(result.scene, [segment('left', '室内', 0, 20000)]);
-  assert.deepEqual(result.posture, [segment('sit-left', '坐', 0, 15000)]);
-  assert.strictEqual(result.habit, input.habit);
+  assert.deepEqual(result.scene, mainRows([segment('left', '室内', 0, 20000)]));
+  assert.deepEqual(result.posture, mainRows([segment('sit-left', '坐', 0, 15000)]));
+  assert.deepEqual(result.habit, input.habit.map((segment, index) => ({...segment, lane: index === 2 ? 1 : 0})));
   assert.deepEqual(input, original, 'normalization must not mutate input arrays or segment objects');
   assert.deepEqual(normalizeStateSeams(result, stateBridges, seamVideos), result);
 });
@@ -232,29 +233,30 @@ test('state seam repair preserves real gaps, intentional unlabeled spans, and la
     [segment('a', '室内', 0, 10000), segment('b', '室外', 10234, 12000), segment('c', '室内', 12000, 20000)],
   ];
   for (const scene of cases) {
-    assert.deepEqual(normalizeStateSeams({ scene, posture: [], habit: [] }, stateBridges, seamVideos).scene, scene);
+    assert.deepEqual(normalizeStateSeams({ scene, posture: [], habit: [] }, stateBridges, seamVideos).scene, mainRows(scene));
   }
   const unconfirmed = { scene: [segment('a', '室内', 0, 10000), segment('b', '室内', 10234, 20000)], posture: [], habit: [] };
-  assert.deepEqual(normalizeStateSeams(unconfirmed, [], seamVideos), { ...unconfirmed, category: [] });
-  assert.deepEqual(normalizeStateSeams(unconfirmed, stateBridges, []), { ...unconfirmed, category: [] });
+  assert.deepEqual(normalizeStateSeams(unconfirmed, [], seamVideos), { ...unconfirmed, scene: mainRows(unconfirmed.scene), category: [] });
+  assert.deepEqual(normalizeStateSeams(unconfirmed, stateBridges, []), { ...unconfirmed, scene: mainRows(unconfirmed.scene), category: [] });
 });
 
 test('touching equal states merge consistently with server normalization without filling ordinary gaps', () => {
   const input = { scene: [segment('a', '室内', 0, 5000), segment('b', '室内', 5000, 10000), segment('c', '室内', 11000, 15000)], posture: [], habit: [] };
-  assert.deepEqual(normalizeStateSeams(input).scene, [segment('a', '室内', 0, 10000), segment('c', '室内', 11000, 15000)]);
+  assert.deepEqual(normalizeStateSeams(input).scene, mainRows([segment('a', '室内', 0, 10000), segment('c', '室内', 11000, 15000)]));
 });
 
-test('touching states from different creators retain separate attribution', () => {
+test('touching states from different saves merge while retaining first creator and latest contributor', () => {
   const first = {...segment('a', '室内', 0, 5000), created_by:'user-a', created_at:'2026-09-30T00:00:00Z'};
   const second = {...segment('b', '室内', 5000, 10000), created_by:'user-b', created_at:'2026-09-30T01:00:00Z'};
   const input = {scene:[first,second],posture:[],habit:[]};
-  assert.deepEqual(normalizeStateSeams(input).scene,[first,second]);
+  assert.deepEqual(normalizeStateSeams(input).scene, mainRows([{...first, end_ms: 10000,
+    updated_by: second.created_by, updated_at: second.created_at}]));
 });
 
 test('several repaired file seams form one continuous state with stable normalization', () => {
   const input = { scene: [segment('a', '室内', 0, 10000), segment('b', '室内', 10234, 20000), segment('c', '室内', 21000, 30000)], posture: [], habit: [] };
   const result = normalizeStateSeams(input, stateBridges, seamVideos);
-  assert.deepEqual(result.scene, [segment('a', '室内', 0, 30000)]);
+  assert.deepEqual(result.scene, mainRows([segment('a', '室内', 0, 30000)]));
   assert.deepEqual(normalizeStateSeams(result, stateBridges, seamVideos), result);
 });
 

@@ -9,6 +9,8 @@ export interface Segment {
   end_ms: number | null;
   kind?: 'point' | 'interval';
   mode?: 'state' | 'overlay';
+  /** Main axis is 0; positive values identify reusable child axes. */
+  lane?: number;
   created_by?: string;
   created_by_name?: string;
   created_at?: string;
@@ -66,6 +68,8 @@ export interface Project {
   skipped_videos?: Array<{id: string; name: string; start_ms: number; end_ms: number; reason: string}>;
   custom_tracks?: CustomTrack[];
   fixed_tracks?: FixedTrack[];
+  selected_tracks?: Track[];
+  track_names?: Partial<Record<FixedTrack, string>>;
   track_labels?: Record<FixedTrack, string[]>;
   annotations: Record<string, Segment[]>;
   revision: number;
@@ -83,19 +87,28 @@ export const TRACK_LABELS: Record<FixedTrack, string> = {
 };
 
 export const TRACKS: FixedTrack[] = ['scene', 'posture', 'category', 'habit'];
-export function projectTracks(project: Project): Track[] { return [...TRACKS.filter(track=>(project.fixed_tracks??TRACKS).includes(track)), ...(project.custom_tracks??[]).map(track=>track.id)]; }
+export function projectAllTracks(project: Project): Track[] { return [...TRACKS.filter(track=>(project.fixed_tracks??TRACKS).includes(track)), ...(project.custom_tracks??[]).map(track=>track.id)]; }
+export function projectTracks(project: Project): Track[] { const available=projectAllTracks(project);return project.selected_tracks?.filter(track=>available.includes(track))??available; }
 export function customTrack(project: Project, track: Track): CustomTrack | undefined { return project.custom_tracks?.find(item=>item.id===track); }
-export function trackName(project: Project, track: Track): string { return customTrack(project,track)?.name??TRACK_LABELS[track as FixedTrack]??'自定义轴'; }
+export function trackName(project: Project, track: Track): string { return customTrack(project,track)?.name??project.track_names?.[track as FixedTrack]??TRACK_LABELS[track as FixedTrack]??'自定义轴'; }
 export function isEventTrack(project: Project, track: Track): boolean { return track==='habit'||customTrack(project,track)?.mode==='event'; }
-export function isExclusiveTrack(project: Project, track: Track): boolean { return track==='scene'||track==='posture'||customTrack(project,track)?.mode==='state'; }
-export const SCENE_LABELS = ['室内', '室外'];
-export const POSTURE_LABELS = ['动', '坐', '站', '躺'];
-export const CATEGORY_LABELS = ['专注', '活动', '用餐', '通勤', '社交', '放松', '休息', '其他'];
+export const SCENE_LABELS = ['室内', '室外', '半开放', '隧道', '电梯', '交通工具内', 'Unknown'];
+export const POSTURE_LABELS = ['坐', '站', '躺', '移动', '骑行', '交通工具坐', '交通工具站', '交通工具躺', 'Unknown'];
+export const CATEGORY_LABELS = ['工作学习', '运动锻炼', '饮食', '出行', '社交', '休闲娱乐', '休息', '日常事务', 'Unknown'];
 export const DEFAULT_TRACK_LABELS: Record<FixedTrack,string[]> = {
   scene: SCENE_LABELS, posture: POSTURE_LABELS, category: CATEGORY_LABELS, habit: [],
 };
+const LEGACY_TRACK_LABELS: Record<FixedTrack,string[]> = {
+  scene: ['室内','室外'], posture: ['动','坐','站','躺'], category: ['专注','活动','用餐','通勤','社交','放松','休息','其他'], habit: [],
+};
 export function projectTrackLabels(project: Project, track: Track): string[] {
-  return customTrack(project, track)?.labels ?? project.track_labels?.[track as FixedTrack] ?? DEFAULT_TRACK_LABELS[track as FixedTrack] ?? [];
+  return customTrack(project, track)?.labels ?? project.track_labels?.[track as FixedTrack] ?? LEGACY_TRACK_LABELS[track as FixedTrack] ?? [];
+}
+
+/** Recognize old labels when editing saved annotations without adding them to new-label buttons. */
+export function projectAnnotationLabels(project: Project, track: Track): string[] {
+  return [...new Set([...projectTrackLabels(project, track),
+    ...(LEGACY_TRACK_LABELS[track as FixedTrack] ?? []), ...(track === 'scene' ? ['车内', '其他'] : [])])];
 }
 
 export function formatTime(ms: number): string {
@@ -175,15 +188,18 @@ export function switchState(
   duration: number,
   recordingSpans?: VideoGap[],
 ): Segment[] {
-  const ordered = segments.map((segment) => ({ ...segment })).sort((a, b) => a.start_ms - b.start_ms);
-  if (!label.trim() || !Number.isFinite(time) || !Number.isFinite(duration) || duration <= 0) return ordered;
+  const original = orderedCopies(segments);
+  const assigned = assignSegmentLanes(segments, duration);
+  const ordered = assigned.filter(segment => segment.lane === 0);
+  const children = assigned.filter(segment => segment.lane !== 0);
+  if (!label.trim() || !Number.isFinite(time) || !Number.isFinite(duration) || duration <= 0) return original;
   const boundary = Math.max(0, Math.min(Math.round(time), Math.round(duration)));
-  if (boundary >= duration) return ordered;
+  if (boundary >= duration) return original;
   let coverageEnd = duration;
   if (recordingSpans) {
     const coverage = [...recordingSpans].sort((a, b) => a.start_ms - b.start_ms);
     const currentIndex = coverage.findIndex((video) => boundary >= video.start_ms && boundary < video.end_ms);
-    if (currentIndex < 0) return ordered;
+    if (currentIndex < 0) return original;
     coverageEnd = coverage[currentIndex].end_ms;
     for (let index = currentIndex + 1; index < coverage.length; index += 1) {
       if (coverage[index].start_ms > coverageEnd) break;
@@ -197,23 +213,15 @@ export function switchState(
   }));
   const atBoundary = ordered.find((segment) => segment.start_ms === boundary);
   const inserted: Segment = {
+    ...atBoundary,
     id: atBoundary?.id ?? newId(),
     label: label.trim(),
     start_ms: boundary,
     end_ms: Math.min(later[0]?.start_ms ?? duration, duration, coverageEnd),
+    lane: 0,
   };
-  const result: Segment[] = [];
-  for (const segment of [...earlier, inserted, ...later]) {
-    const end = segment.end_ms ?? duration;
-    if (end <= segment.start_ms) continue;
-    const previous = result[result.length - 1];
-    if (previous && previous.label === segment.label && previous.end_ms === segment.start_ms) {
-      previous.end_ms = segment.end_ms;
-    } else {
-      result.push({ ...segment });
-    }
-  }
-  return result;
+  return orderedCopies([...mergeTouchingStates([...earlier, inserted, ...later]
+    .filter(segment => (segment.end_ms ?? duration) > segment.start_ms)), ...children]);
 }
 
 export interface LaneSegment {
@@ -229,75 +237,89 @@ function packingEnd(segment: Segment, duration: number): number {
   return isPointSegment(segment) ? segment.start_ms + 1 : Math.max(segment.start_ms + 1, segment.end_ms ?? duration);
 }
 
-/** Pack overlapping behavior intervals and simultaneous points without permanent label rows. */
-export function arrangeLanes(segments: Segment[], duration: number): LaneSegment[] {
+function validLane(lane: number | undefined): lane is number {
+  return Number.isSafeInteger(lane) && lane! >= 0;
+}
+
+function segmentsOverlap(left: Segment, right: Segment, duration: number): boolean {
+  return left.start_ms < packingEnd(right, duration) && right.start_ms < packingEnd(left, duration);
+}
+
+/** Match Python's Unicode code-point ordering when migrating legacy row assignments. */
+function compareIds(left: string, right: string): number {
+  const leftPoints = Array.from(left, value => value.codePointAt(0)!);
+  const rightPoints = Array.from(right, value => value.codePointAt(0)!);
+  for (let index = 0; index < Math.min(leftPoints.length, rightPoints.length); index += 1) {
+    if (leftPoints[index] !== rightPoints[index]) return leftPoints[index] - rightPoints[index];
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+/** Preserve saved rows; infer only legacy rows after reserving every saved row. */
+export function assignSegmentLanes(segments: Segment[], duration: number): Segment[] {
+  if (segments.some(segment => segment.lane !== undefined && !validLane(segment.lane))) {
+    throw new Error('主轴或子轴编号须为非负安全整数。');
+  }
   const ordered = [...segments].sort((a, b) =>
     a.start_ms - b.start_ms ||
     packingEnd(a, duration) - packingEnd(b, duration) ||
-    a.id.localeCompare(b.id),
+    compareIds(a.id, b.id),
   );
-  const laneEnds: number[] = [];
-  return ordered.map((segment) => {
-    const end = packingEnd(segment, duration);
-    let lane = laneEnds.findIndex((laneEnd) => laneEnd <= segment.start_ms);
-    if (lane < 0) lane = laneEnds.length;
-    laneEnds[lane] = end;
-    return { segment, lane };
+  const reserved = ordered.filter(segment => validLane(segment.lane)).map(segment => ({ ...segment }));
+  return ordered.map(segment => {
+    if (validLane(segment.lane)) return { ...segment };
+    const occupied = new Set(reserved.filter(other => segmentsOverlap(segment, other, duration)).map(other => other.lane!));
+    let lane = 0;
+    while (occupied.has(lane)) lane += 1;
+    const assigned = { ...segment, lane };
+    reserved.push(assigned);
+    return assigned;
   });
+}
+
+/** Display persistent main/child rows without moving existing annotations between them. */
+export function arrangeLanes(segments: Segment[], duration: number): LaneSegment[] {
+  return assignSegmentLanes(segments, duration).map(segment => ({ segment, lane: segment.lane! }));
 }
 
 
 
-/** Join uninterrupted states and legacy false file seams without changing behavior events. */
+/** Join touching intervals on each saved row; repair false file seams only for legacy states. */
 export function normalizeStateSeams(
   annotations: Project['annotations'],
   bridges: ContinuityBridge[] = [],
   videos: Video[] = [],
   customTracks: CustomTrack[] = [],
+  duration = Infinity,
 ): Project['annotations'] {
   const bridgeAtEnd = new Map(bridges.map((bridge) => [bridge.start_ms, bridge]));
   const videoEnds = new Map(videos.map((video) => [video.id, video.end_ms]));
-  const normalize = (segments: Segment[]): Segment[] => {
-    const ordered = [...segments].sort((a, b) => a.start_ms - b.start_ms || a.id.localeCompare(b.id));
-    const result: Segment[] = [];
-    for (const segment of ordered) {
-      const previous = result[result.length - 1];
-      const bridge = previous?.end_ms == null ? undefined : bridgeAtEnd.get(previous.end_ms);
-      const acrossSeam = bridge !== undefined && segment.start_ms >= bridge.end_ms &&
+  const legacyStateTracks = new Set(['scene', 'posture', ...customTracks.filter(track => track.mode === 'state').map(track => track.id)]);
+  const normalize = (track: Track, segments: Segment[]): Segment[] => {
+    const legacyIds = new Set(segments.filter(segment => !validLane(segment.lane)).map(segment => segment.id));
+    return mergeTouchingStates(assignSegmentLanes(segments, duration), (previous, segment) => {
+      const bridge = previous.end_ms == null ? undefined : bridgeAtEnd.get(previous.end_ms);
+      return legacyStateTracks.has(track) && bridge !== undefined && legacyIds.has(previous.id) && legacyIds.has(segment.id) &&
+        segment.start_ms >= bridge.end_ms &&
         segment.start_ms < (videoEnds.get(bridge.next_video_id) ?? bridge.end_ms);
-      if (previous && previous.label === segment.label && previous.created_by === segment.created_by &&
-          previous.created_at === segment.created_at && previous.updated_by === segment.updated_by &&
-          previous.updated_at === segment.updated_at &&
-          (previous.end_ms === segment.start_ms || acrossSeam)) {
-        previous.end_ms = segment.end_ms;
-      } else {
-        result.push({ ...segment });
-      }
-    }
-    return result;
+    });
   };
-  return {
-    ...annotations,
-    scene: normalize(annotations.scene ?? []),
-    posture: normalize(annotations.posture ?? []),
-    ...Object.fromEntries(customTracks.filter(track => track.mode === 'state').map(track => [track.id, normalize(annotations[track.id] ?? [])])),
-    // Category intervals may overlap; normalizing them as states can erase annotations.
-    category: annotations.category ?? [],
-    habit: annotations.habit ?? [],
-  };
+  return Object.fromEntries([...new Set([...TRACKS, ...Object.keys(annotations), ...customTracks.map(track => track.id)])]
+    .map(track => [track, normalize(track, annotations[track] ?? [])]));
 }
 
 /** Compare saved annotation meaning, allowing server normalization and tie ordering. */
-export function annotationsEqual(left: Project['annotations'], right: Project['annotations']): boolean {
+export function annotationsEqual(left: Project['annotations'], right: Project['annotations'], duration = Infinity): boolean {
   const tracks = [...new Set([...TRACKS, ...Object.keys(left), ...Object.keys(right)])].sort();
-  const normalize = (annotations: Project['annotations']) => tracks.map((track) => [track, (annotations[track] ?? []).map((segment) => ({
+  const normalize = (annotations: Project['annotations']) => tracks.map((track) => [track, mergeTouchingStates(assignSegmentLanes(annotations[track] ?? [], duration).map((segment) => ({
     id: segment.id,
     label: segment.label.trim(),
     kind: segment.kind ?? 'interval',
     mode: track === 'category' ? segment.mode ?? 'state' : segment.mode,
     start_ms: segment.start_ms,
     end_ms: segment.end_ms,
-  })).sort((a, b) => a.start_ms - b.start_ms || a.id.localeCompare(b.id))]);
+    lane: segment.lane,
+  }))).sort((a, b) => a.start_ms - b.start_ms || compareIds(a.id, b.id))]);
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
 
@@ -334,21 +356,36 @@ function joinedSpans(spans: VideoGap[]): VideoGap[] {
 
 function orderedCopies(segments: Segment[]): Segment[] {
   return segments.map(segment => ({ ...segment }))
-    .sort((a, b) => a.start_ms - b.start_ms || a.id.localeCompare(b.id));
+    .sort((a, b) => a.start_ms - b.start_ms || compareIds(a.id, b.id));
 }
 
-function mergeTouchingStates(segments: Segment[]): Segment[] {
+/** Keep the first interval's identity/creator and the latest known contributor. */
+function mergeAttribution(previous: Segment, segment: Segment): void {
+  const previousTime = previous.updated_at ?? previous.created_at ?? '';
+  const segmentTime = segment.updated_at ?? segment.created_at ?? '';
+  if (segmentTime <= previousTime) return;
+  const actor = segment.updated_at !== undefined ? 'updated' : 'created';
+  delete previous.updated_by;
+  delete previous.updated_by_name;
+  const by = segment[`${actor}_by`];
+  const name = segment[`${actor}_by_name`];
+  if (by !== undefined) previous.updated_by = by;
+  if (name !== undefined) previous.updated_by_name = name;
+  previous.updated_at = segmentTime;
+}
+
+function mergeTouchingStates(segments: Segment[], acrossLegacySeam?: (left: Segment, right: Segment) => boolean): Segment[] {
   const result: Segment[] = [];
-  for (const segment of orderedCopies(segments)) {
+  for (const segment of orderedCopies(segments).sort((a, b) => (a.lane ?? 0) - (b.lane ?? 0) || a.start_ms - b.start_ms || compareIds(a.id, b.id))) {
     const previous = result[result.length - 1];
-    if (previous && previous.label === segment.label && previous.created_by === segment.created_by &&
-        previous.created_at === segment.created_at && previous.updated_by === segment.updated_by &&
-        previous.updated_at === segment.updated_at && previous.end_ms === segment.start_ms &&
-        previous.mode === segment.mode && !isPointSegment(previous) && !isPointSegment(segment)) {
+    if (previous && previous.lane === segment.lane && previous.label === segment.label &&
+        (previous.mode ?? 'state') === (segment.mode ?? 'state') && !isPointSegment(previous) && !isPointSegment(segment) &&
+        (previous.end_ms === segment.start_ms || acrossLegacySeam?.(previous, segment))) {
+      mergeAttribution(previous, segment);
       previous.end_ms = segment.end_ms;
     } else result.push(segment);
   }
-  return result;
+  return orderedCopies(result);
 }
 
 /** Find uncovered recorded time using the union of intervals, including overlapping categories. */
@@ -387,14 +424,15 @@ export function switchCoveredState(
   const boundary = Math.max(0, Math.min(Math.round(time), Math.round(duration)));
   const runs = joinedSpans(spans.map(span => ({ ...span, end_ms: Math.min(span.end_ms, duration) })));
   if (!runs.some(span => boundary >= span.start_ms && boundary < span.end_ms)) return original;
-  const states = category ? original.filter(segment => segment.mode !== 'overlay') : original;
-  const overlays = category ? original.filter(segment => segment.mode === 'overlay') : [];
+  const assigned = assignSegmentLanes(original, duration);
+  const states = assigned.filter(segment => segment.lane === 0);
+  const children = assigned.filter(segment => segment.lane !== 0);
   const changed = states.length
     ? switchState(states, boundary, label, duration, runs)
-    : runs.map(span => ({ id: newId(), label: label.trim(), ...span }));
+    : runs.map(span => ({ id: newId(), label: label.trim(), ...span, lane: 0 }));
   return orderedCopies([
     ...changed.map(segment => category ? { ...segment, mode: 'state' as const } : segment),
-    ...overlays,
+    ...children,
   ]);
 }
 
@@ -407,7 +445,8 @@ export function applyAnnotationRange(
   spans: VideoGap[],
   track: Track,
   existingId?: string,
-  exclusive = false,
+  _exclusive = false,
+  subaxis = false,
 ): Segment[] {
   const original = orderedCopies(segments);
   if (!label.trim() || !Number.isFinite(start) || !Number.isFinite(end)) return original;
@@ -420,15 +459,25 @@ export function applyAnnotationRange(
   })).filter(span => span.end_ms > span.start_ms);
   // An invalid edit must never remove the existing annotation.
   if (!ranges.length) return original;
-  const editing = existingId ? original.find(segment => segment.id === existingId) : undefined;
-  let remaining = original.filter(segment => segment.id !== existingId);
-  if (track === 'scene' || track === 'posture' || exclusive) {
+  const assigned = assignSegmentLanes(original, Infinity);
+  const editing = existingId ? assigned.find(segment => segment.id === existingId) : undefined;
+  let remaining = assigned.filter(segment => segment.id !== existingId);
+  let lane = editing?.lane ?? 0;
+  const occupied = new Set(remaining.filter(segment =>
+    ranges.some(range => segmentsOverlap(segment, { ...range, id: '', label: '' }, Infinity))).map(segment => segment.lane!));
+  if (editing && lane > 0 && occupied.has(lane)) throw new Error('该时间范围与同一子轴上的已有标注重叠，请调整起止时间。');
+  if (!editing && subaxis) {
+    while (occupied.has(lane)) lane += 1;
+  }
+  if ((!editing && !subaxis) || editing?.lane === 0) {
     remaining = remaining.flatMap(segment => {
+      if (segment.lane !== 0) return [segment];
       let pieces = [{ ...segment }];
       for (const range of ranges) {
         pieces = pieces.flatMap(piece => {
-          const pieceEnd = piece.end_ms ?? Infinity;
+          const pieceEnd = packingEnd(piece, Infinity);
           if (piece.start_ms >= range.end_ms || pieceEnd <= range.start_ms) return [piece];
+          if (isPointSegment(piece)) return [];
           const outside: Segment[] = [];
           if (piece.start_ms < range.start_ms) outside.push({ ...piece, end_ms: range.start_ms });
           if (pieceEnd > range.end_ms) outside.push({
@@ -443,50 +492,50 @@ export function applyAnnotationRange(
     });
   }
   const added: Segment[] = ranges.map((range, index) => ({
+    ...editing,
     id: index === 0 ? existingId ?? newId() : newId(),
     label: label.trim(),
     ...range,
     kind: 'interval',
-    ...(track === 'category' ? { mode: exclusive ? 'state' as const : editing ? editing.mode ?? 'state' : 'overlay' as const } : {}),
+    lane,
+    ...(track === 'category' ? { mode: editing?.mode ?? 'state' as const } : {}),
   }));
   const result = [...remaining, ...added];
-  return track === 'scene' || track === 'posture' || exclusive ? mergeTouchingStates(result) : orderedCopies(result);
+  return mergeTouchingStates(result);
 }
 
-/** Delete a segment and extend only an adjacent predecessor into newly uncovered recorded time. */
+/** Add a point on the main axis or edit it in place; overlap creation requires anchor ranges. */
+export function applyAnnotationPoint(
+  segments: Segment[],
+  time: number,
+  label: string,
+  duration: number,
+  existingId?: string,
+): Segment[] {
+  const original = orderedCopies(segments);
+  if (!label.trim() || !Number.isFinite(time) || time < 0 || time > duration) return original;
+  const assigned = assignSegmentLanes(segments, duration);
+  const editing = existingId ? assigned.find(segment => segment.id === existingId) : undefined;
+  const point: Segment = { ...editing, id: existingId ?? newId(), label: label.trim(),
+    start_ms: Math.round(time), end_ms: Math.round(time), kind: 'point', lane: editing?.lane ?? 0 };
+  const remaining = assigned.filter(segment => segment.id !== existingId &&
+    (editing || segment.lane !== 0 || !isPointSegment(segment) || segment.start_ms !== point.start_ms));
+  if (remaining.some(segment => segment.lane === point.lane && segmentsOverlap(segment, point, duration))) {
+    throw new Error(editing ? '该时间与同一主轴或子轴上的已有标注重叠，请调整时间。' :
+      '该时间主轴已有标注；新增重叠标注请先选择锚点区间并勾选“子轴”。');
+  }
+  return orderedCopies([...remaining, point]);
+}
+
+/** Delete only the selected annotation, retaining blank time and saved child row assignments. */
 export function deleteAnnotation(
   segments: Segment[],
   id: string,
-  spans: VideoGap[],
-  track: Track,
-  eventTrack = false,
+  _spans: VideoGap[],
+  _track: Track,
+  _eventTrack = false,
 ): Segment[] {
-  const removed = segments.find(segment => segment.id === id);
-  const remaining = orderedCopies(segments.filter(segment => segment.id !== id));
-  if (!removed || track === 'habit' || eventTrack || isPointSegment(removed)) return remaining;
-  const runs = joinedSpans(spans);
-  const holes = uncoveredSpans(remaining, runs).map(hole => ({
-    start_ms: Math.max(hole.start_ms, removed.start_ms),
-    end_ms: Math.min(hole.end_ms, removed.end_ms ?? hole.end_ms),
-  })).filter(hole => hole.end_ms > hole.start_ms);
-  for (const hole of holes) {
-    const run = runs.find(span => hole.start_ms >= span.start_ms && hole.start_ms < span.end_ms);
-    if (!run) continue;
-    // An overlay inside the deleted first segment is not its original predecessor.
-    // Retain blank time after deleting a first/sole state, even beyond such overlays.
-    const removedStart = Math.max(removed.start_ms, run.start_ms);
-    const hadPredecessor = segments.some(segment =>
-      segment.id !== id && !isPointSegment(segment) && segment.start_ms >= run.start_ms &&
-      segment.start_ms < removedStart && (segment.end_ms ?? run.end_ms) >= removedStart,
-    );
-    if (!hadPredecessor) continue;
-    const predecessor = remaining.filter(segment =>
-      !isPointSegment(segment) && segment.start_ms >= run.start_ms && segment.start_ms < hole.start_ms &&
-      segment.end_ms === hole.start_ms,
-    ).sort((a, b) => b.start_ms - a.start_ms || a.id.localeCompare(b.id))[0];
-    if (predecessor) predecessor.end_ms = hole.end_ms;
-  }
-  return track === 'scene' || track === 'posture' ? mergeTouchingStates(remaining) : orderedCopies(remaining);
+  return orderedCopies(assignSegmentLanes(segments, Infinity).filter(segment => segment.id !== id));
 }
 
 /** Snap by rendered pixel distance, so zoom does not change the mouse tolerance. */

@@ -32,14 +32,14 @@ class TrackCustomizationTests(unittest.TestCase):
         self.service.previews.close()
         self.temp.cleanup()
 
-    def test_new_directory_and_file_projects_default_to_scene_and_posture(self):
+    def test_new_directory_and_file_projects_default_to_three_tracks(self):
         directory = self.service.open_path(str(self.source))
-        self.assertEqual(directory["fixed_tracks"], ["scene", "posture"])
+        self.assertEqual(directory["fixed_tracks"], ["scene", "posture", "category"])
         other = self.root / "other" / self.video.name
         other.parent.mkdir()
         other.write_bytes(b"another synthetic video")
         files = self.service.open_files([str(other)])
-        self.assertEqual(files["fixed_tracks"], ["scene", "posture"])
+        self.assertEqual(files["fixed_tracks"], ["scene", "posture", "category"])
 
     def test_named_custom_json_survives_writeback_and_reopen(self):
         project = self.service.open_path(str(self.source))

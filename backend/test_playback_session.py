@@ -224,6 +224,35 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(before, {str(path.relative_to(nas)): path.read_bytes()
                                   for path in nas.rglob('*') if path.is_file()})
 
+    def test_local_nas_ui_downloads_server_cache_across_project_ids_without_encoding_or_writes(self):
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                     'DATAMARK_SOURCE_ROOT': str(self.root),
+                                     'DATAMARK_LOCAL_NAS_ROOT': ''}):
+            self.prepare()
+        nas = self.source / '.datamark-cache'
+        before = {str(path.relative_to(nas)): path.read_bytes() for path in nas.rglob('*') if path.is_file()}
+        local = ProjectService(self.root / 'local-nas-ui')
+        local.probe = self.probe
+        self.services.append(local)
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                     'DATAMARK_SOURCE_ROOT': str(self.root),
+                                     'DATAMARK_LOCAL_NAS_ROOT': str(self.root)}):
+            opened = local.open_path(str(self.source))
+            self.assertNotEqual(opened['id'], self.ident)
+            with patch('backend.session_cache.run_ffmpeg', side_effect=AssertionError('must reuse Ubuntu NAS cache')):
+                local.sessions.start(opened['id'])
+                deadline = time.monotonic() + 5
+                while local.sessions.status(opened['id'])['state'] == 'running' and time.monotonic() < deadline:
+                    time.sleep(.01)
+            status = local.sessions.status(opened['id'])
+            self.assertEqual(status['state'], 'ready', status)
+            local_directory = local.storage.directory(opened['id']) / 'playback'
+            self.assertTrue(local.sessions.asset(opened['id'], 'normal', 'v0001').is_relative_to(local_directory))
+            self.assertEqual(local.sessions.asset(opened['id'], 'normal', 'v0001').read_bytes(), MEDIA)
+            self.assertEqual(local.sessions.browser_ready(opened['id']), {'released': False})
+            self.assertTrue(local_directory.exists())
+        self.assertEqual(before, {str(path.relative_to(nas)): path.read_bytes() for path in nas.rglob('*') if path.is_file()})
+
     def test_local_nas_cache_rejects_tampered_bytes_and_changed_original(self):
         with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
                                       'DATAMARK_SOURCE_ROOT': str(self.root)}):
@@ -247,15 +276,15 @@ class PlaybackSessionTests(unittest.TestCase):
             self.assertEqual(caught.exception.status_code, 409)
 
     def test_local_nas_cache_finds_legacy_key_from_ubuntu_path(self):
-        server_root = Path('/mnt/nas/homes/datacollection')
+        server_root = PurePosixPath('/mnt/nas/homes/datacollection')
         with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
                                       'DATAMARK_SOURCE_ROOT': str(self.root)}):
             self.prepare()
         nas = self.source / '.datamark-cache' / 'ubuntu-playback-v1'
         for source in self.project['_sources'].values():
             old_key = self.service.sessions._source_key(source)
-            server_source = {**source, 'path': str(server_root / Path(source['path']).relative_to(self.root))}
-            new_key = self.service.sessions._source_key(server_source)
+            server_path = server_root.joinpath(*Path(source['path']).relative_to(self.root).parts)
+            new_key = self.service.sessions._ubuntu_source_key(source, server_path)
             manifest = nas / self.ident / (old_key + '.assets.json')
             data = json.loads(manifest.read_text(encoding='utf-8'))
             data.pop('source_identity', None)
@@ -279,7 +308,8 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(str(server), '/mnt/nas/homes/datacollection/habit/smoking/recording/FPV/clip.avi')
         source = self.project['_sources']['v0001']
         expected = self.service.sessions._ubuntu_source_key(source, server)
-        self.assertEqual(expected, self.service.sessions._source_key({**source, 'path': str(server)}))
+        with patch('backend.session_cache.os.path.normcase', lambda value: value):
+            self.assertEqual(expected, self.service.sessions._source_key({**source, 'path': str(server)}))
         with patch('backend.session_cache.os.path.normcase', ntpath.normcase):
             self.assertNotEqual(expected, self.service.sessions._source_key({**source, 'path': str(server)}))
             self.assertEqual(expected, self.service.sessions._ubuntu_source_key(source, server))
@@ -1058,6 +1088,8 @@ class PlaybackSessionTests(unittest.TestCase):
         original = source.read_bytes()
         opened = service.open_files([str(source)])
         project = service.load(opened["id"])
+        project["fixed_tracks"] = ["scene", "posture", "habit"]
+        service.save(project)
         ann = empty_annotations()
         ann["scene"] = [{"id": "scene", "label": "室内", "kind": "interval", "start_ms": 0, "end_ms": 2000}]
         ann["habit"] = [{"id": "water", "label": "喝水", "kind": "point", "start_ms": 1500, "end_ms": 1500}]
@@ -1189,7 +1221,7 @@ class SkipFailedPlaybackTests(unittest.TestCase):
         self.assertEqual(public['gaps'], [{'start_ms': 1000, 'end_ms': 2000}])
         annotations = empty_annotations()
         for axis, label in [('scene', '室内'), ('posture', '坐')]:
-            annotations[axis] = [{'id': axis, 'label': label, 'kind': 'interval', 'start_ms': 0, 'end_ms': 1000}]
+            annotations[axis] = [{'id': axis, 'label': label, 'kind': 'interval', 'start_ms': 0, 'end_ms': 1000, 'lane': 0}]
         self.service.update_draft(self.ident, annotations, public['revision'])
         project = self.service.load(self.ident)
         _, documents = self.service.export_documents(project)

@@ -34,7 +34,12 @@ class SourceBrowserTests(unittest.TestCase):
         (self.nas / ".datamark-cache").mkdir()
         outside = self.root / "outside"
         outside.mkdir()
-        (self.nas / "escape").symlink_to(outside)
+        try:
+            (self.nas / "escape").symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows does not grant symlink privileges")
+            raise
         listing = browse_sources(self.nas)
         self.assertEqual([(item["name"], item["kind"]) for item in listing["entries"]],
                          [("采集", "directory"), ("recording.avi", "file")])
@@ -102,7 +107,9 @@ class SourceBrowserTests(unittest.TestCase):
                 self.assertEqual(saved.status_code, 200, saved.text)
                 writeback = client.post(f'/api/projects/{project["id"]}/writeback', headers=csrf)
                 self.assertEqual(writeback.status_code, 200, writeback.text)
-                self.assertEqual(len(list((source / "timeline").glob("*.timeline.json"))), 4)
+                self.assertEqual(project["selected_tracks"], ["scene", "posture", "category"])
+                self.assertEqual({path.name for path in (source / "timeline").glob("*.timeline.json")},
+                                 {FILENAMES[axis] for axis in project["selected_tracks"]})
                 other_login = client.post("/api/auth/login", json={"username": "other", "password": "correct horse battery staple"})
                 other_csrf = {"X-CSRF-Token": other_login.json()["csrf"]}
                 self.assertEqual(client.get(f'/api/projects/{project["id"]}').status_code, 403)
@@ -186,7 +193,8 @@ class SourceBrowserTests(unittest.TestCase):
                 changed = client.put(f'/api/projects/{project["id"]}/draft', json={"annotations": annotations, "expected_revision": project["revision"]}, headers=admin_csrf)
                 self.assertEqual(changed.status_code, 200, changed.text)
                 self.assertEqual(client.post(f'/api/projects/{project["id"]}/writeback', headers=admin_csrf).status_code, 200)
-                old = {axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in AXES}
+                old = {axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}
+                self.assertEqual({path.name for path in (source / "timeline").glob("*.timeline.json")}, {FILENAMES[axis] for axis in old})
                 worker_login = client.post("/api/auth/login", json={"username": "worker", "password": "correct horse battery staple"})
                 worker_csrf = {"X-CSRF-Token": worker_login.json()["csrf"]}
                 claim = client.post("/api/source-claims/inspect", json={"path": str(source)}, headers=worker_csrf).json()
@@ -206,8 +214,8 @@ class SourceBrowserTests(unittest.TestCase):
                 self.assertTrue(all(not rows for rows in fresh['annotations'].values()))
                 self.assertEqual(auth.assignment(project['id']), worker['id'])
                 archive = source / '.annotation-backups' / fresh['source_backup_id']
-                self.assertEqual({axis: (archive / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
-                self.assertEqual({axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
+                self.assertEqual({axis: (archive / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
+                self.assertEqual({axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
                 self.assertEqual(client.post(f'/api/projects/{project["id"]}/writeback', headers=worker_csrf).status_code, 200)
                 self.assertEqual(json.loads((source / 'timeline' / FILENAMES['scene']).read_bytes())['segments'], [])
 
@@ -220,7 +228,8 @@ class SourceBrowserTests(unittest.TestCase):
             original = writer.open_path(str(source))
             writer.update_draft(original["id"], complete_annotations(original), original["revision"])
             writer.writeback(original["id"])
-            old = {axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES}
+            old = {axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}
+            self.assertEqual({path.name for path in (source / "timeline").glob("*.timeline.json")}, {FILENAMES[axis] for axis in old})
             app_root = self.root / "new-platform"
             auth = AuthStore(app_root)
             auth.create_user("admin", "管理员", "correct horse battery staple", "admin")
@@ -239,8 +248,8 @@ class SourceBrowserTests(unittest.TestCase):
                     fresh = opened.json()
                     self.assertTrue(all(not rows for rows in fresh["annotations"].values()))
                     backup = source / ".annotation-backups" / fresh["source_backup_id"]
-                    self.assertEqual({axis: (backup / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
-                    self.assertEqual({axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES}, old)
+                    self.assertEqual({axis: (backup / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
+                    self.assertEqual({axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
 
     def test_takeover_can_continue_nas_json_while_archiving_dirty_platform_draft(self):
         source = self.nas / "采集"

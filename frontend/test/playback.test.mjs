@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { advanceVideoTime, playbackProfile, seekMediaTime, sourceTime } from '../src/playback.ts';
+import { advanceVideoTime, applyPlaybackRate, playbackProfile, seekMediaTime, sourceTime } from '../src/playback.ts';
 
 const video = (id, start_ms, end_ms) => ({ id, start_ms, end_ms });
 const gapped = [video('first', 0, 1000), video('second', 11000, 12000), video('third', 22000, 24000)];
@@ -66,6 +66,40 @@ test('50x and 100x use supported continuous playback rates and full media on pau
   assert.deepEqual(playbackProfile(100, true), { fast: true, scale: 20, nativeRate: 5 });
   assert.deepEqual(playbackProfile(100, false), { fast: false, scale: 1, nativeRate: 1 });
   assert.deepEqual(playbackProfile(10, true), { fast: false, scale: 1, nativeRate: 10 });
+});
+
+test('starting and restarting media retain the selected speed when the browser restores its default', () => {
+  for (const rate of [0.5, 1, 2, 5, 10, 50, 100]) {
+    const player = {playbackRate: 1, defaultPlaybackRate: 1};
+    const profile = playbackProfile(rate, true);
+    applyPlaybackRate(player, profile.nativeRate);
+    player.playbackRate = player.defaultPlaybackRate;
+    assert.equal(player.playbackRate * profile.scale, rate);
+    applyPlaybackRate(player, playbackProfile(rate, false).nativeRate);
+    assert.equal(player.playbackRate, 1);
+    applyPlaybackRate(player, profile.nativeRate);
+    player.playbackRate = player.defaultPlaybackRate;
+    assert.equal(player.playbackRate * profile.scale, rate);
+  }
+});
+
+test('a browser rate reset is corrected without repeated ratechange writes', () => {
+  let actual = 1, defaultRate = 1;
+  const writes = [];
+  const player = {
+    get playbackRate() { return actual; },
+    set playbackRate(value) { actual = value; writes.push(value); },
+    get defaultPlaybackRate() { return defaultRate; },
+    set defaultPlaybackRate(value) { defaultRate = value; writes.push(value); },
+  };
+  applyPlaybackRate(player, 5);
+  applyPlaybackRate(player, 5);
+  assert.deepEqual(writes, [5, 5]);
+  actual = 1;
+  applyPlaybackRate(player, 5);
+  applyPlaybackRate(player, 5);
+  assert.equal(actual, 5);
+  assert.deepEqual(writes, [5, 5, 5]);
 });
 
 test('compressed video time maps to original annotation coordinates including clip offsets', () => {

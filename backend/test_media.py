@@ -222,6 +222,10 @@ class ActualMediaTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 206)
                 self.assertEqual(response.content, preview.read_bytes()[:32])
                 self.assertEqual(client.get(project["videos"][0]["thumbnail_url"]).status_code, 200)
+            raw = service.load(project["id"])
+            raw["fixed_tracks"] = ["scene", "posture", "category", "habit"]
+            service.save(raw)
+            project = service.public(raw)
             annotations = empty_annotations()
             annotations["habit"] = [{"id": "event", "label": "咳嗽", "kind": "point", "start_ms": 11500, "end_ms": 11500}]
             service.update_draft(project["id"], complete_annotations(project, annotations), 0)

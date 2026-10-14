@@ -59,6 +59,12 @@ export function playbackProfile(rate: number, playing: boolean) {
   return { fast, scale, nativeRate: playing ? rate / scale : 1 };
 }
 
+/** Keep the browser's restart rate aligned with the active media's time scale. */
+export function applyPlaybackRate(player: { playbackRate: number; defaultPlaybackRate: number }, nativeRate: number) {
+  if (player.defaultPlaybackRate !== nativeRate) player.defaultPlaybackRate = nativeRate;
+  if (player.playbackRate !== nativeRate) player.playbackRate = nativeRate;
+}
+
 export function sourceTime(mediaSeconds: number, scale: number, video: Pick<Video, 'start_ms' | 'end_ms'>) {
   return Math.min(video.end_ms, Math.max(video.start_ms, video.start_ms + Math.round(mediaSeconds * scale * 1000)));
 }

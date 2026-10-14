@@ -27,6 +27,7 @@ from .native_picker import choose_local_paths, native_picker_available
 from .source_browser import browse_sources
 from .media_response import CancellableFileResponse
 from .auth import AuthStore
+from .track_library import TrackLibrary
 from .local_reports import LocalReportStore
 from .cloud_mirror import CloudMirror
 from .mock_s3 import MockProjectService, MockS3Catalog, MockS3Store, MockUploadManager
@@ -110,6 +111,27 @@ class TrackTemplateRequest(BaseModel):
     name: str = Field(strict=True)
     json_name: str = Field(strict=True)
     labels: list[str]
+
+
+class LibraryTrackRequest(BaseModel):
+    id: str = Field(strict=True)
+    name: str = Field(strict=True)
+    mode: Literal["state", "event"] = "state"
+    labels: list[str]
+    is_default: bool = Field(default=False, strict=True)
+
+
+class TrackSelectionRequest(BaseModel):
+    tracks: list[str]
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+class LibraryDeleteRequest(BaseModel):
+    confirmed: Literal[True]
+
+
+class LibraryDefaultRequest(BaseModel):
+    is_default: bool = Field(strict=True)
 
 
 class RenameProjectRequest(BaseModel):
@@ -256,6 +278,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         raise ValueError("Public API origins require an isolated S3 deployment; NAS and local storage cannot be exposed")
     service = MockProjectService(data_root, mock_s3, hybrid_nas_root) if mock_s3 else ProjectService(root)
     auth = AuthStore(data_root)
+    track_library = TrackLibrary(auth)
     local_reports = LocalReportStore(auth, nas_source_root if configured_origin and not mock_mode else None)
     cloud_mirror = CloudMirror() if not configured_origin and not mock_mode else None
     lifetime = BrowserLifetime(on_idle)
@@ -333,7 +356,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 if not csrf or not hmac.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), csrf_hash) or csrf != request.cookies.get("datamark_csrf"):
                     return JSONResponse(status_code=403, content={"detail": "页面安全令牌已失效，请刷新页面。"})
             admin_only = path in {"/api/local-files/pick", "/api/projects/upload", "/api/users"}
-            admin_only = admin_only or path.startswith("/api/users/")
+            admin_only = admin_only or path.startswith("/api/users/") or path.startswith("/api/admin/")
             match = (None if path in {"/api/projects/open", "/api/projects/files", "/api/projects/upload"} else re.match(r"^/api/projects/([^/]+)(?:/|$)", path)) or re.match(r"^/api/(?:previews|storyboards|media|thumbnails|session-media|session-thumbnails|session-storyboards)/([^/]+)(?:/|$)", path)
             if match:
                 project_id = match.group(1)
@@ -367,7 +390,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
-        if request.url.path.startswith(("/api/auth/", "/api/users", "/api/projects", "/api/previews", "/api/media/", "/api/thumbnails/", "/api/session-media/", "/api/session-thumbnails/", "/api/session-storyboards/", "/api/storyboards/")):
+        if request.url.path.startswith(("/api/auth/", "/api/account/", "/api/users", "/api/projects", "/api/previews", "/api/media/", "/api/thumbnails/", "/api/session-media/", "/api/session-thumbnails/", "/api/session-storyboards/", "/api/storyboards/")):
             response.headers["Cache-Control"] = "no-store"
         elif request.url.path in {"/", "/index.html"}:
             # Every reopening must check the current UI after a local update.
@@ -387,7 +410,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.get("/api/health")
     def health():
-        capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "account-login"]
+        capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "account-login", "account-track-library", "subaxis-annotations", "selected-track-writeback"]
         if service.desktop_cache.enabled:
             capabilities.append("desktop-playback-cache")
         if mock_mode:
@@ -461,6 +484,45 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         response.delete_cookie("datamark_session", path="/")
         response.delete_cookie("datamark_csrf", path="/")
         return response
+
+    def library_user(request: Request):
+        return getattr(request.state, "user", None)
+
+    def require_default_editor(request: Request, default: bool):
+        user = library_user(request)
+        if default and auth_required and (not user or user["role"] != "admin"):
+            raise HTTPException(403, "默认时间轴只能由管理员维护。")
+        return user
+
+    @app.get("/api/account/track-library")
+    def list_track_library(request: Request):
+        user = library_user(request)
+        return track_library.list(user["id"] if user else None)
+
+    @app.post("/api/account/track-library")
+    def create_library_track(body: LibraryTrackRequest, request: Request):
+        user = require_default_editor(request, body.is_default)
+        return track_library.save(user["id"] if user else None, body.id, body.name, body.mode, body.labels,
+                                  default=body.is_default, create=True)
+
+    @app.put("/api/account/track-library/{track_id}")
+    def update_library_track(track_id: str, body: LibraryTrackRequest, request: Request):
+        if track_id != body.id:
+            raise HTTPException(422, "已有时间轴的 JSON 名不能修改。")
+        user = require_default_editor(request, body.is_default)
+        return track_library.save(user["id"] if user else None, track_id, body.name, body.mode, body.labels,
+                                  default=body.is_default)
+
+    @app.delete("/api/account/track-library/{track_id}")
+    def delete_library_track(track_id: str, body: LibraryDeleteRequest, request: Request, default: bool = False):
+        user = require_default_editor(request, default)
+        track_library.delete(user["id"] if user else None, track_id, default=default)
+        return {"ok": True}
+
+    @app.post("/api/account/track-library/{track_id}/default")
+    def set_library_track_default(track_id: str, body: LibraryDefaultRequest, request: Request):
+        user = require_default_editor(request, True)
+        return track_library.set_default(user["id"] if user else None, track_id, body.is_default)
 
     @app.put("/api/projects/{project_id}/cache-collection")
     def set_cache_collection(project_id: str, body: CacheCollectionRequest):
@@ -702,7 +764,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                     auth.assign(project["id"], user["id"])
             if user and user["role"] == "annotator" and not takeover and not auth.claim(project["id"], user["id"]):
                 raise HTTPException(403, "该素材已由其他标注员领取。")
-            return project
+            return {**project, **service.initialize_track_library(project["id"], track_library.defaults(), actor=user)}
 
     @app.get("/api/sources/browse")
     def sources_browse(request: Request, path: str | None = None, page: int = 0):
@@ -736,7 +798,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             project = service.open_files(body.paths, name=body.name, source_writeback=not configured_origin)
             if user and user["role"] == "annotator" and not auth.claim(project["id"], user["id"]):
                 raise HTTPException(403, "该素材已由其他标注员领取。")
-            return project
+            return {**project, **service.initialize_track_library(project["id"], track_library.defaults(), actor=user)}
 
     def open_mock_folder(folder: Path, name: str, request: Request, key: str | None = None) -> dict:
         with service.lock:
@@ -756,7 +818,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             service.save(stored)
             if user and user["role"] == "annotator" and not auth.claim(stored["id"], user["id"]):
                 raise HTTPException(403, "该项目已由其他标注员领取。")
-            return service.public(stored)
+            return service.initialize_track_library(stored["id"], track_library.defaults(), actor=user)
 
     @app.get("/api/mock-s3/sources")
     def browse_mock_sources(prefix: str = ""):
@@ -886,8 +948,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         raise HTTPException(410, "平台已改为原目录读取，请刷新页面后使用补导入文件或目录，不再上传视频副本。")
 
     @app.get("/api/projects/{project_id}")
-    def get_project(project_id: str):
-        return service.public(service.load(project_id, allow_deleting=True))
+    def get_project(project_id: str, request: Request):
+        return service.initialize_track_library(project_id, track_library.defaults(), actor=library_user(request))
 
     @app.patch("/api/projects/{project_id}/name")
     def rename_project(project_id: str, body: RenameProjectRequest):
@@ -911,21 +973,29 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.post("/api/projects/{project_id}/custom-tracks")
     def add_custom_track(project_id: str, body: CustomTrackRequest):
-        return service.add_custom_track(project_id, body.name, body.mode, body.labels, body.expected_revision,
-                                        json_name=body.json_name)
+        raise HTTPException(410, "请在右上角时间轴库中创建，再为项目勾选。")
 
     @app.put("/api/projects/{project_id}/fixed-tracks/{track_id}")
     def set_fixed_track(project_id: str, track_id: str, body: FixedTrackRequest):
-        return service.set_fixed_track(project_id, track_id, body.enabled, body.expected_revision)
+        raise HTTPException(410, "请通过项目时间轴选择启用或隐藏时间轴，已有标注会保留。")
 
     @app.put("/api/projects/{project_id}/tracks/{track_id}/labels")
     def set_track_labels(project_id: str, track_id: str, body: TrackLabelsRequest, request: Request):
-        return service.set_track_labels(project_id, track_id, body.labels, body.expected_revision,
-                                        actor=request.state.user if auth_required else None)
+        raise HTTPException(410, "请在右上角时间轴库中修改标签；修改不追溯已有项目。")
 
     @app.delete("/api/projects/{project_id}/custom-tracks/{track_id}")
     def delete_custom_track(project_id: str, track_id: str, body: DeleteProjectRequest):
-        return service.delete_custom_track(project_id, track_id, body.expected_revision)
+        raise HTTPException(410, "请在时间轴库中删除，或在项目中取消勾选；已有项目标注会保留。")
+
+    @app.put("/api/projects/{project_id}/track-selection")
+    def select_tracks(project_id: str, body: TrackSelectionRequest, request: Request):
+        user = library_user(request)
+        return service.select_library_tracks(project_id, body.tracks, track_library.list(user["id"] if user else None),
+                                             body.expected_revision, actor=user)
+
+    @app.get("/api/projects/{project_id}/operations")
+    def operation_history(project_id: str):
+        return service.project_operation_history(project_id)
 
     @app.get("/api/projects/{project_id}/history")
     def edit_history(project_id: str):

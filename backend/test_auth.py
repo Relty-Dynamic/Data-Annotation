@@ -117,28 +117,14 @@ class AccountAccessTests(unittest.TestCase):
         self.assertEqual(history[0]["actor_id"], self.annotator["id"])
         self.assertEqual(history[0]["before"]["created_by"], self.annotator["id"])
 
-    def test_assigned_annotator_can_add_custom_axis_and_save_it(self):
-        project_id = self.project["id"]
-        self.auth.assign(project_id, self.annotator["id"])
-        csrf = self.login("worker", "another long safe password")
-        path = f"/api/projects/{project_id}/custom-tracks"
-        body = {"name": "环境", "mode": "state", "labels": ["安静", "嘈杂"], "expected_revision": 0}
+    def test_project_creation_route_is_retired_with_csrf_guard(self):
+        project_id = self.project['id']
+        self.auth.assign(project_id, self.annotator['id'])
+        csrf = self.login('worker', 'another long safe password')
+        path = f'/api/projects/{project_id}/custom-tracks'
+        body = {'name': '环境', 'mode': 'state', 'labels': ['安静'], 'expected_revision': 0}
         self.assertEqual(self.client.post(path, json=body).status_code, 403)
-        created = self.client.post(path, json=body, headers={"X-CSRF-Token": csrf})
-        self.assertEqual(created.status_code, 200, created.text)
-        axis = created.json()["custom_tracks"][0]["id"]
-        annotations = created.json()["annotations"]
-        annotations[axis] = [{"id": "quiet", "label": "安静", "kind": "interval", "start_ms": 0, "end_ms": 1000}]
-        saved = self.client.put(f"/api/projects/{project_id}/draft",
-                                json={"annotations": annotations, "expected_revision": 1},
-                                headers={"X-CSRF-Token": csrf})
-        self.assertEqual(saved.status_code, 200, saved.text)
-        self.assertEqual(saved.json()["annotations"][axis][0]["created_by"], self.annotator["id"])
-        removed = self.client.request("DELETE", f"{path}/{axis}",
-                                      json={"confirmed": True, "expected_revision": saved.json()["revision"]},
-                                      headers={"X-CSRF-Token": csrf})
-        self.assertEqual(removed.status_code, 200, removed.text)
-        self.assertNotIn(axis, removed.json()["annotations"])
+        self.assertEqual(self.client.post(path, json=body, headers={'X-CSRF-Token': csrf}).status_code, 410)
 
     def test_track_templates_are_private_to_account_and_require_csrf(self):
         self.assertEqual(self.client.get("/api/account/track-templates").status_code, 401)
@@ -268,6 +254,7 @@ class AccountAccessTests(unittest.TestCase):
             with sqlite3.connect(local / "auth.sqlite3") as con:
                 con.execute("CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE, display_name TEXT, role TEXT, password_hash TEXT, active INTEGER)")
                 con.execute("INSERT INTO users VALUES ('old','oldworker','旧账号','annotator','unused',1)")
+            con.close()
             migrated = AuthStore(Path(root))
             self.assertFalse(migrated.list_users()[0]["can_upload"])
             self.assertIsNone(migrated.list_users()[0]["email"])
@@ -318,43 +305,15 @@ class AccountAccessTests(unittest.TestCase):
         self.auth.leave_editing(project_id, self.annotator["id"], "a" * 36)
         self.assertEqual(self.auth.enter_editing(project_id, self.admin["id"], "b" * 36), [])
 
-    def test_assigned_annotator_can_remove_and_restore_fixed_track_with_revision_guard(self):
-        project_id = self.project["id"]
-        self.auth.assign(project_id, self.annotator["id"])
-        csrf = self.login("worker", "another long safe password")
-        path = f"/api/projects/{project_id}/fixed-tracks/posture"
-        body = {"enabled": False, "expected_revision": 0}
-        self.assertEqual(self.client.put(path, json=body).status_code, 403)
-        removed = self.client.put(path, json=body, headers={"X-CSRF-Token": csrf})
-        self.assertEqual(removed.status_code, 200, removed.text)
-        self.assertNotIn("posture", removed.json()["fixed_tracks"])
-        self.assertEqual(removed.json()["annotations"]["posture"], [])
-        self.assertEqual(self.client.put(path, json=body, headers={"X-CSRF-Token": csrf}).status_code, 409)
-        restored = self.client.put(path, json={"enabled": True, "expected_revision": removed.json()["revision"]},
-                                   headers={"X-CSRF-Token": csrf})
-        self.assertEqual(restored.status_code, 200, restored.text)
-        self.assertIn("posture", restored.json()["fixed_tracks"])
-
-    def test_assigned_annotator_manages_labels_with_csrf_and_delete_history(self):
-        project_id = self.project["id"]
-        self.auth.assign(project_id, self.annotator["id"])
-        csrf = self.login("worker", "another long safe password")
-        path = f"/api/projects/{project_id}/tracks/habit/labels"
-        body = {"labels": ["喝水"], "expected_revision": 0}
-        self.assertEqual(self.client.put(path, json=body).status_code, 403)
-        added = self.client.put(path, json=body, headers={"X-CSRF-Token": csrf})
-        self.assertEqual(added.status_code, 200, added.text)
-        annotations = added.json()["annotations"]
-        annotations["habit"] = [{"id": "one", "label": "喝水", "kind": "point", "start_ms": 100, "end_ms": 100}]
-        saved = self.client.put(f"/api/projects/{project_id}/draft", json={"annotations": annotations, "expected_revision": added.json()["revision"]}, headers={"X-CSRF-Token": csrf})
-        self.assertEqual(saved.status_code, 200, saved.text)
-        removed = self.client.put(path, json={"labels": [], "expected_revision": saved.json()["revision"]}, headers={"X-CSRF-Token": csrf})
-        self.assertEqual(removed.status_code, 200, removed.text)
-        self.assertEqual(removed.json()["annotations"]["habit"], [])
-        self.assertEqual(self.client.put(path, json={"labels": [], "expected_revision": saved.json()["revision"]}, headers={"X-CSRF-Token": csrf}).status_code, 409)
-        history = self.client.get(f"/api/projects/{project_id}/history").json()
-        self.assertEqual(history[0]["action"], "delete")
-        self.assertEqual(history[0]["actor_id"], self.annotator["id"])
+    def test_destructive_project_track_routes_are_retired(self):
+        project_id = self.project['id']
+        self.auth.assign(project_id, self.annotator['id'])
+        csrf = self.login('worker', 'another long safe password')
+        for suffix, body in [('fixed-tracks/posture', {'enabled': False, 'expected_revision': 0}),
+                             ('tracks/habit/labels', {'labels': [], 'expected_revision': 0})]:
+            path = f'/api/projects/{project_id}/{suffix}'
+            self.assertEqual(self.client.put(path, json=body).status_code, 403)
+            self.assertEqual(self.client.put(path, json=body, headers={'X-CSRF-Token': csrf}).status_code, 410)
 
     def test_password_change_revokes_session_and_lockout_persists(self):
         csrf = self.login("worker", "another long safe password")
