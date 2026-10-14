@@ -2,7 +2,7 @@ name: datamark-public-setup
 services:
   api:
     image: ${DATAMARK_SETUP_IMAGE:?Tested setup image is required}
-    command: ["/opt/venv/bin/python", "-m", "uvicorn", "backend.public_setup:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]
+    command: ["/opt/venv/bin/python", "-m", "uvicorn", "backend.public_setup:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765", "--proxy-headers", "--forwarded-allow-ips", "*"]
     user: "1000:1000"
     restart: unless-stopped
     init: true
@@ -12,10 +12,39 @@ services:
     environment:
       DATAMARK_PUBLIC_ORIGIN: https://datamark.reltydynamic.com
       DATAMARK_PUBLIC_API_ORIGIN: ${DATAMARK_PUBLIC_API_ORIGIN:-https://api-annotate.reltydynamic.com:8443}
+      DATAMARK_SHARED_ACCOUNTS: "1"
       PYTHONNOUSERSITE: "1"
     tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
     healthcheck:
       test: ["CMD", "/opt/venv/bin/python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=3)); assert d['mode']=='public-setup' and d['storage_ready'] is False"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [private]
+    depends_on:
+      accounts:
+        condition: service_healthy
+  accounts:
+    image: ${DATAMARK_SETUP_IMAGE:?Tested setup image is required}
+    command: ["/opt/venv/bin/python", "-m", "uvicorn", "backend.shared_accounts:create_app", "--factory", "--host", "0.0.0.0", "--port", "8766"]
+    user: "1000:1000"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    environment:
+      DATAMARK_SHARED_ACCOUNT_ROOT: /accounts
+      PYTHONNOUSERSITE: "1"
+    volumes:
+      - type: bind
+        source: ${DATAMARK_SHARED_ACCOUNT_STATE:?Existing intranet account state is required}
+        target: /accounts/.local
+        bind:
+          create_host_path: false
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8766/v1/health',timeout=3))['accounts_ready'] is True"]
       interval: 10s
       timeout: 5s
       retries: 3

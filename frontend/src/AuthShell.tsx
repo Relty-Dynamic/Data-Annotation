@@ -11,8 +11,16 @@ export default function AuthShell() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [setupDetail, setSetupDetail] = useState('');
   useEffect(() => {
-    authFetch('/api/auth/me', {cache:'no-store'}).then(async response => {
+    authFetch('/api/health', {cache:'no-store'}).then(async response => {
+      if (!response.ok) throw new Error('无法连接标注平台。');
+      const health = await response.json();
+      if (health.mode === 'public-setup' && health.storage_ready === false) {
+        setSetupDetail(health.detail || 'S3 尚未配置，暂不能上传或标注。');
+      }
+      return authFetch('/api/auth/me', {cache:'no-store'});
+    }).then(async response => {
       if (response.ok) {
         const data = await response.json();
         setCsrfToken(data.csrf ?? '');
@@ -37,6 +45,11 @@ export default function AuthShell() {
     setUser(null);
   }
   if (checking) return <main className="auth-page"><section className="auth-card">正在检查登录状态…</section></main>;
+  if (user && setupDetail) return <main className="auth-page"><section className="auth-card">
+    <h1>已登录 DataMark</h1><p>{user.display_name} · {user.username}</p>
+    <p>此账号与内网 NAS 使用同一个账号库。</p><p>{setupDetail}</p>
+    <button className="primary wide" onClick={logout}>退出登录</button>
+  </section></main>;
   if (user) return <App user={user} onLogout={logout}/>;
   return <main className="auth-page"><form className="auth-card" onSubmit={login}>
     <h1>登录 DataMark</h1><p>使用管理员创建的账号进入标注平台。</p>

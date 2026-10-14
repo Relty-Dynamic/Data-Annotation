@@ -84,9 +84,15 @@ docker compose --env-file deploy/intranet.env -f deploy/compose.intranet.yaml bu
 
 ### Vercel 公网页面与 S3 服务（尚未接入）
 
-在 S3 接入前，可使用独立的公网待配置服务验证 DNS、HTTPS、前端跨域和 WebSocket：入口为 `backend.public_setup:create_app`，部署文件为 `deploy/compose.public-setup.yaml` 与 `deploy/Caddyfile.public-setup`。此服务没有 NAS 挂载、业务数据库或模拟对象存储；健康接口返回 `mode: public-setup`、`ready: false`、`storage_ready: false`，项目、登录、上传和标注接口明确返回 503，不能据此报告 S3 可用。它与现有 10443 NAS 服务分别运行，Ubuntu 公网入口默认使用 8443（容器内部仍为 443），只连接待配置服务；TLS 使用该 API 域名现有的 Caddy 托管证书目录和 DNS 凭据文件，凭据仅挂载给网关，不写入代码或前端。部署参数为 `DATAMARK_SETUP_IMAGE`、`DATAMARK_PUBLIC_BIND_IP`、`DATAMARK_PUBLIC_PORT`（默认 8443）、`DATAMARK_PUBLIC_API_ORIGIN`（默认 `https://api-annotate.reltydynamic.com:8443`）、`DATAMARK_TLS_DATA`、`DATAMARK_DNS_TOKEN_FILE`，后两项填写服务器上已批准的凭据管理路径。企业网关两层转发均使用 8443 时，Vercel 的 `VITE_DATAMARK_API_ORIGIN` 同步填写带 `:8443` 的 API 地址并重新部署；API 也可显式配置为标准 443 地址，须同时调整宿主机发布端口和网关转发。后续接入真实 S3 时须替换待配置服务为完整业务后端，接入与内网共用的 Ubuntu 账号数据库并配置公网项目和草稿数据，重新做业务验收；账号共享尚未实现；仅填写桶名称不会启用业务功能。
+公网与内网使用同一个 Ubuntu 账号数据库，用户直接用同一套账号密码登录，无需选择账号属于 NAS 或 S3；本机账号保持独立。账号新增、重置密码、停用及权限管理仍在内网进行，公网实时验证同一数据库，重置或停用会使公网旧登录失效。两个入口分别登录，Cookie 不跨主机共享，不要求重新创建账号。账号不存放在 S3。
 
-内网和公网使用同一套标注代码，但按部署配置选择存储：内网服务使用 NAS，公网服务将使用私有 S3。Vercel 继续托管静态页面，Cloudflare 只提供 DNS 解析；当前公网入口使用 `https://api-annotate.reltydynamic.com:8443`。内网和公网后续共用 Ubuntu 上同一个账号数据库，同一账号可登录两个入口；项目和草稿仍须按权限及存储来源隔离，本机独立账号保持不变。此共享账号接入尚未实现，公网业务服务不能挂载 NAS。当前没有真实 S3 存储，也没有可用的公网 S3 业务接口；不要将内网 NAS 服务接到公网域名。先前的 `10443` 路由器端口映射已由管理员关闭，仓库内的 NAS 发布脚本也不再启动旧公网网关。
+在 S3 接入前，公网服务 `backend.public_setup:create_app` 提供共享账号登录、查询登录状态、退出，以及 HTTPS、跨域和 WebSocket；素材及标注业务接口仍返回 503。健康接口保持 `mode: public-setup`、`ready: false`、`storage_ready: false`，共享账号连接成功后 `accounts_ready: true`。登录后页面显示账号已登录及 S3 未配置，不进入尚不可用的工作台，不能据此报告 S3 可用。
+
+部署使用 `deploy/compose.public-setup.yaml`、`deploy/Caddyfile.public-setup` 和 `deploy/Dockerfile.public-setup`，与 10443 NAS 服务分别运行，公网默认 8443（容器内部 443）。`accounts` 服务只连接私有 Docker 网络，不发布端口；通过 `DATAMARK_SHARED_ACCOUNT_STATE` 挂载现有内网 `state/`，仅使用其中的 `auth.sqlite3`，不复制或新建账号库，不提供项目、素材或文件接口。公网 `api` 通过固定内部账号接口访问，自己不挂载账号状态、业务数据库或 NAS 目录。SQLite 的 WAL/SHM 与账号库使用同一持久目录；不得只挂载或复制单个数据库文件。账号服务启动必须找到现有数据库及管理员，缺失时拒绝启动；服务故障时拒绝登录，不回退到另一套账号。
+
+其他部署参数为 `DATAMARK_SETUP_IMAGE`、`DATAMARK_PUBLIC_BIND_IP`、`DATAMARK_PUBLIC_PORT`（默认 8443）、`DATAMARK_PUBLIC_API_ORIGIN`（默认 `https://api-annotate.reltydynamic.com:8443`）、`DATAMARK_TLS_DATA` 和 `DATAMARK_DNS_TOKEN_FILE`。TLS 使用该域名现有的 Caddy 托管目录，DNS 凭据只挂载给网关，不写入代码或前端。企业网关两层转发均使用 8443 时，Vercel 的 `VITE_DATAMARK_API_ORIGIN` 填写带 `:8443` 的 API 地址。生产前端跟踪 `feat/s3-mock`，该分支更新会自动发布正式域名。后续真实 S3 业务后端继续使用此共享账号服务，项目和草稿按权限及存储来源隔离；仅填写桶名称不会启用上传或标注。
+
+内网和公网使用同一套标注代码，但按部署配置选择存储：内网服务使用 NAS，公网服务将使用私有 S3。Vercel 继续托管静态页面，Cloudflare 只提供 DNS 解析；当前公网入口使用 `https://api-annotate.reltydynamic.com:8443`。内网和公网共用 Ubuntu 上同一个账号数据库，同一账号可登录两个入口；项目和草稿仍须按权限及存储来源隔离，本机独立账号保持不变。公网业务服务不能挂载 NAS。当前没有真实 S3 存储，也没有可用的公网 S3 业务接口；不要将内网 NAS 服务接到公网域名。先前的 `10443` 路由器端口映射已由管理员关闭，仓库内的 NAS 发布脚本也不再启动旧公网网关。
 
 本分支的 S3 模拟模式只在本机运行，用于验证选择 `video/` 中的 AVI、采集人和上传人记录、视频压缩、按 `daily/<采集日期>/<月日+采集人>/FPV/` 浏览、标注及写回 `timeline/`。本机上传程序从选中的原位置读取 AVI，压缩后才交给模拟对象存储；原始 AVI 不经网页传到服务端。真实 S3 接入仍需实现私有桶访问、经业务账号授权的对象清单与下载、分片续传、条件版本写回及读回核验。模拟模式的签名链接和测试结果不等于真实 S3 验收。
 

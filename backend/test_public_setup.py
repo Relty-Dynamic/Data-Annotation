@@ -12,6 +12,7 @@ class PublicSetupTests(unittest.TestCase):
     def setUp(self):
         self.environment = patch.dict('os.environ', {
             'DATAMARK_PUBLIC_ORIGIN': 'https://datamark.reltydynamic.com',
+            'DATAMARK_SHARED_ACCOUNTS': '0',
             'DATAMARK_PUBLIC_API_ORIGIN': 'https://api-annotate.reltydynamic.com'})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -66,7 +67,7 @@ class PublicSetupTests(unittest.TestCase):
             with client.websocket_connect(origin.replace('https:', 'wss:') + '/api/browser/connection',
                                            headers={'Origin': 'https://datamark.reltydynamic.com'}) as socket:
                 socket.send_text('keepalive')
-            self.assertEqual(client.post('/api/auth/login', headers={'Origin': origin}).status_code, 503)
+            self.assertEqual(client.post('/api/auth/login', json={'username': 'worker', 'password': 'unused password'}, headers={'Origin': origin}).status_code, 503)
             self.assertEqual(client.post('/api/auth/login', headers={'Origin': 'https://datamark.reltydynamic.com:8443'}).status_code, 403)
         for value in ['https://api.example.com:10443', 'http://api.example.com:8443', 'https://api.example.com:8443/path']:
             with self.assertRaises(ValueError):
