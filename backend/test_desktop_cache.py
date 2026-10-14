@@ -188,5 +188,5 @@ class DesktopNamingTests(unittest.TestCase):
             return 0
         fake=SimpleNamespace(shell32=SimpleNamespace(SHGetKnownFolderPath=known_folder),ole32=SimpleNamespace(CoTaskMemFree=lambda pointer:calls.append('free'),CoInitializeEx=lambda pointer,mode:0,CoUninitialize=lambda:None))
         with patch('backend.desktop_cache.sys.platform','win32'), patch.object(ctypes,'windll',fake,create=True):
-            self.assertIn('OneDrive/Desktop', str(desktop_directory()))
+            self.assertEqual(desktop_directory(), Path('C:/Users/test/OneDrive/Desktop'))
         self.assertEqual(calls,['known-folder','free'])
