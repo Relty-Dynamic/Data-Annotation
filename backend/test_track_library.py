@@ -278,6 +278,60 @@ class LibraryPersistenceTests(unittest.TestCase):
         self.assertEqual(restored["posture"], [])
         self.service.writeback(project["id"])  # Retained files are included in conflict hashes.
 
+    def test_selected_writeback_retains_hidden_annotations_across_instances(self):
+        project = self.initialize()
+        annotations = project["annotations"]
+        annotations["scene"] = [{"id": "hidden", "label": "室内", "start_ms": 0, "end_ms": 1000}]
+        annotations["posture"] = [{"id": "posture", "label": "坐", "start_ms": 0, "end_ms": 1000}]
+        project = self.service.update_draft(project["id"], annotations, project["revision"])
+        self.service.writeback(project["id"])
+        original = (self.source / "timeline/scene.timeline.json").read_bytes()
+        project = self.service.select_library_tracks(project["id"], ["posture"], self.library().list(None), project["revision"])
+        self.service.writeback(project["id"])
+        self.assertEqual((self.source / "timeline/scene.timeline.json").read_bytes(), original)
+        fresh = ProjectService(self.root / "another-instance")
+        fresh.probe = self.service.probe
+        try:
+            reopened = fresh.open_path(str(self.source))
+            self.assertEqual(reopened["selected_tracks"], ["posture"])
+            self.assertEqual(reopened["annotations"]["scene"], project["annotations"]["scene"])
+            reopened = fresh.select_library_tracks(reopened["id"], ["scene", "posture"], self.library().list(None), reopened["revision"])
+            fresh.writeback(reopened["id"])
+            document = json.loads((self.source / "timeline/scene.timeline.json").read_bytes())
+            self.assertEqual(len(document["segments"]), 1)
+            self.assertEqual(document["segments"][0]["id"], "hidden")
+        finally:
+            fresh.sessions.close()
+            fresh.previews.close()
+
+    def test_retained_hidden_axis_restores_its_saved_label_snapshot(self):
+        project = self.initialize()
+        annotations = project["annotations"]
+        annotations["scene"] = [{"id": "old", "label": "室内", "start_ms": 0, "end_ms": 1000}]
+        project = self.service.update_draft(project["id"], annotations, project["revision"])
+        self.service.writeback(project["id"])
+        raw = self.service.load(project["id"])
+        raw["track_labels"]["scene"] = ["新版场景"]
+        raw["selected_tracks"] = ["posture"]
+        self.service.save(raw)
+        self.service.writeback(project["id"])
+        imported, _, _, _, labels = self.service.read_external(self.service.load(project["id"]), include_tracks=True)
+        self.assertEqual(imported["scene"], project["annotations"]["scene"])
+        self.assertEqual(labels["scene"], project["track_labels"]["scene"])
+
+    def test_retained_hidden_file_still_checks_source_identity(self):
+        project = self.initialize()
+        self.service.writeback(project["id"])
+        project = self.service.select_library_tracks(project["id"], ["posture"], self.library().list(None), project["revision"])
+        self.service.writeback(project["id"])
+        path = self.source / "timeline/scene.timeline.json"
+        document = json.loads(path.read_bytes())
+        document["timebase"]["source_fingerprint"] = "0" * 64
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaises(HTTPException) as error:
+            self.service.read_external(self.service.load(project["id"]))
+        self.assertEqual(error.exception.status_code, 409)
+
     def test_custom_only_writeback_keeps_hidden_open_events_in_draft(self):
         project = self.initialize()
         project = self.service.add_custom_track(project["id"], "饮食", "event", [], project["revision"], json_name="food")
@@ -310,12 +364,18 @@ class LibraryPersistenceTests(unittest.TestCase):
         self.assertFalse((self.source / "timeline").exists())
         self.assertIsNone(self.service.load(project["id"]).get("last_writeback"))
 
-    def test_missing_selected_file_still_rejects_partial_batch(self):
+    def test_missing_selected_file_is_blank_without_losing_present_annotations(self):
         project = self.initialize()
+        annotations = project["annotations"]
+        annotations["scene"] = [{"id": "scene", "label": "室内", "start_ms": 0, "end_ms": 1000}]
+        annotations["posture"] = [{"id": "posture", "label": "坐", "start_ms": 0, "end_ms": 1000}]
+        project = self.service.update_draft(project["id"], annotations, project["revision"])
         self.service.writeback(project["id"])
         (self.source / "timeline" / "posture.timeline.json").unlink()
-        with self.assertRaises(HTTPException):
-            self.service.read_external(self.service.load(project["id"]))
+        imported, hashes = self.service.read_external(self.service.load(project["id"]))
+        self.assertEqual(imported["posture"], [])
+        self.assertIsNone(hashes["posture"])
+        self.assertEqual(imported["scene"], project["annotations"]["scene"])
 
     def test_legacy_buttons_adopt_library_and_old_annotation_notes_round_trip(self):
         project = self.service.open_path(str(self.source))

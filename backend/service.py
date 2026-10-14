@@ -1377,21 +1377,21 @@ class ProjectService:
             return (None, hashes, [], list(AXES), copy.deepcopy(DEFAULT_TRACK_LABELS)) if include_tracks else (None, hashes)
         documents = {}
         directory = self.external_directory(Path(source))
-        paths = {axis: directory / FILENAMES[axis] for axis in AXES}
-        for path in directory.glob("*.timeline.json"):
-            axis = path.name.removesuffix(".timeline.json")
-            if axis not in AXES and valid_custom_axis(axis):
-                paths[axis] = path
-        for axis, path in paths.items():
+        for path in sorted(directory.glob('*.timeline.json')):
+            axis = path.name.removesuffix('.timeline.json')
+            if axis not in AXES and not valid_custom_axis(axis):
+                raise HTTPException(409, "原目录包含无法识别的时间轴文件。")
             try:
+                if path.is_symlink() or not path.is_file():
+                    raise HTTPException(409, "时间轴文件不是普通文件。")
                 if path.exists():
-                    if path.is_symlink() or not path.is_file():
-                        raise HTTPException(409, "时间轴文件不是普通文件。")
                     raw = path.read_bytes()
                     if len(raw) > 30 * 1024 * 1024:
                         raise HTTPException(422, "已有标注 JSON 过大，无法加载。")
                     hashes[axis] = digest(raw)
                     documents[axis] = json.loads(raw.decode("utf-8-sig"))
+                    if not isinstance(documents[axis], dict) or not isinstance(documents[axis].get('timebase'), dict):
+                        raise ValueError()
             except (OSError, ValueError):
                 raise HTTPException(422, f"无法读取已有标注文件 {path.name}。")
         if not documents:
@@ -1408,28 +1408,65 @@ class ProjectService:
             written = selected_tracks(available)
             if not written or written != metadata.get("selected_tracks"):
                 raise HTTPException(409, "写回文件中的时间轴选择不一致。")
-            if (any(axis not in documents or documents[axis].get("save_id") != latest.get("save_id")
-                    or documents[axis]["timebase"].get("written_tracks") != written for axis in written)):
+            if (any(axis in documents and (documents[axis].get("save_id") != latest.get("save_id")
+                    or documents[axis]["timebase"].get("written_tracks") != written) for axis in written)):
                 raise HTTPException(409, "已选择的时间轴文件不齐全或不属于同一写回批次。")
-            # Older unselected files remain untouched; this batch explicitly
-            # declares which files belong to the current project selection.
-            documents = {axis: documents[axis] for axis in written}
-        elif (set(documents) & set(AXES)) not in (set(LEGACY_AXES), set(AXES)):
-            raise HTTPException(409, "原目录标注文件不齐全。请恢复同一保存批次的完整文件后重新打开。")
+            # Keep earlier, unselected axis files in the import. Their own
+            # source/time/label checks below still apply; selection only hides.
         tracks = validate_custom_tracks(metadata.get("custom_tracks", []))
         enabled_fixed = validate_fixed_tracks(metadata.get("fixed_tracks", list(AXES)))
         imported_labels = validate_track_labels(metadata.get("track_labels", LEGACY_TRACK_LABELS))
-        if any(document.get("timebase", {}).get("custom_tracks", []) != tracks for document in documents.values()):
-            raise HTTPException(409, "标注文件中的自定义时间轴清单不一致。")
-        if any(document.get("timebase", {}).get("fixed_tracks", list(AXES)) != enabled_fixed for document in documents.values()):
-            raise HTTPException(409, "标注文件中的固定时间轴清单不一致。")
-        if any(document.get("timebase", {}).get("track_labels", LEGACY_TRACK_LABELS) != imported_labels for document in documents.values()):
-            raise HTTPException(409, "标注文件中的标签清单不一致。")
+        # Each saved batch must agree internally. Different batches are valid
+        # only when the newest selected write deliberately retained other axes.
+        batches = {}
+        for axis, document in documents.items():
+            saved = document["timebase"]
+            signature = {key: saved.get(key, fallback) for key, fallback in (
+                ("custom_tracks", []), ("fixed_tracks", list(AXES)),
+                ("track_labels", LEGACY_TRACK_LABELS), ("selected_tracks", None),
+                ("written_tracks", None), ("track_names", {}))}
+            batch = document.get("save_id")
+            if not isinstance(batch, str) or not batch:
+                raise HTTPException(409, "标注 JSON 的保存批次无效。")
+            if batch in batches and batches[batch] != signature:
+                raise HTTPException(409, "同一保存批次的时间轴定义或选择不一致。")
+            batches[batch] = signature
+            own_fixed = validate_fixed_tracks(signature["fixed_tracks"])
+            own_labels = validate_track_labels(signature["track_labels"])
+            own_custom = validate_custom_tracks(signature["custom_tracks"])
+            own_names = signature["track_names"]
+            if not isinstance(own_names, dict) or any(key not in AXES for key in own_names):
+                raise HTTPException(422, "预置时间轴名称格式无效。")
+            for value in own_names.values():
+                validate_project_name(value)
+            if signature["selected_tracks"] is not None:
+                selected_tracks({"fixed_tracks": own_fixed, "custom_tracks": own_custom,
+                                 "selected_tracks": signature["selected_tracks"]})
+            own_written = signature["written_tracks"]
+            if own_written is not None:
+                checked = selected_tracks({"fixed_tracks": own_fixed, "custom_tracks": own_custom,
+                                           "selected_tracks": own_written})
+                if (document.get("schema_version") != 3 or not checked
+                        or checked != signature["selected_tracks"] or axis not in checked):
+                    raise HTTPException(409, "写回文件中的时间轴选择不一致。")
+            if batch != latest.get("save_id"):
+                if written is None or axis in written:
+                    raise HTTPException(409, "标注 JSON 混用了非选轴写回的保存批次。")
+                # Restore the saved definition of each retained axis as well.
+                if axis in AXES:
+                    imported_labels[axis] = own_labels[axis]
+                    if axis in own_fixed:
+                        enabled_fixed = [key for key in AXES if key in enabled_fixed or key == axis]
+                else:
+                    own_track = next((track for track in own_custom if track["id"] == axis), None)
+                    if own_track is None:
+                        raise HTTPException(409, "自定义时间轴文件不在项目轴清单中。")
+                    tracks = [track for track in tracks if track["id"] != axis] + [own_track]
+        tracks = validate_custom_tracks(tracks)
         expected_custom = {track["id"] for track in tracks}
-        actual_custom = {path.name.removesuffix(".timeline.json") for path in directory.glob("*.timeline.json")
-                         if path.name not in FILENAMES.values()}
-        if written is None and actual_custom != expected_custom:
-            raise HTTPException(409, "自定义时间轴文件不齐全或包含其他保存批次。")
+        actual_custom = set(documents) - set(AXES)
+        if not actual_custom <= expected_custom:
+            raise HTTPException(409, "自定义时间轴文件不在项目轴清单中。")
         batch_ids, versions = set(), set()
         annotations = empty_annotations()
         annotations.update({axis: [] for axis in expected_custom})
@@ -1464,8 +1501,6 @@ class ProjectService:
                     raise HTTPException(409, "原目录标注对应的素材与当前视频不一致；已停止加载，避免时间轴错配。")
                 if document["timebase"]["unit"] != "ms" or document["timebase"]["origin"] != "recording_datetime" or document["timebase"]["recording_start"] != project["recording_start"] or document["timebase"]["duration_ms"] != project["duration_ms"]:
                     raise ValueError()
-                if document["timebase"].get("custom_tracks", []) != tracks:
-                    raise HTTPException(409, "标注文件中的自定义时间轴清单不一致。")
                 if axis in expected_custom:
                     track = next(item for item in tracks if item["id"] == axis)
                     if document.get("axis_name") != track["name"] or document.get("axis_mode") != track["mode"]:
@@ -1473,25 +1508,28 @@ class ProjectService:
                 batch_ids.add(document["save_id"])
                 lookup = {item["id"]: item["name"] for item in document["labels"]}
                 annotations[axis] = [{"id": item["id"], "label": lookup[item["label_id"]], "kind": item.get("kind", "interval"), "start_ms": item["start_ms"], "end_ms": item["end_ms"], **({"lane": item["lane"]} if "lane" in item else {}), **({"mode": item.get("mode", "state")} if axis == "category" else {}), **({key: item[key] for key in ("created_by", "created_by_name", "created_at", "updated_by", "updated_by_name", "updated_at") if key in item} if version == 3 else {})} for item in document["segments"]]
-            if len(batch_ids) != 1 or not next(iter(batch_ids)) or len(versions) != 1:
+            if (not all(batch_ids) or len(versions) != 1
+                    or (len(batch_ids) != 1 and written is None)):
                 raise HTTPException(409, "标注 JSON 不属于同一保存批次或格式版本。请恢复一致的文件后再打开。")
             version = next(iter(versions))
-            expected_axes = set(written) if written is not None else set(LEGACY_AXES if version == 1 else AXES) | expected_custom
-            if set(documents) != expected_axes or (written is not None and version != 3):
-                raise HTTPException(409, "原目录标注文件不齐全或格式版本不一致。旧版须有三个文件，新版须有四个文件。")
-            # Every saved axis may contain intentional unannotated intervals.
+            expected_axes = LEGACY_AXES if version == 1 else AXES
+            if not set(documents) <= set(expected_axes) | expected_custom:
+                raise HTTPException(409, "原目录标注文件与格式版本不一致。")
+            # Written-back files may preserve unannotated intervals on every axis.
+            # Validate their contents without imposing the stricter export rule.
             cleaned = validate_annotations(annotations, project["duration_ms"], final=True, videos=active_videos(selected),
                                            require_coverage=False,
                                            custom_tracks=tracks, enabled_fixed_tracks=enabled_fixed, fixed_label_options=imported_labels)
             project['_skipped_video_names'] = names
-            if any(document["timebase"].get("selected_tracks") != metadata.get("selected_tracks")
-                   or document["timebase"].get("track_names", {}) != metadata.get("track_names", {})
-                   for document in documents.values()):
-                raise HTTPException(409, "标注文件中的时间轴选择或名称不一致。")
             if "selected_tracks" in metadata:
                 selected_tracks({"fixed_tracks": enabled_fixed, "custom_tracks": tracks,
                                  "selected_tracks": metadata["selected_tracks"]})
-            track_names = metadata.get("track_names", {})
+            track_names = dict(metadata.get("track_names", {}))
+            for axis, document in documents.items():
+                if axis in AXES and document.get("save_id") != latest.get("save_id"):
+                    saved_name = document["timebase"].get("track_names", {}).get(axis)
+                    if saved_name is not None:
+                        track_names[axis] = saved_name
             if not isinstance(track_names, dict) or any(axis not in AXES for axis in track_names):
                 raise HTTPException(422, "预置时间轴名称格式无效。")
             project["_imported_track_metadata"] = {
@@ -1512,6 +1550,48 @@ class ProjectService:
             project["selected_tracks"] = [axis for axis in project["selected_tracks"] if axis in available]
         if "track_names" in metadata:
             project["track_names"] = metadata["track_names"]
+
+    def relocated_fpv_project(self, previous: dict, fresh: dict) -> dict | None:
+        """Recognize a root-to-FPV move without accepting changed media or timing."""
+        root = Path(previous['source_dir'])
+        if fresh['source_dir'] != previous['source_dir'] or len(previous['videos']) != len(fresh['videos']):
+            return None
+        normalized = copy.deepcopy(fresh)
+        for old, new in zip(previous['videos'], normalized['videos']):
+            old_source = previous['_sources'][old['id']]
+            new_source = normalized['_sources'][new['id']]
+            old_path, new_path = Path(old_source['path']), Path(new_source['path'])
+            if (old['name'] != new['name'] or old_path != root / old['name']
+                    or new_path.parent.parent != root or new_path.parent.name.casefold() != 'fpv'
+                    or new_path.name != old_path.name or old_path.is_symlink()
+                    or new_path.is_symlink() or new_path.parent.is_symlink()
+                    or any(old_source['stamp'].get(key) != new_source['stamp'].get(key)
+                           for key in ('size', 'sample_sha256'))):
+                return None
+            # Copying may change mtime; compare recorded content identity and
+            # all timeline fields without treating that metadata as new media.
+            new['relative_path'] = old['relative_path']
+            new_source['stamp'] = copy.deepcopy(old_source['stamp'])
+        items = [{**video, 'id': f'v{index + 1:04d}', 'url': None, 'thumbnail_url': None,
+                  'stamp': normalized['_sources'][video['id']]['stamp']}
+                 for index, video in enumerate(normalized['videos'])]
+        if digest(document_bytes(items)) != self.current_source_fingerprint(previous):
+            return None
+        project = copy.deepcopy(previous)
+        for old, new in zip(project['videos'], fresh['videos']):
+            source = project['_sources'][old['id']]
+            # Existing project-local media retain their verified cache identity.
+            source.setdefault('cache_identity_path', source['path'])
+            source.setdefault('cache_identity_stamp', copy.deepcopy(source['stamp']))
+            source['path'] = fresh['_sources'][new['id']]['path']
+            source['stamp'] = copy.deepcopy(fresh['_sources'][new['id']]['stamp'])
+            # A source-adjacent cache at the old location must not be claimed as
+            # belonging to the new directory. Its files remain untouched.
+            source.pop('cache_directory', None)
+            old['relative_path'] = new['relative_path']
+        project['_source_fingerprint_aliases'] = list(dict.fromkeys([
+            *project.get('_source_fingerprint_aliases', []), fresh['source_fingerprint']]))
+        return project
 
     def open_path(self, raw_path: str, name: str | None = None, *, allowed_project_ids: set[str] | None = None,
                   claim_mode: str | None = None, claim_hashes: dict | None = None) -> dict:
@@ -1541,6 +1621,8 @@ class ProjectService:
             with self.connection() as con:
                 row = con.execute("SELECT document FROM projects WHERE source_key=? ORDER BY updated_at DESC LIMIT 1", (source_key,)).fetchone()
             previous = json.loads(row[0]) if row else None
+            original_project = previous
+            relocated = False
             if previous and allowed_project_ids is not None and previous["id"] not in allowed_project_ids:
                 raise HTTPException(403, "该采集目录已由其他标注员领取。")
             if self.source_overlap(paths, previous["id"] if previous else None):
@@ -1556,7 +1638,10 @@ class ProjectService:
                 fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None,
                                     default_fixed_tracks=["scene", "posture", "category"])
                 if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
-                    raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
+                    moved = self.relocated_fpv_project(previous, fresh)
+                    if moved is None:
+                        raise HTTPException(409, "该采集的视频顺序、时长或文件已改变。本机草稿仍保留，未将旧标注套用到新素材。请恢复原素材，或使用其他目录创建项目。")
+                    previous, relocated = moved, True
             if claim_mode == "restart":
                 hashes = self.current_external_hashes(source_dir)
                 if claim_hashes is not None and hashes != claim_hashes:
@@ -1568,10 +1653,16 @@ class ProjectService:
                 if claim_hashes is not None and hashes != claim_hashes:
                     raise HTTPException(409, "NAS 时间轴文件在领取期间发生变化，请重新选择目录。")
             if previous:
+                if relocated:
+                    # Only commit the relocation after all external JSON checks
+                    # succeed; archive the original paths and draft for recovery.
+                    self.sessions.invalidate(previous['id'])
+                    relocation_recovery_id = self.archive_project_document(original_project)
+                    previous.update(revision=previous['revision'] + 1, updated_at=now())
                 preserved_alignment_warnings = alignment_warnings(previous["videos"])
                 previous["warnings"] = preserved_alignment_warnings
                 if claim_mode in ("continue", "restart"):
-                    recovery_id = self.archive_project_document(previous)
+                    recovery_id = relocation_recovery_id if relocated else self.archive_project_document(previous)
                     previous["annotations"] = imported or empty_annotations()
                     previous["custom_tracks"] = imported_tracks
                     previous["fixed_tracks"] = imported_fixed
@@ -1602,7 +1693,7 @@ class ProjectService:
                         previous["warnings"] = preserved_alignment_warnings
                 previous.pop("_imported_track_metadata", None)
                 self.save(previous)
-                return self.public(previous)
+                return {**self.public(previous), **({'recovery_id': relocation_recovery_id} if relocated else {})}
             # For directory imports, the selected folder is the default project name.
             # Keep the marker so a later storage migration does not replace it with a date.
             fresh.update(name=name if name is not None else validate_project_name(path.name), _custom_name=True)
