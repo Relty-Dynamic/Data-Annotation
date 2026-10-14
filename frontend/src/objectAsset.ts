@@ -2,7 +2,7 @@ import {authFetch} from './auth.ts';
 import {apiOrigin} from './apiOrigin.ts';
 
 export function validAssetUrl(value: string): boolean {
-  if (value.startsWith('/api/session-')) return true;
+  if (value.startsWith('/api/session-') || /^\/api\/tasks\/items\/[0-9a-f]{32}\/workspace\/session-(media|thumbnails|storyboards)\//.test(value)) return true;
   try {
     const url = new URL(value);
     const expected = apiOrigin || (typeof window === 'undefined' ? '' : window.location.origin);

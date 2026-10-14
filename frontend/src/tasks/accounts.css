@@ -1,0 +1,54 @@
+.account-backdrop{z-index:1200}
+.account-panel{width:min(100%,1020px);color:#dce5ed;box-shadow:0 25px 100px #0007}
+.account-panel h2,.account-role-dialog h2{font-size:18px;font-weight:500}
+.account-create-form{padding:16px;background:#161d24;border:1px solid #303b46;border-radius:8px;align-items:start}
+.account-create-form input{padding:9px 11px}
+.account-role-field{border:0;margin:0;padding:0;min-width:0}
+.account-role-field legend{padding:0;margin-bottom:7px;color:#aab8c4}
+.account-role-choices{display:flex;gap:7px;flex-wrap:wrap}
+.account-panel .account-role-choices label,.account-role-dialog .account-role-choices label{display:flex;align-items:center;gap:7px;padding:9px 11px;background:#202a34;border:1px solid #3b4855;border-radius:6px;color:#aab8c4;cursor:pointer}
+.account-panel .account-role-choices label.selected,.account-role-dialog .account-role-choices label.selected{background:#203b35;border-color:#568d80;color:#bde9dc}
+.account-role-choices input{width:13px;height:13px;margin:0;accent-color:var(--accent);outline-offset:2px}
+.account-create-actions{grid-column:1/-1;display:flex;justify-content:flex-end}
+.account-table{margin-top:10px;overflow-x:auto;border:1px solid #343e49;border-radius:8px}
+.account-table table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}
+.account-table th{padding:11px 12px;font-weight:500;color:#99adbb;background:#162029;white-space:nowrap}
+.account-table td{padding:11px 12px;border-top:1px solid #2d3944;vertical-align:middle}
+.account-table tbody tr:hover{background:#202a33}
+.account-table td:first-child{white-space:nowrap}
+.account-email{overflow-wrap:anywhere;color:#a5b7c5;min-width:150px}
+.account-inactive{display:block;font-size:10px;color:#929ba5;margin-top:4px}
+.account-role-trigger{padding:5px 0;color:#b3d7cf;font-size:12px;white-space:nowrap;gap:5px;border-radius:4px;text-align:left}
+.account-role-trigger svg{color:#78998f}
+.account-role-trigger:hover:not(:disabled){color:#defaf0}
+.account-panel .account-upload-select{width:auto;min-width:86px;padding:5px 4px;border:1px solid transparent;background:transparent;color:#8798a6;font-size:11px;cursor:pointer;border-radius:4px}
+.account-panel .account-upload-select.enabled{color:#9fd4bf}.account-panel .account-upload-select:hover:not(:disabled){background:#25342f;border-color:#405b51}.account-panel .account-upload-select:disabled{opacity:.65;cursor:default}.account-panel .account-upload-select option{background:#1b222a;color:#dce5ed}
+.account-row-actions{display:flex;gap:5px;flex-wrap:wrap;min-width:140px}
+.account-row-actions button{padding:5px 7px;font-size:11px;white-space:nowrap}
+.account-message{margin-top:14px;padding:10px 12px;border:1px solid #35444d;border-radius:6px;line-height:1.6;font-size:12px}
+.account-message.error{background:#332426;border-color:#664347;color:#e0acaa}.account-message.success{background:#1b312a;border-color:#325549;color:#a1d2bd}
+.account-reset{padding-top:4px}.account-reset label{display:grid;gap:7px;max-width:320px;color:#aab8c4}.account-reset .password-actions{margin-top:10px}
+.account-role-backdrop{z-index:1300;background:#080d13a6}
+.account-role-dialog{width:min(100%,380px);color:#dce5ed;box-shadow:0 25px 100px #0007}
+.account-role-dialog .account-role-choices{margin:24px 0 14px}
+.account-role-dialog .account-role-choices label{flex:1;justify-content:center;padding:10px 8px;font-size:12px;white-space:nowrap}
+.account-role-hint{font-size:11px;color:#8c9fac;line-height:1.6;margin-bottom:20px}
+.account-role-dialog .account-message{margin-bottom:14px}
+@media(max-width:650px){.account-panel{padding:18px}.account-create-form{grid-template-columns:1fr}.account-table{margin-inline:-4px}.account-table th,.account-table td{padding:10px 8px}.account-role-dialog{padding:22px}}
+
+.account-panel .account-delete,.account-role-dialog .account-delete{color:#dfa6a1;border-color:#684649;background:#332628}.account-delete-target{margin:18px 0 12px;line-height:1.8;overflow-wrap:anywhere;color:#cad8df}
+/* More specific than the legacy admin modal so its 720px limit cannot win. */
+.modal-backdrop.account-backdrop{padding:20px}
+.admin-panel.account-panel{width:min(100%,1480px);max-height:calc(100dvh - 40px);min-width:0;flex:0 1 1480px;overflow:auto;scrollbar-width:thin;scrollbar-color:#455563 transparent}
+.account-panel .account-table table{min-width:960px;table-layout:fixed}
+.account-panel .account-table th:nth-child(1){width:12%}.account-panel .account-table th:nth-child(2){width:28%}.account-panel .account-table th:nth-child(3){width:20%}.account-panel .account-table th:nth-child(4){width:12%}.account-panel .account-table th:nth-child(5){width:28%}
+.account-panel .account-role-trigger{max-width:100%;white-space:normal;line-height:1.6}.account-panel .account-role-trigger svg{flex-shrink:0}
+.account-panel .account-row-actions{min-width:0;gap:6px}.account-panel .account-row-actions button{flex-shrink:0}
+@media(max-width:650px){.modal-backdrop.account-backdrop{padding:12px}.admin-panel.account-panel{padding:18px;max-height:calc(100dvh - 24px)}}
+
+.account-panel .account-filters{display:flex;align-items:end;gap:12px;flex-wrap:wrap;margin:12px 0 14px}
+.account-panel .account-filters label{display:grid;gap:7px;color:#aab8c4;min-width:0;font-size:12px}
+.account-panel .account-name-search{flex:0 1 340px}.account-name-search>div{position:relative}.account-name-search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:#7f99a8;pointer-events:none}
+.account-panel .account-name-search input{padding-left:34px}.account-panel .account-filters select{min-width:150px}
+.account-filter-count{margin-left:auto;align-self:center;color:#8fa4b3;font-size:12px;white-space:nowrap}.account-panel .account-empty{text-align:center;padding:28px;color:#8fa4b3;white-space:normal}
+@media(max-width:650px){.account-panel .account-name-search{flex:1 1 100%}.account-filter-count{margin-left:0}}

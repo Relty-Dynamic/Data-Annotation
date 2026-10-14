@@ -12,6 +12,19 @@ const row = (id, start_ms, end_ms, lane = 0, extra = {}) => ({
 const actorA = {created_by: 'a', created_by_name: '甲', created_at: '2026-10-13T10:00:00Z'};
 const actorB = {created_by: 'b', created_by_name: '乙', created_at: '2026-10-13T10:01:00Z'};
 
+test('task fields are saved meaning and adjacent differing task fields stay separate', () => {
+  const segment = row('first', 0, 3000, 0, {transport_type: 'car', needs_review: true, review_reason: 'uncertain'});
+  const original = {posture: [segment]};
+  for (const patch of [{transport_type: 'bus'}, {needs_review: false}, {review_reason: 'changed'}]) {
+    assert.equal(annotationsEqual(original, {posture: [{...segment, ...patch}]}), false);
+    const merged = normalizeStateSeams({posture: [segment, {...segment, id: 'next', start_ms: 3000, end_ms: 6000, ...patch}]});
+    assert.equal(merged.posture.length, 2);
+  }
+  const merged = normalizeStateSeams({posture: [segment, {...segment, id: 'next', start_ms: 3000, end_ms: 6000}]});
+  assert.equal(merged.posture.length, 1);
+  assert.equal(merged.posture[0].review_reason, 'uncertain');
+});
+
 test('every interval axis merges adjacent saved records and retains the newest authenticated contributor', () => {
   const axes = ['scene', 'posture', 'category', 'habit', 'weather', 'sound'];
   const annotations = Object.fromEntries(axes.map(axis => [axis, [

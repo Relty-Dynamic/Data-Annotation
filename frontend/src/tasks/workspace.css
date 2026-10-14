@@ -1,0 +1,25 @@
+/* Task mode retains the common workbench and removes unrelated project actions. */
+[data-task-workspace="true"] .project-picker,
+[data-task-workspace="true"] .project-actions,
+[data-task-workspace="true"] .output-actions,
+[data-task-workspace="true"] .cloud-account-button { display:none; }
+[data-task-workspace="true"] .project-switcher,
+[data-task-workspace="true"] .new-project-action,
+[data-task-workspace="true"] .supplement-action,
+[data-task-workspace="true"] .project-output-actions,
+[data-task-workspace="true"] .add-custom-track {display:none;}
+[data-task-workspace="true"] .project-output-actions,
+[data-task-workspace="true"] .project-switcher,
+[data-task-workspace="true"] .new-project-action,
+[data-task-workspace="true"] .supplement-action,
+[data-task-workspace="true"] .add-custom-track,
+[data-task-workspace="true"] [hidden] {display:none !important;}
+.task-workspace-bar {display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid #35505b;background:#152832;}
+.task-workspace-bar span {flex:1;min-width:200px;}
+.task-fields {padding:14px;border:1px solid #35505b;border-radius:12px;background:#152832;margin-top:12px;}
+.task-fields fieldset {border:1px solid #35505b;border-radius:8px;margin-top:12px;padding:12px;}
+.task-fields label {display:flex;align-items:center;gap:8px;margin-top:10px;}
+.task-fields input[type="checkbox"] {appearance:auto;width:18px;height:18px;}
+.task-fields input:not([type="checkbox"]),.task-fields select {max-width:100%;min-width:0;flex:1;}
+
+.task-rework-notes{padding:12px 18px;background:#1d2d39;border-bottom:1px solid #35505b;color:#b4d0df}.task-rework-notes summary{cursor:pointer}.task-rework-notes button{display:flex;margin-top:8px;text-align:left;max-width:100%;white-space:normal}

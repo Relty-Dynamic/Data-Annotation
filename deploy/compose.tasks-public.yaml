@@ -1,0 +1,19 @@
+# Optional overlay for the public host only. Requires existing private directories.
+# docker compose --env-file <approved-public-env> -f deploy/compose.public-setup.yaml -f deploy/compose.tasks-public.yaml up -d
+services:
+  api:
+    environment:
+      DATAMARK_TASKS_ENABLED: "1"
+      DATAMARK_TASKS_STATE: /task-state
+      DATAMARK_TASKS_ARTIFACTS: /task-artifacts
+    volumes:
+      - type: bind
+        source: ${DATAMARK_TASK_STATE_DIR:?Existing public task state directory is required}
+        target: /task-state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_TASK_ARTIFACT_DIR:?Existing public task artifact directory is required}
+        target: /task-artifacts
+        bind:
+          create_host_path: false

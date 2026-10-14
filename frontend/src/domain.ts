@@ -11,6 +11,9 @@ export interface Segment {
   mode?: 'state' | 'overlay';
   /** Main axis is 0; positive values identify reusable child axes. */
   lane?: number;
+  transport_type?: string;
+  needs_review?: boolean;
+  review_reason?: string;
   created_by?: string;
   created_by_name?: string;
   created_at?: string;
@@ -319,6 +322,9 @@ export function annotationsEqual(left: Project['annotations'], right: Project['a
     start_ms: segment.start_ms,
     end_ms: segment.end_ms,
     lane: segment.lane,
+    transport_type: segment.transport_type,
+    needs_review: segment.needs_review,
+    review_reason: segment.review_reason,
   }))).sort((a, b) => a.start_ms - b.start_ms || compareIds(a.id, b.id))]);
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
@@ -379,6 +385,8 @@ function mergeTouchingStates(segments: Segment[], acrossLegacySeam?: (left: Segm
   for (const segment of orderedCopies(segments).sort((a, b) => (a.lane ?? 0) - (b.lane ?? 0) || a.start_ms - b.start_ms || compareIds(a.id, b.id))) {
     const previous = result[result.length - 1];
     if (previous && previous.lane === segment.lane && previous.label === segment.label &&
+        previous.transport_type === segment.transport_type && previous.needs_review === segment.needs_review &&
+        previous.review_reason === segment.review_reason &&
         (previous.mode ?? 'state') === (segment.mode ?? 'state') && !isPointSegment(previous) && !isPointSegment(segment) &&
         (previous.end_ms === segment.start_ms || acrossLegacySeam?.(previous, segment))) {
       mergeAttribution(previous, segment);

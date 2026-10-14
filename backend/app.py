@@ -159,7 +159,7 @@ class SkipFailedRequest(DeleteProjectRequest):
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=120)
+    username: str = Field(min_length=1, max_length=254)
     password: str = Field(min_length=1, max_length=1024)
 
 
@@ -281,6 +281,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     track_library = TrackLibrary(auth)
     local_reports = LocalReportStore(auth, nas_source_root if configured_origin and not mock_mode else None)
     cloud_mirror = CloudMirror() if not configured_origin and not mock_mode else None
+    from .tasks.routes import enabled as tasks_enabled, install as install_tasks
+    if tasks_enabled() and not auth_required:
+        raise ValueError('Task management requires authenticated accounts')
+    task_workspaces = None
     lifetime = BrowserLifetime(on_idle)
 
     def require_nas_source(value: str) -> None:
@@ -319,6 +323,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         finally:
             await lifetime.close()
             service.sessions.close()
+            if task_workspaces:
+                task_workspaces.close()
             service.previews.close()
             if service.remote:
                 service.remote.close()
@@ -337,6 +343,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.middleware("http")
     async def local_access(request: Request, call_next):
         path = request.url.path
+        if path.startswith('/api/tasks/') and not tasks_enabled():
+            return JSONResponse(status_code=404, content={'detail': '任务管理未启用。'})
         if hybrid_nas_root:
             try:
                 local_client = bool(request.client and ipaddress.ip_address(request.client.host).is_loopback)
@@ -411,6 +419,8 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.get("/api/health")
     def health():
         capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "account-login", "account-track-library", "subaxis-annotations", "selected-track-writeback"]
+        if task_workspaces:
+            capabilities.append('task-management')
         if service.desktop_cache.enabled:
             capabilities.append("desktop-playback-cache")
         if mock_mode:
@@ -703,7 +713,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         state = service.inspect_source_claim(path)
         previous = state["previous"]
         owner_id = auth.assignment(previous["id"]) if previous else None
-        owner = next((item for item in auth.list_users() if item["id"] == owner_id), None) if owner_id else None
+        owner = next((item for item in auth.list_users(include_deleted=True) if item["id"] == owner_id), None) if owner_id else None
         takeover = bool(user and user["role"] == "annotator" and owner_id and owner_id != user["id"])
         payload = {"source": str(state["source"]), "project_id": previous["id"] if previous else None,
                    "revision": previous["revision"] if previous else None, "owner_id": owner_id,
@@ -1123,6 +1133,49 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         if mock_s3 and service.load(project_id).get("_mock_s3"):
             raise HTTPException(404, "mock 图片只通过签名对象地址提供。")
         return FileResponse(service.media(project_id, video_id, thumbnail=True), media_type="image/jpeg")
+
+    if tasks_enabled():
+        from .tasks.storage import ProjectMedia
+        from .tasks.accounts import LocalAccounts
+
+        def task_source_tools(user, action, body, request):
+            from pydantic import ValidationError
+            def parsed(model):
+                try:
+                    return model.model_validate(body)
+                except ValidationError:
+                    raise HTTPException(422, '素材选择信息格式不正确，请重新选择视频或目录。')
+            if action == 'capabilities':
+                return {'backend': active_storage,
+                        'can_pick': native_picker_available() and not configured_origin and not mock_mode,
+                        'can_browse': active_storage in ('nas', 's3-mock')}
+            if action == 'browse':
+                return storage_sources(request, body.get('path'), body.get('page', 0))
+            if action == 'pick':
+                return local_files(parsed(PickFilesRequest))
+            if action == 'inspect':
+                return inspect_source_claim(parsed(OpenRequest), request)
+            if action == 'import':
+                if 'paths' in body:
+                    selected_files = parsed(FilesRequest)
+                    with service.lock:
+                        if service.source_overlap([Path(value).expanduser().resolve() for value in selected_files.paths]):
+                            raise HTTPException(409, '所选视频已导入，请从现有素材中登记，不要重复导入。')
+                        return open_files(selected_files, request)
+                selected = parsed(OpenRequest)
+                if active_storage == 'local' and Path(selected.path).expanduser().is_file():
+                    with service.lock:
+                        if service.source_overlap([Path(selected.path).expanduser().resolve()]):
+                            raise HTTPException(409, '所选视频已导入，请从现有素材中登记，不要重复导入。')
+                        return open_project(selected, request)
+                return open_project(selected, request) if active_storage == 'local' else open_storage_project(selected, request)
+            raise HTTPException(404, '素材操作不存在。')
+
+        task_workspaces = install_tasks(app, lambda request: request.state.user,
+                                       lambda request: auth.list_users(include_deleted=True),
+                                       ProjectMedia(service, active_storage, auth.allowed),
+                                       lambda user, request: track_library.list(user['id']),
+                                       accounts=LocalAccounts(auth), source_tools=task_source_tools)
 
     @app.api_route("/api/{unknown_path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
     def missing_api(unknown_path: str):
