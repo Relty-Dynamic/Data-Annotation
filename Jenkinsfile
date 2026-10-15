@@ -28,7 +28,8 @@ pipeline {
                 sh '''#!/bin/sh
                     set -eu
                     tag="$(git rev-parse HEAD)"
-                    docker build -f deploy/Dockerfile.web -t "datamark-web:$tag" .
+                    # Use the HTTPS mirror on this Ubuntu node; leave host pip settings untouched.
+                    docker build --build-arg DATAMARK_PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple -f deploy/Dockerfile.web -t "datamark-web:$tag" .
                     docker run --rm --network none \
                         --tmpfs /app/.tmp:rw,uid=1000,gid=1000,mode=0700 \
                         --tmpfs /app/.local:rw,uid=1000,gid=1000,mode=0700 \

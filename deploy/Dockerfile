@@ -16,8 +16,12 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY requirements.lock.txt /app/requirements.lock.txt
-RUN timeout --signal=TERM --kill-after=10s 600s /opt/venv/bin/python -m pip install \
-    --no-cache-dir --timeout 30 --retries 2 --progress-bar off -r /app/requirements.lock.txt
+ARG DATAMARK_PYPI_INDEX=https://pypi.org/simple
+RUN --mount=type=cache,id=datamark-pip,target=/root/.cache/pip,sharing=locked \
+    timeout --signal=TERM --kill-after=10s 600s /opt/venv/bin/python -m pip install \
+    --index-url "$DATAMARK_PYPI_INDEX" --only-binary=:all: \
+    --timeout 30 --retries 2 --progress-bar off -r /app/requirements.lock.txt \
+    && /opt/venv/bin/python -m pip check
 COPY backend /app/backend
 COPY deploy/healthcheck.py /app/deploy/healthcheck.py
 RUN chmod -R a+rX /app
