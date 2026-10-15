@@ -27,7 +27,7 @@ export default function TaskSourceImport({disabled,onImported}:{disabled:boolean
     if(['nas','s3'].includes(capabilities?.backend??'')&&!paths.length){const inspected=await taskRequest<ClaimInspection>('/sources/inspect','POST',{path:path.trim()});if(inspected.requires_choice){setClaim(inspected);setMode(inspected.has_json?'continue':'keep');setStep(1);return;}}
     await perform();
   });}
-  return <section className="task-source-import">{capabilities?.backend==='s3'&&<S3UploadEntry/>}<h3>{capabilities?.backend==='s3'?'导入已有 S3 视频':'导入视频'}</h3><p>选择原视频或采集目录，原视频保留原处。导入后再登记视频编号、采集信息和质检结论。</p>
+  return <section className="task-source-import">{capabilities?.backend==='s3'&&<S3UploadEntry/>}<h3>{capabilities?.backend==='s3'?'导入已有 S3 视频':'导入视频'}</h3><p>选择原视频或采集目录，原视频保留原处。导入后按采集文件夹登记采集信息和质检结论。</p>
     <form onSubmit={submit}>
       <label>{capabilities?.backend==='s3'?'S3 采集目录':capabilities?.backend==='s3-mock'?'模拟 S3 目录':'采集目录或视频完整路径'}<input value={path} disabled={disabled||busy||!capabilities} onChange={event=>{setPath(event.target.value);setPaths([]);}} placeholder={capabilities?.backend==='s3'?'daily/日期/采集目录':capabilities?.backend==='s3-mock'?'选择模拟 S3 项目目录':'填写当前服务可访问的原视频路径'}/></label>
       <label>采集名称（选填）<input value={name} maxLength={80} disabled={disabled||busy||!capabilities} onChange={event=>setName(event.target.value)} placeholder="默认使用采集目录名"/></label>

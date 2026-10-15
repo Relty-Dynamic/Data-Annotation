@@ -321,6 +321,33 @@ class TaskHostTests(unittest.TestCase):
         self.auth.set_upload_permission(self.users['a']['id'], True)
         self.request(client, 'POST', '/videos', self.video, headers, 403)
 
+    def test_register_collection_verified_sources_permissions_and_existing_records(self):
+        app, client = self.host()
+        task = self.initialize(app, client)
+        project = app.state.service.load(self.project['id'])
+        project['collection_folder_name'] = '1001lixin'
+        second = {**project['videos'][0], 'id':'v0002', 'name':'second.mp4'}
+        project['videos'].append(second)
+        project['_sources']['v0002'] = dict(project['_sources']['v0001'])
+        app.state.service.save(project)
+        body = {'collection_id':project['id'], 'collector_id':'lixin', 'date':'2026-10-15', 'scene':'inside', 'quality':'passed'}
+        headers = self.login(client, 'admin')
+        self.request(client, 'POST', '/collections', body, expected=403)  # CSRF
+        self.request(client, 'POST', '/collections', {**body,'collection_id':'../invalid'}, headers, 422)
+        self.request(client, 'POST', '/collections', {**body,'collection_id':'b'*32}, headers, 404)
+        self.request(client, 'POST', '/collections', {**body,'scene':''}, headers, 422)
+        result = self.request(client, 'POST', '/collections', body, headers)
+        self.assertEqual(('1001lixin',1,1), (result['collection'],result['registered_count'],result['existing_count']))
+        registered = result['videos'][0]
+        self.assertEqual(project['id']+'-v0002', registered['id'])
+        self.assertEqual('1001lixin', registered['collection_name'])
+        self.assertEqual(10000, registered['duration_ms'])
+        self.assertEqual('second.mp4', registered['video_name'])
+        self.request(client, 'POST', '/collections', body, headers, 409)
+        self.assertEqual(task['id'], self.request(client,'GET','/items/'+task['id'])['id'])
+        headers = self.login(client, 'a')
+        self.request(client, 'POST', '/collections', body, headers, 403)
+
     def test_task_audit_scope_library_and_batch_outcomes(self):
         app, client = self.host()
         task = self.initialize(app, client)

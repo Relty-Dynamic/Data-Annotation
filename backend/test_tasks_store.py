@@ -39,6 +39,25 @@ class TasksTests(unittest.TestCase):
         self.rule = self.store.publish_rule(self.lead, {'name':'rule','task_type':'posture','axes':[{'id':'posture','name':'Posture','mode':'state','labels':['sit','bus'],'transport_labels':['bus'],'transport_types':['car']}]})
         self.store.register_video(self.admin, {'video_id':'v','collector_id':'collector','date':'2026-10-15','scene':'inside','duration_ms':10000,'source':{'backend':'nas','key':'v'},'quality':'passed'})
 
+    def test_collection_registration_is_atomic_and_preserves_existing_metadata(self):
+        def record(key, **extra):
+            return {'id':key, 'collector_id':'c', 'date':'2026-10-15', 'scene':'inside',
+                    'duration_ms':1000, 'quality':'passed', 'source':{'backend':'s3','key':key}, **extra}
+        self.expect(422, lambda:self.store.register_collection(self.admin, [record('one'), record('two', duration_ms=0)]))
+        self.assertEqual(['v'], [v['id'] for v in self.store.list_videos(self.admin)])
+        # Conflict encountered after a write must also roll back the entire folder.
+        self.expect(409, lambda:self.store.register_collection(self.admin, [record('one'), record('v')]))
+        self.assertEqual(['v'], [v['id'] for v in self.store.list_videos(self.admin)])
+        result = self.store.register_collection(self.admin, [record('one'), record('two')])
+        self.assertEqual(2, result['registered_count'])
+        result = self.store.register_collection(self.admin, [record('one', scene='changed'), record('three')])
+        self.assertEqual((1,1), (result['registered_count'],result['existing_count']))
+        self.assertEqual('inside', next(v for v in self.store.list_videos(self.admin) if v['id']=='one')['scene'])
+        self.expect(409, lambda:self.store.register_collection(self.admin, [record('one')]))
+        self.expect(403, lambda:self.store.register_collection(self.a, [record('four')]))
+        self.expect(409, lambda:self.store.register_collection({**self.a,'can_upload':True}, [record('four'),record('one')]))
+        self.assertNotIn('four', [v['id'] for v in self.store.list_videos(self.admin)])
+
     def task(self, dual=False):
         return self.store.create_task(self.lead, {'video_id':'v','rule_id':self.rule['id'],'annotator_ids':['a','b'] if dual else ['a'],'reviewer_id':'reviewer','deadline':'2026-10-26T12:00:00+08:00'})
 

@@ -4,7 +4,7 @@ export interface TaskAxis {id:string;name:string;mode:'state'|'event';labels:str
 export interface TaskRule {id:string;name:string;task_type:string;axes:TaskAxis[];boundary_tolerance_ms?:number}
 export type TaskSegment = Segment & {transport_type?:string;needs_review?:boolean;review_reason?:string};
 export type TaskAnnotations = Record<string,TaskSegment[]>;
-export interface TaskVideo {id:string;collector_id:string;date:string;scene:string;duration_ms:number;quality:string;uploader_id?:string;source:{backend:string;key:string}}
+export interface TaskVideo {collection_id?:string;collection_name?:string;video_name?:string;id:string;collector_id:string;date:string;scene:string;duration_ms:number;quality:string;uploader_id?:string;source:{backend:string;key:string}}
 export interface TaskIssue {id:string;axis:string;segment_id?:string;start_ms?:number;end_ms?:number;detail?:string;reason?:string;resolved?:boolean}
 export interface TaskVersion {id:string;user_id:string;actor_id?:string;annotations:TaskAnnotations;created_at?:string;at?:string}
 export interface TaskItem {id:string;video_id:string;rule_id:string;status:string;revision:number;annotator_ids:string[];reviewer_id:string;deadline:string;rule?:TaskRule;video?:TaskVideo;participants?:Array<{id:string;display_name:string}>;reviewed_by?:string;adjudicated_by?:string;review_notes?:Array<{actor_id:string;axis:string;start_ms?:number;end_ms?:number;reason:string;at:string}>;submissions?:TaskVersion[];issues?:TaskIssue[];differences?:Array<{axis:string;start_ms?:number;end_ms?:number;detail?:string}>;final?:TaskVersion;history?:{submissions:TaskVersion[];finals:TaskVersion[]}}
