@@ -322,6 +322,8 @@ NAS、本机模拟和公网使用同一个任务模块及现有标注工作台�
 
 共用任务接口位于 `/api/tasks/`：`me/users/roles/rules/axis-library/sources/videos/items/deliveries/audit`，任务详情下提供独立草稿、提交、分配、复核、裁定、验收和历史接口；媒体与工作台操作也在任务授权范围下检查，不能使用原项目接口绕过任务隔离。所有数据修改仍校验登录、CSRF 与当前任务权限。
 
-公网启用使用可选覆盖文件 `deploy/compose.tasks-public.yaml`；内网未来启用使用 `deploy/compose.tasks-intranet.yaml`。分别准备已批准且权限受限的持久目录，通过 `DATAMARK_TASK_STATE_DIR` 和 `DATAMARK_TASK_ARTIFACT_DIR` 指定宿主机位置，再叠加对应文件。现有内网 Compose 与 Jenkins 部署未加入任务覆盖文件，因此仍关闭。生产启用或发布需另行授权，本实现不会自动部署。
+公网启用使用覆盖文件 `deploy/compose.tasks-public.yaml`：准备权限受限的持久目录，通过 `DATAMARK_TASK_STATE_DIR` 和 `DATAMARK_TASK_ARTIFACT_DIR` 指定宿主机位置，再叠加对应文件。公网仍需接入真实 S3 才能使用素材与标注业务。
+
+NAS 部署直接在持久 `intranet.env` 中设置 `DATAMARK_TASKS_ENABLED=1`，由现有 Compose 与 Jenkins 发布流程读取，无需叠加文件；默认值仍为 `0`，现已支持按部署授权启用。任务数据库和结果分别保存到 `DATAMARK_HOME/state/tasks/state`、`DATAMARK_HOME/state/tasks/artifacts`，后续重发版保持开关与数据，数据库在线备份同时包含已有任务数据库。独立部署仍可使用 `deploy/compose.tasks-intranet.yaml` 指定其他目录，使用该覆盖文件时须始终叠加相同配置。启用不会自动迁移旧项目或授予普通账号任务角色；任务结果不写回旧项目的 timeline 文件。
 
 当前公网仍使用共享账号服务，没有 NAS 挂载；S3 未配置时可启用角色、规则和任务管理页面，但素材清单及登记明确返回 503，不能打开标注。真实 S3 接入仍为独立前置条件。已提供条件创建、不可覆盖、读回核验的对象存储接口和模拟契约测试，没有声称真实桶已接通。公网业务验收必须在真实 S3 配置完成后，用授权账号从外网完整执行分配、标注、复核、裁定、验收和交付。

@@ -148,6 +148,13 @@ for name in ("annotations.sqlite3", "auth.sqlite3"):
             original.backup(copy)
             if copy.execute("PRAGMA integrity_check").fetchone() != ("ok",):
                 raise SystemExit(f"invalid backup: {name}")
+task_database = state / "tasks/state/tasks.sqlite3"
+if task_database.exists():
+    with sqlite3.connect(f"file:{task_database}?mode=ro", uri=True) as original:
+        with sqlite3.connect(backup / "tasks.sqlite3") as copy:
+            original.backup(copy)
+            if copy.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                raise SystemExit("invalid backup: tasks.sqlite3")
 PY
 
 needs_rollback=0

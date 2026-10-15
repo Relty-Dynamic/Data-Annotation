@@ -23,6 +23,9 @@ services:
       DATAMARK_BIND_IP: ${DATAMARK_BIND_IP:?Internal interface IP is required}
       DATAMARK_STORAGE_BACKEND: nas
       DATAMARK_SOURCE_ROOT: /mnt/nas/homes/datacollection
+      DATAMARK_TASKS_ENABLED: ${DATAMARK_TASKS_ENABLED:-0}
+      DATAMARK_TASKS_STATE: /app/.local/tasks/state
+      DATAMARK_TASKS_ARTIFACTS: /app/.local/tasks/artifacts
       FFMPEG_PATH: /usr/bin/ffmpeg
       FFPROBE_PATH: /usr/bin/ffprobe
       PYTHONNOUSERSITE: "1"
