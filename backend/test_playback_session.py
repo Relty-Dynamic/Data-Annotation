@@ -616,6 +616,48 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual([video["id"] for video in manager.manifest(self.ident)["videos"]], ids)
         self.assertEqual(manager.status(self.ident)["ready"], 3)
 
+    def test_configured_three_writers_start_together_and_preserve_manifest_order(self):
+        self.add_fixture_video()
+        ids = [video['id'] for video in self.project['videos']]
+        sources = {str(spec.target): video_id for video_id, spec in self.specs.items()}
+        entered = {video_id: threading.Event() for video_id in ids}
+        release = {video_id: threading.Event() for video_id in ids}
+        lock, active, peaks = threading.Lock(), set(), []
+
+        def hold(args, stopping):
+            video_id = sources[str(args[args.index('-i') + 1])]
+            with lock:
+                active.add(video_id)
+                peaks.append(len(active))
+            entered[video_id].set()
+            try:
+                if not release[video_id].wait(5):
+                    raise AssertionError('Three-writer fixture was not released')
+            finally:
+                with lock:
+                    active.remove(video_id)
+
+        self.encoder_hook = hold
+        manager = self.service.sessions
+        with patch.dict('os.environ', {'DATAMARK_PREPARATION_PARALLELISM': '3'}), \
+             patch('backend.session_cache.os.cpu_count', return_value=8), \
+             patch('backend.session_cache.run_ffmpeg', side_effect=self.encode):
+            manager.start(self.ident)
+            try:
+                for video_id in ids:
+                    self.assertTrue(entered[video_id].wait(3))
+                self.assertEqual(manager.status(self.ident)['running'], 3)
+                release[ids[2]].set()
+                release[ids[1]].set()
+                release[ids[0]].set()
+                self.wait_ready()
+            finally:
+                for event in release.values():
+                    event.set()
+        self.assertEqual(max(peaks), 3)
+        self.assertEqual(active, set())
+        self.assertEqual([video['id'] for video in manager.manifest(self.ident)['videos']], ids)
+
     def test_clip_failure_keeps_peer_running_and_starts_the_next_queued_clip(self):
         self.add_fixture_video()
         ids = [video["id"] for video in self.project["videos"]]
@@ -686,7 +728,8 @@ class PlaybackSessionTests(unittest.TestCase):
                 raise HTTPException(422, "First clip cannot be decoded")
         self.encoder_hook = fail_first
         manager = self.service.sessions
-        with patch("backend.session_cache.os.cpu_count", return_value=2), \
+        with patch.dict("os.environ", {"DATAMARK_PREPARATION_PARALLELISM": "3"}), \
+             patch("backend.session_cache.os.cpu_count", return_value=2), \
              patch("backend.session_cache.run_ffmpeg", side_effect=self.encode):
             manager.start(self.ident)
             self.assertTrue(manager._entries[self.ident]["done"].wait(3))
@@ -912,7 +955,8 @@ class PlaybackSessionTests(unittest.TestCase):
                 raise AssertionError("Duplicate-source fixture was not released")
         self.encoder_hook = hold
         manager = self.service.sessions
-        with patch("backend.session_cache.os.cpu_count", return_value=8), \
+        with patch.dict("os.environ", {"DATAMARK_PREPARATION_PARALLELISM": "3"}), \
+             patch("backend.session_cache.os.cpu_count", return_value=8), \
              patch("backend.session_cache.run_ffmpeg", side_effect=self.encode):
             manager.start(self.ident)
             try:

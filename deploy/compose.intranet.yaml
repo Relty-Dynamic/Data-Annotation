@@ -26,6 +26,7 @@ services:
       DATAMARK_TASKS_ENABLED: ${DATAMARK_TASKS_ENABLED:-0}
       DATAMARK_TASKS_STATE: /app/.local/tasks/state
       DATAMARK_TASKS_ARTIFACTS: /app/.local/tasks/artifacts
+      DATAMARK_PREPARATION_PARALLELISM: ${DATAMARK_PREPARATION_PARALLELISM:-2}
       FFMPEG_PATH: /usr/bin/ffmpeg
       FFPROBE_PATH: /usr/bin/ffprobe
       PYTHONNOUSERSITE: "1"

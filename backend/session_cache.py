@@ -21,7 +21,7 @@ from .local_playback import render_local_fast, render_local_thumbnail
 from .storyboards import StoryboardCache
 from .project_storage import PROJECT_ID, checked_tree
 from .source_cache import is_reparse, local_nas_cache_root
-from .encoding import encoder_threads
+from .encoding import encoder_threads, preparation_parallelism
 from .desktop_cache import DesktopCache, collection_name, sha256_file, safe_name
 from .video_selection import active_videos
 
@@ -1029,7 +1029,7 @@ class SessionCache:
         remote = getattr(self.service, 'remote', None)
         all_remote = remote is not None and all(remote.map_path(source['path']) is not None
                                                 for source in job['project']['_sources'].values())
-        workers = 2 if len(keys) == len(set(keys)) and (all_remote or (os.cpu_count() or 1) >= 4) else 1
+        workers = preparation_parallelism() if len(keys) == len(set(keys)) and (all_remote or (os.cpu_count() or 1) >= 4) else 1
         stopping = _PreparationStop(job['stop'])
         worker_job = {**job, 'stop': stopping, '_reserved_bytes': {}}
         results = {}
