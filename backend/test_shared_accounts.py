@@ -56,6 +56,21 @@ class SharedAccountTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response
 
+    def test_public_browser_encrypted_login_uses_same_account_and_secure_cookie(self):
+        from backend.test_login_encryption import envelope
+        challenge = self.client.get('/api/auth/login-challenge')
+        self.assertEqual(200, challenge.status_code)
+        self.assertEqual('no-store', challenge.headers['cache-control'])
+        body = envelope(challenge.json())
+        denied = self.client.post('/api/auth/login-encrypted', json=body, headers={'Origin': 'https://other.example.com'})
+        self.assertEqual(403, denied.status_code)
+        response = self.client.post('/api/auth/login-encrypted', json=body, headers=self.origin)
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(self.worker['id'], response.json()['user']['id'])
+        self.assertIn('Secure', response.headers['set-cookie'])
+        self.assertIn('HttpOnly', response.headers['set-cookie'])
+        self.assertEqual(400, self.client.post('/api/auth/login-encrypted', json=body, headers=self.origin).status_code)
+
     def test_nas_and_public_login_return_same_identity_in_one_database(self):
         # NAS app retains its original account root and login behavior.
         with patch.dict('os.environ', {'DATAMARK_PUBLIC_ORIGIN': '', 'DATAMARK_PUBLIC_API_ORIGIN': ''}):

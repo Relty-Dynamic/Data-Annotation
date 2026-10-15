@@ -2,6 +2,7 @@ import TaskPanel from './tasks/TaskPanel';
 import TaskAccounts from './tasks/TaskAccounts';
 import {useEffect, useState, type FormEvent} from 'react';
 import App from './App';
+import {encryptLogin,type LoginChallenge} from './loginEncryption';
 import {authFetch, setCsrfToken, type Account} from './auth';
 import {useBrowserLifetime} from './useBrowserLifetime';
 
@@ -36,7 +37,10 @@ export default function AuthShell() {
     event.preventDefault();
     setBusy(true);setError('');
     try {
-      const response = await authFetch('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:username.trim(),password})});
+      const challengeResponse=await authFetch('/api/auth/login-challenge',{cache:'no-store'});
+      if(!challengeResponse.ok)throw new Error('无法准备加密登录，请稍后重试。');
+      const encrypted=await encryptLogin(username.trim(),password,await challengeResponse.json() as LoginChallenge);
+      const response = await authFetch('/api/auth/login-encrypted', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(encrypted)});
       if (!response.ok) { const data=await response.json(); throw new Error(data.detail ?? '登录失败'); }
       const data = await response.json();
       setCsrfToken(data.csrf ?? '');setPassword('');setUser(data.user);

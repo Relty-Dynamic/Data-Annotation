@@ -128,6 +128,9 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
         response.set_cookie("datamark_csrf", saved["csrf"], httponly=False, secure=True, samesite="strict", max_age=12 * 3600, path="/")
         return response
 
+    from .login_encryption import install_login_encryption
+    install_login_encryption(app, lambda credentials, request: login(LoginRequest(**credentials), request))
+
     @app.get("/api/auth/me")
     def me(request: Request):
         if not accounts:

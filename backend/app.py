@@ -352,7 +352,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                 local_client = False
             if not local_client:
                 return JSONResponse(status_code=403, content={"detail": "本机混合存储只接受本机访问。"})
-        if auth_required and path.startswith("/api/") and path not in {"/api/health", "/api/auth/login", "/api/browser/reserve"}:
+        if auth_required and path.startswith("/api/") and path not in {"/api/health", "/api/auth/login", "/api/auth/login-challenge", "/api/auth/login-encrypted", "/api/browser/reserve"}:
             session = auth.session(request.cookies.get("datamark_session"))
             if not session:
                 return JSONResponse(status_code=401, content={"detail": "请先登录。"}, headers={"Cache-Control": "no-store"})
@@ -448,6 +448,9 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         response.set_cookie("datamark_csrf", csrf, httponly=False, secure=secure, samesite="strict", max_age=12 * 3600, path="/")
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    from .login_encryption import install_login_encryption
+    install_login_encryption(app, lambda credentials, request: login(LoginRequest(**credentials), request))
 
     @app.get("/api/auth/me")
     def me(request: Request):

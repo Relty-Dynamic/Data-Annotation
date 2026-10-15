@@ -41,6 +41,24 @@ class AccountAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["csrf"]
 
+    def test_browser_encrypted_login_preserves_session_and_lockout(self):
+        from backend.test_login_encryption import envelope
+        def encrypted(password):
+            challenge = self.client.get('/api/auth/login-challenge')
+            self.assertEqual('no-store', challenge.headers['cache-control'])
+            body = envelope(challenge.json(), password=password)
+            return self.client.post('/api/auth/login-encrypted', json=body), body
+        response, body = encrypted('another long safe password')
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn('HttpOnly', response.headers['set-cookie'])
+        self.assertNotIn('password', response.json()['user'])
+        self.assertEqual(200, self.client.get('/api/auth/me').status_code)
+        self.assertEqual(400, self.client.post('/api/auth/login-encrypted', json=body).status_code)
+        self.assertEqual(400, self.client.post('/api/auth/login-encrypted', json={'username': 'worker', 'password': 'plain'}).status_code)
+        for _ in range(5):
+            self.assertEqual(401, encrypted('incorrect fixture password')[0].status_code)
+        self.assertEqual(429, encrypted('another long safe password')[0].status_code)
+
     def test_login_csrf_assignment_media_and_revocation(self):
         project_id = self.project["id"]
         self.assertEqual(self.client.get("/api/projects").status_code, 401)

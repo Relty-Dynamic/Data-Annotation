@@ -23,3 +23,6 @@ jmespath==1.1.0
 python-dateutil==2.9.0.post0
 six==1.17.0
 urllib3==2.8.0
+cryptography==49.0.0
+cffi==2.1.1
+pycparser==3.11
