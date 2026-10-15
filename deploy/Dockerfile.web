@@ -28,6 +28,7 @@ RUN timeout --signal=TERM --kill-after=10s 600s /opt/venv/bin/python -m pip inst
     --no-cache-dir --timeout 30 --retries 2 --progress-bar off -r /app/requirements.lock.txt
 COPY backend /app/backend
 COPY deploy/web_healthcheck.py /app/deploy/web_healthcheck.py
+COPY deploy/ci-deploy-intranet.sh /app/deploy/ci-deploy-intranet.sh
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 RUN chmod -R a+rX /app
 USER 1000:1000
