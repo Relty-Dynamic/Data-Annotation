@@ -248,6 +248,11 @@ class LocalReportStore:
             if old_snapshot and safe["revision"] == old[1]:
                 comparable = {key: value for key, value in old_snapshot.items() if key != "submitted_at"}
                 incoming = {key: value for key, value in safe.items() if key != "submitted_at"}
+                # Retiring the built-in habit selector does not alter old annotations
+                # or allow other content changes at an already synced revision.
+                for value in (comparable, incoming):
+                    if "selected_tracks" in value:
+                        value["selected_tracks"] = [axis for axis in value["selected_tracks"] if axis != "habit"]
                 if comparable != incoming:
                     raise HTTPException(409, "同一项目版本的内容已变化，未覆盖中央记录。")
             old_documents = json.loads(old[3]) if old and old[3] else None

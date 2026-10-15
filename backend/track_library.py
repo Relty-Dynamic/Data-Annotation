@@ -49,9 +49,12 @@ class TrackLibrary:
         with self.auth.connection() as con:
             rows = con.execute("SELECT * FROM track_library WHERE scope IN (?,?) ORDER BY CASE scope WHEN '*' THEN 0 ELSE 1 END,rowid",
                                (self.DEFAULT_SCOPE, user_id or "local")).fetchall()
-        return [self.track(row) for row in rows]
+        # Keep stored legacy definitions recoverable without offering the retired built-in axis.
+        return [self.track(row) for row in rows if row["id"] != "habit"]
 
     def save(self, user_id, track_id, name, mode, labels, *, default=False, create=False):
+        if track_id == "habit":
+            raise HTTPException(410, "内置习惯轴已停用；请创建自定义事件轴。")
         if (not isinstance(track_id, str) or not (track_id in AXES or valid_custom_axis(track_id))
                 or (create and track_id.startswith("custom_"))):
             raise HTTPException(422, "JSON 名须以小写字母开头，只能包含小写字母、数字、下划线或连字符。")
@@ -93,6 +96,8 @@ class TrackLibrary:
         return after
 
     def set_default(self, user_id, track_id, default):
+        if track_id == "habit":
+            raise HTTPException(410, "内置习惯轴已停用；请创建自定义事件轴。")
         personal_scope = user_id or "local"
         source = personal_scope if default else self.DEFAULT_SCOPE
         target = self.DEFAULT_SCOPE if default else personal_scope

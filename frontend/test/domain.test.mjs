@@ -29,7 +29,7 @@ test('project label choices use saved labels and old projects keep defaults',()=
 test('project custom axes appear by name and take part in draft comparison',()=>{
   const axis='custom_'+'a'.repeat(32);
   const project={custom_tracks:[{id:axis,name:'环境',mode:'state',labels:['安静']}]};
-  assert.deepEqual(projectTracks(project),['scene','posture','category','habit',axis]);
+  assert.deepEqual(projectTracks(project),['scene','posture','category',axis]);
   assert.equal(trackName(project,axis),'环境');
   const first={scene:[],posture:[],category:[],habit:[],[axis]:[]};
   const second={...first,[axis]:[segment('one','安静',0,1000)]};
@@ -41,7 +41,7 @@ test('project custom axes appear by name and take part in draft comparison',()=>
 test('deleted fixed axes disappear from the timeline while custom axes remain',()=>{
   const axis='custom_'+'a'.repeat(32);
   const project={fixed_tracks:['posture','habit'],custom_tracks:[{id:axis,name:'环境',mode:'event',labels:[]}]};
-  assert.deepEqual(projectTracks(project),['posture','habit',axis]);
+  assert.deepEqual(projectTracks(project),['posture',axis]);
   assert.deepEqual(projectTracks({...project,fixed_tracks:[]}),[axis]);
   assert.deepEqual(projectTracks({...project,fixed_tracks:[],custom_tracks:[]}),[]);
 });

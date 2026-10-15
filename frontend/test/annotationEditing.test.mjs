@@ -72,18 +72,18 @@ test('range replacement splits states and retains content outside the selection'
   assert.equal(new Set(split.map(item => item.id)).size, 3);
 });
 
-test('child ranges split at real gaps and preserve overlaps for category and habit', () => {
+test('anchor ranges preserve conflicts in children and fill main blanks across real gaps', () => {
   for (const track of ['category', 'habit']) {
     const original = [segment('original', '活动', 0, 10000)];
     const result = applyAnnotationRange(original, 5000, 20000, '社交', runs, track, undefined, false, true);
     assert.deepEqual(compact(result), [['活动', 0, 10000], ['社交', 5000, 10000], ['社交', 15000, 20000]]);
     assert.equal(new Set(result.map(item => item.id)).size, 3);
-    assert.ok(result.filter(item => item.id !== 'original').every(item => item.lane === 1));
+    assert.deepEqual(result.filter(item => item.id !== 'original').map(item => item.lane), [1, 0]);
     if (track === 'category') assert.ok(result.filter(item => item.id !== 'original').every(item => item.mode === 'state'));
   }
 });
 
-test('new category anchor ranges replace previous category labels without overlap', () => {
+test('ordinary category ranges replace previous main labels without overlap', () => {
   const original = [segment('state', '专注', 0, 10000, { mode: 'state' })];
   const result = applyAnnotationRange(original, 2000, 8000, '用餐', runs, 'category', undefined, true);
   assert.deepEqual(compact(result), [['专注', 0, 2000], ['用餐', 2000, 8000], ['专注', 8000, 10000]]);
@@ -174,7 +174,7 @@ test('snapping uses screen pixels, bounds invalid input, and resolves ties consi
   assert.equal(snapTimelineTime(12000, [11000], 10000, 1000), 10000);
 });
 
-test('snap points combine recording cuts, annotation endpoints and anchors with legacy compatibility', () => {
+test('snap points combine visible annotation endpoints and anchors while excluding retired habit records', () => {
   const project = {
     duration_ms: 10000,
     videos: [{ start_ms: 0, end_ms: 4000 }, { start_ms: 5000, end_ms: 10000 }],
@@ -184,7 +184,7 @@ test('snap points combine recording cuts, annotation endpoints and anchors with 
       habit: [segment('point', '咳嗽', 6500, 6500), segment('ongoing', '看手机', 7000, null)],
     },
   };
-  assert.deepEqual(timelineSnapPoints(project, [3000, 3000, -1, Infinity]), [0, 1000, 3000, 4000, 5000, 6500, 7000, 10000]);
+  assert.deepEqual(timelineSnapPoints(project, [3000, 3000, -1, Infinity]), [0, 1000, 3000, 4000, 5000, 10000]);
   project.annotations.category = [segment('category', '专注', 2000, 8000, { mode: 'overlay' })];
   assert.ok(timelineSnapPoints(project).includes(8000));
 });

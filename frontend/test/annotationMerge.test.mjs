@@ -59,8 +59,8 @@ test('saved attribution does not leave a seam after a later anchor range or ordi
 });
 
 test('child reuse merges only its own neighboring interval without changing the main axis', () => {
-  const rows = [row('main', 0, 10000, 0, actorA), row('child', 1000, 3000, 1, actorB)];
-  const result = applyAnnotationRange(rows, 3000, 6000, rows[0].label, span, 'habit', undefined, false, true);
+  const rows = [row('main', 0, 10000, 0, {...actorA, label: '主轴标签'}), row('child', 1000, 3000, 1, actorB)];
+  const result = applyAnnotationRange(rows, 3000, 6000, rows[1].label, span, 'habit', undefined, false, true);
   assert.deepEqual(result, [rows[0], {...rows[1], end_ms: 6000}]);
 });
 

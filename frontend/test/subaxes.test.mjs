@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  annotationsEqual, applyAnnotationPoint, applyAnnotationRange, arrangeLanes,
+  annotationsEqual, applyAnnotationRange, arrangeLanes,
   assignSegmentLanes, deleteAnnotation, normalizeStateSeams, switchCoveredState,
 } from '../src/domain.ts';
 
@@ -13,30 +13,30 @@ const ranges = rows => rows.map(({start_ms, end_ms, lane}) => [start_ms, end_ms,
 const addChild = (rows, start, end, spans = run, track = 'posture') =>
   applyAnnotationRange(rows, start, end, '同一标签', spans, track, undefined, false, true);
 
-test('overlap is supported for every built-in and custom axis, including repeated labels', () => {
+test('anchor conflicts create child intervals for every built-in and custom axis', () => {
   for (const track of ['scene', 'posture', 'category', 'habit', 'custom_state', 'custom_event']) {
-    const result = addChild([item('main', 0, 10000, 0)], 1000, 8000, run, track);
+    const result = addChild([item('main', 0, 10000, 0, {label: '其他标签'})], 1000, 8000, run, track);
     assert.deepEqual(ranges(result), [[0, 10000, 0], [1000, 8000, 1]], track);
     assert.equal(result[0].id, 'main');
   }
 });
 
-test('child mode prioritizes a free main row, then the lowest reusable child row', () => {
+test('anchors prioritize a free main row, then the lowest reusable child row for conflicts', () => {
   const original = [item('main', 0, 4000, 0), item('child', 0, 2000, 1), item('higher', 8000, 10000, 2)]
     .map(row => ({...row, label: '已有标签'}));
   assert.equal(addChild(original, 5000, 7000).find(row => !original.some(old => old.id === row.id)).lane, 0);
   assert.equal(addChild(original, 2000, 3000).find(row => !original.some(old => old.id === row.id)).lane, 1);
-  assert.equal(addChild(original, 1000, 3000).find(row => !original.some(old => old.id === row.id)).lane, 2);
+  assert.deepEqual(ranges(addChild(original, 1000, 3000).filter(row => !original.some(old => old.id === row.id))), [[1000, 2000, 2], [2000, 3000, 1]]);
   assert.deepEqual(ranges(original), [[0, 4000, 0], [0, 2000, 1], [8000, 10000, 2]]);
 });
 
-test('any partial overlap moves the whole selection and every recorded piece to one free row', () => {
+test('only conflicting anchor portions enter a child while main blanks fill across recorded runs', () => {
   const spans = [{start_ms: 0, end_ms: 4000}, {start_ms: 6000, end_ms: 10000}];
-  const original = [item('main', 0, 1000, 0), item('child', 7000, 9000, 1)];
+  const original = [item('main', 0, 1000, 0, {label: '主轴原标签'}), item('child', 7000, 9000, 1)];
   const result = addChild(original, 500, 8000, spans);
   const added = result.filter(row => !['main', 'child'].includes(row.id));
-  assert.deepEqual(ranges(added), [[500, 4000, 2], [6000, 8000, 2]]);
-  assert.equal(new Set(added.map(row => row.id)).size, 2);
+  assert.deepEqual(ranges(added), [[500, 1000, 1], [1000, 4000, 0], [6000, 8000, 0]]);
+  assert.equal(new Set(added.map(row => row.id)).size, 3);
   assert.deepEqual(result.find(row => row.id === 'main'), original[0]);
   assert.deepEqual(result.find(row => row.id === 'child'), original[1]);
 });
@@ -51,8 +51,8 @@ test('ranges wholly inside a recording gap do nothing and boundary touching reus
 });
 
 test('child allocation has no fixed maximum and reuses holes left by deletion', () => {
-  let rows = [];
-  for (let index = 0; index < 45; index++) rows = addChild(rows, 1000, 8000);
+  let rows = [item('main', 1000, 8000, 0, {label: '主轴标签'})];
+  for (let index = 1; index < 45; index++) rows = applyAnnotationRange(rows, 1000, 8000, `标签 ${index}`, run, 'posture', undefined, false, true);
   assert.equal(rows.length, 45);
   assert.deepEqual([...new Set(rows.map(row => row.lane))].sort((a, b) => a - b), Array.from({length: 45}, (_, i) => i));
   const deleted = rows.find(row => row.lane === 12);
@@ -62,7 +62,7 @@ test('child allocation has no fixed maximum and reuses holes left by deletion', 
   assert.equal(reused.lane, 12);
 });
 
-test('unchecked range replacement changes only the main row on every axis', () => {
+test('ordinary range replacement changes only the main row on every axis', () => {
   for (const track of ['scene', 'posture', 'category', 'habit', 'custom_state', 'custom_event']) {
     const main = item('main', 0, 10000, 0, {label: '原主轴'});
     const child = item('child', 1000, 9000, 1, {label: '子轴', created_by: 'user-a'});
@@ -160,17 +160,4 @@ test('normalization never merges equal labels from different rows or fills expli
   const explicit = [item('a', 0, 5000, 0), item('b', 5200, 10000, 0)];
   const normalized = normalizeStateSeams({scene: explicit}, [bridge], [{id: 'b', end_ms: 10000}]);
   assert.deepEqual(normalized.scene, explicit);
-});
-
-test('points replace only same-time main points and require anchors for new overlap', () => {
-  const original = [item('point', 5000, 5000, 0, {kind: 'point'}), item('child', 5000, 5000, 1, {kind: 'point', created_by: 'a'})];
-  const result = applyAnnotationPoint(original, 5000, '新事件', 10000);
-  assert.equal(result.length, 2);
-  assert.equal(result.find(row => row.lane === 0).label, '新事件');
-  assert.deepEqual(result.find(row => row.id === 'child'), original[1]);
-  assert.throws(() => applyAnnotationPoint([item('main', 0, 10000, 0)], 5000, '事件', 10000), /锚点/);
-  const edited = applyAnnotationPoint(original, 6000, '改名', 10000, 'child').find(row => row.id === 'child');
-  assert.equal(edited.lane, 1);
-  assert.equal(edited.created_by, 'a');
-  assert.throws(() => applyAnnotationPoint([...original, item('other', 5500, 7000, 1)], 6000, '改名', 10000, 'child'), /重叠/);
 });

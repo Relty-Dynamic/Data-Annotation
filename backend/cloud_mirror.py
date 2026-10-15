@@ -1,6 +1,7 @@
 """Forward local project metadata and timeline results to an explicitly configured service."""
 from __future__ import annotations
 
+import json
 import os
 import threading
 from pathlib import Path
@@ -9,7 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import HTTPException
 
-from .service import AXES, FILENAMES
+from .service import AXES, filename_for_axis
 
 
 class CloudMirror:
@@ -66,6 +67,42 @@ class CloudMirror:
         if old:
             old[0].close()
 
+    @staticmethod
+    def written_documents(project: dict, service, public: dict) -> tuple[list[str], dict[str, str]]:
+        if project.get("draft_dirty") or not project.get("source_dir") or not project.get("last_writeback"):
+            raise HTTPException(409, "本机标注尚未成功写回原目录，不能同步最终文件。")
+        source_root = Path(project["source_dir"])
+        if service.current_external_hashes(source_root) != service.expected_external_hashes(project):
+            raise HTTPException(409, "原目录时间轴文件已变化，未同步最终结果。")
+        source = service.external_directory(source_root)
+        save_id = project["last_writeback"].get("save_id")
+        if not isinstance(save_id, str) or not save_id:
+            raise HTTPException(409, "缺少已写回批次编号，未同步最终结果。")
+        archived = {}
+        for axis in [*AXES, *(track["id"] for track in public["custom_tracks"])]:
+            try:
+                payload = (source / filename_for_axis(axis)).read_text(encoding="utf-8")
+                document = json.loads(payload)
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if isinstance(document, dict) and document.get("save_id") == save_id:
+                archived[axis] = (payload, document)
+
+        def written_axes(document):
+            timebase = document.get("timebase")
+            if not isinstance(timebase, dict):
+                return None
+            return timebase.get("written_tracks", timebase.get("selected_tracks", public["selected_tracks"]))
+
+        axes = written_axes(next(iter(archived.values()))[1]) if archived else None
+        if (not isinstance(axes, list) or not axes or any(not isinstance(axis, str) for axis in axes)
+                or len(set(axes)) != len(axes) or set(archived) != set(axes)
+                or any(document.get("axis") != axis or written_axes(document) != axes
+                       or document["timebase"].get("selected_tracks", axes) != axes
+                       for axis, (_, document) in archived.items())):
+            raise HTTPException(409, "已写回时间轴文件缺失或批次不一致，未同步最终结果。")
+        return axes, {axis: archived[axis][0] for axis in axes}
+
     def sync(self, local_user_id: str, project: dict, service, *, final: bool = False) -> dict:
         with self.lock:
             session = self.sessions.get(local_user_id)
@@ -74,20 +111,15 @@ class CloudMirror:
             client, _, csrf = session
             public = service.public(project)
             snapshot = {key: public[key] for key in ("id", "name", "revision", "duration_ms", "fixed_tracks", "selected_tracks", "track_names", "track_labels", "custom_tracks", "annotations")}
+            snapshot["selected_tracks"] = [axis for axis in snapshot["selected_tracks"] if axis != "habit"]
             snapshot["source_folder_name"] = Path(project["source_dir"]).name if project.get("source_dir") else public["name"]
             snapshot["videos"] = [{key: video.get(key) for key in ("id", "name", "start_ms", "end_ms", "duration_ms", "recording_start")}
                                   for video in public["videos"]]
             snapshot["submitted_at"] = (project.get("last_writeback") or {}).get("saved_at") if not project.get("draft_dirty") else None
             documents = None
             if final:
-                if project.get("draft_dirty") or not project.get("source_dir") or not project.get("last_writeback"):
-                    raise HTTPException(409, "本机标注尚未成功写回原目录，不能同步最终文件。")
-                source_root = Path(project["source_dir"])
-                source = service.external_directory(source_root)
-                if service.current_external_hashes(source_root) != service.expected_external_hashes(project):
-                    raise HTTPException(409, "原目录时间轴文件已变化，未同步最终结果。")
-                axes = public["selected_tracks"]
-                documents = {axis: (source / FILENAMES.get(axis, axis + ".timeline.json")).read_text(encoding="utf-8") for axis in axes}
+                axes, documents = self.written_documents(project, service, public)
+                snapshot["selected_tracks"] = axes
             try:
                 response = client.put("/api/local-reports", json={"snapshot": snapshot, "documents": documents},
                                       headers={"X-CSRF-Token": csrf})
@@ -101,7 +133,12 @@ class CloudMirror:
                 except ValueError:
                     detail = None
                 raise HTTPException(response.status_code, detail if isinstance(detail, str) else "Ubuntu 拒绝了本机项目同步。")
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError as error:
+                raise HTTPException(503, "Ubuntu 返回的结果无效，未能确认 NAS 保存成功。") from error
+            if not isinstance(result, dict):
+                raise HTTPException(503, "Ubuntu 返回的结果无效，未能确认 NAS 保存成功。")
             if final and (result.get("has_documents") is not True or not result.get("nas_relative_path")):
                 raise HTTPException(409, "Ubuntu 接口尚未确认 NAS 写回，请升级服务并重新同步；本机文件已保留。")
             return result

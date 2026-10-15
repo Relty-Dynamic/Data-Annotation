@@ -88,7 +88,9 @@ export const TRACK_LABELS: Record<FixedTrack, string> = {
 
 export const TRACKS: FixedTrack[] = ['scene', 'posture', 'category', 'habit'];
 export function projectAllTracks(project: Project): Track[] { return [...TRACKS.filter(track=>(project.fixed_tracks??TRACKS).includes(track)), ...(project.custom_tracks??[]).map(track=>track.id)]; }
-export function projectTracks(project: Project): Track[] { const available=projectAllTracks(project);return project.selected_tracks?.filter(track=>available.includes(track))??available; }
+/** The retired built-in habit axis stays in saved data, but is no longer an editing option. */
+export function isAvailableTrack(track: Track): boolean { return track !== 'habit'; }
+export function projectTracks(project: Project): Track[] { const available=projectAllTracks(project).filter(isAvailableTrack);return project.selected_tracks?.filter(track=>available.includes(track))??available; }
 export function customTrack(project: Project, track: Track): CustomTrack | undefined { return project.custom_tracks?.find(item=>item.id===track); }
 export function trackName(project: Project, track: Track): string { return customTrack(project,track)?.name??project.track_names?.[track as FixedTrack]??TRACK_LABELS[track as FixedTrack]??'自定义轴'; }
 export function isEventTrack(project: Project, track: Track): boolean { return track==='habit'||customTrack(project,track)?.mode==='event'; }
@@ -323,22 +325,6 @@ export function annotationsEqual(left: Project['annotations'], right: Project['a
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
 
-/** Capture unsaved input against a stable video, before supplementing its timeline. */
-export interface VideoTimeAnchor { videoId: string; offsetMs: number; }
-export function anchorVideoTime(videos: Video[], time: number, edge: 'start' | 'end' = 'start'): VideoTimeAnchor | null {
-  if (!Number.isFinite(time)) return null;
-  const video = edge === 'end'
-    ? videos.find(item => time > item.start_ms && time <= item.end_ms) ?? videos.find(item => item.start_ms === time)
-    : videos.find(item => time >= item.start_ms && time < item.end_ms) ?? videos.find(item => item.end_ms === time);
-  return video ? {videoId: video.id, offsetMs: time - video.start_ms} : null;
-}
-export function restoreVideoTime(videos: Video[], anchor: VideoTimeAnchor): number | null {
-  const video = videos.find(item => item.id === anchor.videoId);
-  return video ? video.start_ms + Math.max(0, Math.min(anchor.offsetMs, video.duration_ms)) : null;
-}
-
-
-
 /** Merge touching files into recording runs, retaining real recording breaks. */
 function joinedSpans(spans: VideoGap[]): VideoGap[] {
   const ordered = spans.filter(span => Number.isFinite(span.start_ms) && Number.isFinite(span.end_ms))
@@ -374,15 +360,26 @@ function mergeAttribution(previous: Segment, segment: Segment): void {
   previous.updated_at = segmentTime;
 }
 
-function mergeTouchingStates(segments: Segment[], acrossLegacySeam?: (left: Segment, right: Segment) => boolean): Segment[] {
+function mergeTouchingStates(
+  segments: Segment[],
+  acrossLegacySeam?: (left: Segment, right: Segment) => boolean,
+  preferredIds?: ReadonlySet<string>,
+): Segment[] {
   const result: Segment[] = [];
   for (const segment of orderedCopies(segments).sort((a, b) => (a.lane ?? 0) - (b.lane ?? 0) || a.start_ms - b.start_ms || compareIds(a.id, b.id))) {
     const previous = result[result.length - 1];
     if (previous && previous.lane === segment.lane && previous.label === segment.label &&
         (previous.mode ?? 'state') === (segment.mode ?? 'state') && !isPointSegment(previous) && !isPointSegment(segment) &&
         (previous.end_ms === segment.start_ms || acrossLegacySeam?.(previous, segment))) {
-      mergeAttribution(previous, segment);
-      previous.end_ms = segment.end_ms;
+      if (preferredIds?.has(segment.id) && !preferredIds.has(previous.id)) {
+        // Anchor additions may start before a saved row: extend that row without replacing its identity.
+        const merged = {...segment, start_ms: previous.start_ms};
+        mergeAttribution(merged, previous);
+        result[result.length - 1] = merged;
+      } else {
+        mergeAttribution(previous, segment);
+        previous.end_ms = segment.end_ms;
+      }
     } else result.push(segment);
   }
   return orderedCopies(result);
@@ -436,7 +433,45 @@ export function switchCoveredState(
   ]);
 }
 
-/** Apply a selected range, preserving outside states and splitting at real recording gaps. */
+/** Add an anchor selection without replacing existing main or child annotations. */
+function addAnchorRanges(segments: Segment[], ranges: VideoGap[], label: string, track: Track): Segment[] {
+  const byLane = new Map<number, Segment[]>();
+  for (const segment of segments) {
+    const records = byLane.get(segment.lane!) ?? [];
+    records.push(segment);
+    byLane.set(segment.lane!, records);
+  }
+  const placements: Array<VideoGap & {lane: number}> = [];
+  let remaining = ranges;
+  for (let lane = 0; remaining.length; lane += 1) {
+    const records = byLane.get(lane) ?? [];
+    const conflicts: VideoGap[] = [];
+    for (const range of remaining) {
+      let cursor = range.start_ms;
+      for (const segment of records) {
+        const occupiedEnd = packingEnd(segment, Infinity);
+        if (occupiedEnd <= cursor) continue;
+        if (segment.start_ms >= range.end_ms) break;
+        if (cursor < segment.start_ms) placements.push({start_ms: cursor, end_ms: Math.min(segment.start_ms, range.end_ms), lane});
+        const start = Math.max(cursor, segment.start_ms);
+        const end = Math.min(range.end_ms, occupiedEnd);
+        // Matching intervals already cover this part; points retain their exact event semantics.
+        const matches = !isPointSegment(segment) && segment.label === label && (segment.mode ?? 'state') === 'state';
+        if (start < end && !matches) conflicts.push({start_ms: start, end_ms: end});
+        cursor = Math.max(cursor, end);
+        if (cursor >= range.end_ms) break;
+      }
+      if (cursor < range.end_ms) placements.push({start_ms: cursor, end_ms: range.end_ms, lane});
+    }
+    remaining = joinedSpans(conflicts);
+    // The first absent lane accepts everything left, so sparse saved IDs cannot cause a long scan.
+  }
+  const added = placements.map(range => ({id: newId(), label, ...range, kind: 'interval' as const,
+    ...(track === 'category' ? {mode: 'state' as const} : {})}));
+  return mergeTouchingStates([...segments, ...added], undefined, new Set(segments.map(segment => segment.id)));
+}
+
+/** Apply an ordinary main-row replacement or an additive anchor selection, clipping real gaps. */
 export function applyAnnotationRange(
   segments: Segment[],
   start: number,
@@ -446,7 +481,7 @@ export function applyAnnotationRange(
   track: Track,
   existingId?: string,
   _exclusive = false,
-  subaxis = false,
+  anchor = false,
 ): Segment[] {
   const original = orderedCopies(segments);
   if (!label.trim() || !Number.isFinite(start) || !Number.isFinite(end)) return original;
@@ -461,15 +496,13 @@ export function applyAnnotationRange(
   if (!ranges.length) return original;
   const assigned = assignSegmentLanes(original, Infinity);
   const editing = existingId ? assigned.find(segment => segment.id === existingId) : undefined;
+  if (!editing && anchor) return addAnchorRanges(assigned, ranges, label.trim(), track);
   let remaining = assigned.filter(segment => segment.id !== existingId);
-  let lane = editing?.lane ?? 0;
+  const lane = editing?.lane ?? 0;
   const occupied = new Set(remaining.filter(segment =>
     ranges.some(range => segmentsOverlap(segment, { ...range, id: '', label: '' }, Infinity))).map(segment => segment.lane!));
   if (editing && lane > 0 && occupied.has(lane)) throw new Error('该时间范围与同一子轴上的已有标注重叠，请调整起止时间。');
-  if (!editing && subaxis) {
-    while (occupied.has(lane)) lane += 1;
-  }
-  if ((!editing && !subaxis) || editing?.lane === 0) {
+  if (!editing || editing.lane === 0) {
     remaining = remaining.flatMap(segment => {
       if (segment.lane !== 0) return [segment];
       let pieces = [{ ...segment }];
@@ -502,29 +535,6 @@ export function applyAnnotationRange(
   }));
   const result = [...remaining, ...added];
   return mergeTouchingStates(result);
-}
-
-/** Add a point on the main axis or edit it in place; overlap creation requires anchor ranges. */
-export function applyAnnotationPoint(
-  segments: Segment[],
-  time: number,
-  label: string,
-  duration: number,
-  existingId?: string,
-): Segment[] {
-  const original = orderedCopies(segments);
-  if (!label.trim() || !Number.isFinite(time) || time < 0 || time > duration) return original;
-  const assigned = assignSegmentLanes(segments, duration);
-  const editing = existingId ? assigned.find(segment => segment.id === existingId) : undefined;
-  const point: Segment = { ...editing, id: existingId ?? newId(), label: label.trim(),
-    start_ms: Math.round(time), end_ms: Math.round(time), kind: 'point', lane: editing?.lane ?? 0 };
-  const remaining = assigned.filter(segment => segment.id !== existingId &&
-    (editing || segment.lane !== 0 || !isPointSegment(segment) || segment.start_ms !== point.start_ms));
-  if (remaining.some(segment => segment.lane === point.lane && segmentsOverlap(segment, point, duration))) {
-    throw new Error(editing ? '该时间与同一主轴或子轴上的已有标注重叠，请调整时间。' :
-      '该时间主轴已有标注；新增重叠标注请先选择锚点区间并勾选“子轴”。');
-  }
-  return orderedCopies([...remaining, point]);
 }
 
 /** Delete only the selected annotation, retaining blank time and saved child row assignments. */
