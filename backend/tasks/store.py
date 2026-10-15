@@ -183,19 +183,49 @@ class TaskStore:
                 raise TaskError(403, '需要上传权限或组长角色')
             return [v for r in db.execute('SELECT body FROM videos') if (v := json.loads(r[0])) and (leader or v['uploader_id'] == actor['id'])]
 
-    def register_video(self, actor, body):
+    def _video_record(self, actor, body):
         if not actor.get('can_upload'):
             raise TaskError(403, '需要上传权限')
         vid = body.get('video_id', body.get('id'))
         if not isinstance(vid, str) or not vid.strip() or not all(isinstance(body.get(x), str) and body[x].strip() for x in ('collector_id', 'date', 'scene')) or not isinstance(body.get('source'), dict) or not isinstance(body['source'].get('backend'), str) or not isinstance(body['source'].get('key'), str) or not body['source']['key'] or type(body.get('duration_ms')) is not int or not 0 < body['duration_ms'] <= 9007199254740991 or body.get('quality', 'unknown') not in ('unknown', 'passed', 'failed'):
             raise TaskError(422, '视频信息不完整或不正确')
-        obj = {**body, 'id': vid, 'quality': body.get('quality', 'unknown'), 'uploader_id': actor['id'], 'registered_at': stamp()}
+        return {**body, 'id': vid, 'quality': body.get('quality', 'unknown'), 'uploader_id': actor['id'], 'registered_at': stamp()}
+
+    def register_video(self, actor, body):
+        obj = self._video_record(actor, body)
+        vid = obj['id']
         with self.db() as db:
             if db.execute('SELECT 1 FROM videos WHERE id=?', (vid,)).fetchone():
                 raise TaskError(409, '视频编号已登记，不能重复导入')
             self._save(db, 'videos', obj, True)
             self._audit(db, actor, 'register_video', video_id=vid)
         return obj
+
+    def register_collection(self, actor, bodies):
+        """Commit all newly registered members together; never overwrite old records."""
+        if not bodies:
+            raise TaskError(422, '采集文件夹中没有可登记的视频')
+        records = [self._video_record(actor, body) for body in bodies]
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = { (v['source']['backend'], v['source']['key']): v
+                        for row in db.execute('SELECT body FROM videos') if (v := json.loads(row[0])) }
+            added = []
+            for obj in records:
+                key = (obj['source']['backend'], obj['source']['key'])
+                if key in existing:
+                    if existing[key]['uploader_id'] != actor['id']:
+                        raise TaskError(409, '该文件夹的视频已由其他账号登记，请联系原登记人')
+                    continue
+                if db.execute('SELECT 1 FROM videos WHERE id=?', (obj['id'],)).fetchone():
+                    raise TaskError(409, '视频编号已登记，不能重复导入')
+                self._save(db, 'videos', obj, True)
+                self._audit(db, actor, 'register_video', video_id=obj['id'])
+                existing[key] = obj
+                added.append(obj)
+            if not added:
+                raise TaskError(409, '该采集文件夹已登记，无需重复登记')
+        return {'registered_count': len(added), 'existing_count': len(records) - len(added), 'videos': added}
 
     def set_quality(self, actor, video_id, quality):
         if isinstance(quality, dict):

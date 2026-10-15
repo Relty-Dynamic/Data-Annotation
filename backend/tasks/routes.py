@@ -210,6 +210,26 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
             raise HTTPException(403, '管理员尚未开放上传权限。')
         return store.register_video(user, workspace.media.reference(user, body))
 
+    @router.post('/collections')
+    def register_collection(body: dict, request: Request):
+        user = actor(request)
+        if not user.get('can_upload'):
+            raise HTTPException(403, '管理员尚未开放上传权限。')
+        collection_id = body.get('collection_id')
+        if not isinstance(collection_id, str) or not re.fullmatch(r'[0-9a-f]{32}', collection_id):
+            raise HTTPException(422, '请选择有效的采集文件夹。')
+        sources = [source for source in workspace.media.catalog(user)
+                   if source['id'].split('/')[0] == collection_id]
+        if not sources:
+            raise HTTPException(404, '采集文件夹不存在或未获授权。')
+        records = [workspace.media.reference(user, {
+            'id': source['id'].replace('/', '-'),
+            'collector_id': body.get('collector_id'), 'date': body.get('date'),
+            'scene': body.get('scene'), 'quality': body.get('quality', 'unknown'),
+            'duration_ms': source['duration_ms'], 'source': source['source'],
+        }) for source in sources]
+        return {**store.register_collection(user, records), 'collection': sources[0]['collection']}
+
     @router.post('/videos/batch')
     def video_batch(body: dict, request: Request):
         user = actor(request)

@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 from fastapi import HTTPException
+from ..desktop_cache import collection_name
 
 
 def safe_key(key):
@@ -81,13 +82,13 @@ class ProjectMedia:
         if not video or body.get('duration_ms') != video['duration_ms']:
             raise HTTPException(422, '视频时长或编号与素材不一致。')
         self.service.media_source(project, video['id'])
-        return body
+        return {**body, 'collection_id': project['id'], 'collection_name': collection_name(project), 'video_name': video['name']}
 
     def catalog(self, actor):
         if not actor.get('can_upload'):
             raise HTTPException(403, '管理员尚未开放上传权限。')
         return [{'id': project['id'] + '/' + video['id'], 'name': video['name'],
-                 'collection': project['name'], 'duration_ms': video['duration_ms'],
+                 'collection': collection_name(project), 'collection_id': project['id'], 'duration_ms': video['duration_ms'],
                  'source': {'backend': self.backend, 'key': project['id'] + '/' + video['id']}}
                 for project in self.service.projects() if self.authorized(actor, project['id'])
                 for video in project['videos']]
