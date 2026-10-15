@@ -5,7 +5,7 @@ import re
 import sqlite3
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, RedirectResponse
 from ..media_response import CancellableFileResponse
 from .storage import FileArtifacts, UnavailableMedia
 from .workspace import Workspaces
@@ -18,7 +18,7 @@ def enabled():
     return value == '1'
 
 
-def install(app, actor_for_request, users_for_request, media=None, axis_library=None, accounts=None, source_tools=None):
+def install(app, actor_for_request, users_for_request, media=None, axis_library=None, accounts=None, source_tools=None, artifact_store=None):
     if not enabled():
         return None
     state, artifacts = os.getenv('DATAMARK_TASKS_STATE', ''), os.getenv('DATAMARK_TASKS_ARTIFACTS', '')
@@ -27,7 +27,7 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     if any(p.is_symlink() for p in (Path(state), *Path(state).parents)):
         raise ValueError('Task state must not contain symlinks')
     from .store import TaskStore, TaskError
-    store = TaskStore(state, FileArtifacts(artifacts))
+    store = TaskStore(state, artifact_store or FileArtifacts(artifacts))
     workspace = Workspaces(Path(state) / 'workspaces', store, media or UnavailableMedia())
     router = APIRouter(prefix='/api/tasks')
 
@@ -301,6 +301,9 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
             if state['state'] == 'idle':
                 workspace.service.sessions.start(ident)
             return JSONResponse(status_code=202, content=workspace.service.sessions.status(ident), headers={'Retry-After':'1'})
+        if hasattr(workspace.media, 'media_manifest'):
+            manifest = workspace.media.media_manifest(workspace.service, workspace.service.sessions.manifest(ident))
+            return RedirectResponse(manifest['videos'][0]['url'], status_code=307)
         path = workspace.service.sessions.asset(ident, 'normal', 'v0001')
         return CancellableFileResponse(path, media_type='video/mp4')
 
@@ -326,7 +329,8 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
             if tail == 'session/prepare' and request.method == 'POST':
                 return service.sessions.start(ident, retry_failed=body.get('retry_failed', False))
             if tail == 'session/manifest' and request.method == 'GET':
-                return workspace.urls(service.sessions.manifest(ident), task_id, ident)
+                return (workspace.media.media_manifest(service, service.sessions.manifest(ident))
+                        if hasattr(workspace.media, 'media_manifest') else workspace.urls(service.sessions.manifest(ident), task_id, ident))
             if tail == 'session/browser-ready' and request.method == 'POST':
                 return service.sessions.browser_ready(ident)
             if tail in ('history', 'operations') and request.method == 'GET':
@@ -334,7 +338,8 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
         if resource == 'previews' and tail == 'v0001':
             state = service.sessions.status(ident)
             if state['state'] == 'ready':
-                manifest = workspace.urls(service.sessions.manifest(ident), task_id, ident)
+                manifest = (workspace.media.media_manifest(service, service.sessions.manifest(ident))
+                            if hasattr(workspace.media, 'media_manifest') else workspace.urls(service.sessions.manifest(ident), task_id, ident))
                 video = manifest['videos'][0]
                 return {'state': 'ready', 'progress': 100, 'url': video['fast_url'] if request.query_params.get('fast') == 'true' else video['url']}
             return {'state': 'queued', 'progress': None, 'url': None, 'detail': state.get('detail')}

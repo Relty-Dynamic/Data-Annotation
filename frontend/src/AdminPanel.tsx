@@ -15,7 +15,7 @@ function coveredPercent(report:LocalReport, axis:string):number {
   return Math.min(100,Math.round(covered/duration*100));
 }
 
-export default function AdminPanel({projects,mockMode=false,onClose}:{projects:Project[];mockMode?:boolean;onClose:()=>void}) {
+export default function AdminPanel({projects,mockMode=false,s3Mode=false,onClose}:{projects:Project[];mockMode?:boolean;s3Mode?:boolean;onClose:()=>void}) {
   const [users,setUsers]=useState<ManagedUser[]>([]);
   const [localReports,setLocalReports]=useState<LocalReport[]>([]);
   const [assignments,setAssignments]=useState<Record<string,string>>({});
@@ -31,7 +31,7 @@ export default function AdminPanel({projects,mockMode=false,onClose}:{projects:P
       return [project.id,(await result.json()).user_id??''] as const;
     }));
     setAssignments(Object.fromEntries(pairs));
-    if(!mockMode){
+    if(!mockMode&&!s3Mode){
       const local=await authFetch('/api/local-reports');
       if(!local.ok)throw new Error('读取本机项目总览失败');
       setLocalReports(await local.json());

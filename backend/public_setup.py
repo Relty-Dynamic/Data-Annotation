@@ -1,10 +1,11 @@
-"""Public login via shared accounts; storage business APIs remain unavailable."""
+"""Public shared login and optional private R2 business APIs."""
 from __future__ import annotations
 
 import os
 import hashlib
 import hmac
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -44,6 +45,16 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
     accounts = accounts or (AccountClient() if shared else None)
     from .tasks.routes import enabled as tasks_enabled, install as install_tasks
     task_workspaces = None
+    r2_service = r2_media = None
+    r2_config = os.getenv('DATAMARK_R2_CONFIG', '').strip()
+    if r2_config:
+        state = Path(os.getenv('DATAMARK_R2_STATE', ''))
+        if not state.is_absolute() or not accounts:
+            raise ValueError('R2 requires a private persistent state directory and shared accounts')
+        from .r2_store import R2Store
+        r2_provider = R2Store(Path(r2_config))
+        r2_provider.health()
+
     @asynccontextmanager
     async def lifespan(app):
         try:
@@ -53,6 +64,9 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
                 accounts.close()
             if task_workspaces:
                 task_workspaces.close()
+            if r2_service:
+                r2_service.sessions.close()
+                r2_service.previews.close()
     app = FastAPI(title="DataMark public setup", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(api).hostname, "127.0.0.1", "localhost"])
 
@@ -76,6 +90,16 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
                 ready = accounts.request("GET", "/v1/health")["accounts_ready"] is True
             except HTTPException:
                 pass
+        if r2_service:
+            try:
+                storage_ready = r2_provider.health() is True
+            except HTTPException:
+                storage_ready = False
+            return {'status': 'ok' if ready and storage_ready else 'degraded', 'application': 'datamark', 'mode': 's3', 'storage_backend': 's3',
+                    'ready': ready and storage_ready, 'storage_ready': storage_ready, 'accounts_ready': ready, 'browser_lifetime': False,
+                    'capabilities': ['source-local-cache', 'compact-local-playback', 'four-axis-annotations',
+                        'subaxis-annotations', 'project-naming', 'account-login', 'shared-accounts', 'account-track-library',
+                        'desktop-playback-cache', 's3-catalog'] + (['task-management'] if task_workspaces else [])}
         return {"status": "ok", "application": "datamark", "mode": "public-setup",
                 "ready": False, "storage_backend": "unconfigured", "storage_ready": False,
                 "accounts_ready": ready, "browser_lifetime": False,
@@ -131,15 +155,22 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
         except WebSocketDisconnect:
             pass
 
+    if r2_config:
+        from .r2_routes import install as install_r2
+        r2_service, r2_media = install_r2(app, session, accounts, r2_provider, state)
+
     if tasks_enabled():
         if not accounts:
             raise ValueError('Tasks require shared accounts on the public host')
         from .tasks.accounts import RemoteAccounts
+        from .tasks.storage import ObjectArtifacts
         task_workspaces = install_tasks(app, session, lambda request: account_service().request(
             'POST', '/v1/users', json={'token': request.cookies.get('datamark_session')})['users'],
             axis_library=lambda user, request: account_service().request(
                 'POST', '/v1/axis-library', json={'token': request.cookies.get('datamark_session')})['axes'],
-            accounts=RemoteAccounts(accounts))
+            accounts=RemoteAccounts(accounts), media=r2_media,
+            source_tools=r2_media.source_tools if r2_media else None,
+            artifact_store=ObjectArtifacts(r2_provider) if r2_media else None)
 
     @app.api_route("/api/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
     def unavailable(path: str):

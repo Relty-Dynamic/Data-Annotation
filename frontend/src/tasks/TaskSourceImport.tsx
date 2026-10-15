@@ -23,12 +23,12 @@ export default function TaskSourceImport({disabled,onImported}:{disabled:boolean
     setPaths([]);setPath('');setListing(null);
   }
   function submit(event:FormEvent) {event.preventDefault();void run(async()=>{
-    if(capabilities?.backend==='nas'&&!paths.length){const inspected=await taskRequest<ClaimInspection>('/sources/inspect','POST',{path:path.trim()});if(inspected.requires_choice){setClaim(inspected);setMode(inspected.has_json?'continue':'keep');setStep(1);return;}}
+    if(['nas','s3'].includes(capabilities?.backend??'')&&!paths.length){const inspected=await taskRequest<ClaimInspection>('/sources/inspect','POST',{path:path.trim()});if(inspected.requires_choice){setClaim(inspected);setMode(inspected.has_json?'continue':'keep');setStep(1);return;}}
     await perform();
   });}
   return <section className="task-source-import"><h3>导入视频</h3><p>选择原视频或采集目录，原视频保留原处。导入后再登记视频编号、采集信息和质检结论。</p>
     <form onSubmit={submit}>
-      <label>{capabilities?.backend==='s3-mock'?'模拟 S3 目录':'采集目录或视频完整路径'}<input value={path} disabled={disabled||busy||!capabilities} onChange={event=>{setPath(event.target.value);setPaths([]);}} placeholder={capabilities?.backend==='s3-mock'?'选择模拟 S3 项目目录':'填写当前服务可访问的原视频路径'}/></label>
+      <label>{capabilities?.backend==='s3'?'S3 采集目录':capabilities?.backend==='s3-mock'?'模拟 S3 目录':'采集目录或视频完整路径'}<input value={path} disabled={disabled||busy||!capabilities} onChange={event=>{setPath(event.target.value);setPaths([]);}} placeholder={capabilities?.backend==='s3'?'daily/日期/采集目录':capabilities?.backend==='s3-mock'?'选择模拟 S3 项目目录':'填写当前服务可访问的原视频路径'}/></label>
       <label>采集名称（选填）<input value={name} maxLength={80} disabled={disabled||busy||!capabilities} onChange={event=>setName(event.target.value)} placeholder="默认使用采集目录名"/></label>
       {paths.length>0&&<p>已选择 {paths.length} 个原视频：{paths.map(value=>value.split(/[\\/]/).at(-1)).join('、')}</p>}
       <div className="task-source-actions">{capabilities?.can_pick&&<><button type="button" disabled={disabled||busy} onClick={()=>void pick('files')}>选择视频（可多选）</button><button type="button" disabled={disabled||busy} onClick={()=>void pick('directory')}>选择采集目录</button></>}{capabilities?.can_browse&&<button type="button" disabled={disabled||busy} onClick={()=>void browse()}>浏览采集目录</button>}</div>
@@ -36,6 +36,6 @@ export default function TaskSourceImport({disabled,onImported}:{disabled:boolean
       {error&&<p className="task-error" role="alert">{error}</p>}{notice&&<p role="status">{notice}</p>}
       <button disabled={disabled||busy||!capabilities||(!paths.length&&!path.trim())}>{busy?'正在导入…':'导入视频'}</button>
     </form>
-    {claim&&createPortal(<div className="task-source-claim"><ClaimProjectDialog claim={claim} mode={mode} step={step} busy={busy} error={error} onMode={setMode} onBack={()=>setStep(1)} onCancel={()=>setClaim(null)} onNext={()=>{if(claim.requires_takeover&&step===1){setStep(2);return;}void run(()=>perform(claim));}}/></div>,document.body)}
+    {claim&&createPortal(<div className="task-source-claim"><ClaimProjectDialog claim={claim} storageName={capabilities?.backend==='s3'?'S3':'NAS'} mode={mode} step={step} busy={busy} error={error} onMode={setMode} onBack={()=>setStep(1)} onCancel={()=>setClaim(null)} onNext={()=>{if(claim.requires_takeover&&step===1){setStep(2);return;}void run(()=>perform(claim));}}/></div>,document.body)}
   </section>;
 }

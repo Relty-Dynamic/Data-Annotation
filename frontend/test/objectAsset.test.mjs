@@ -21,3 +21,21 @@ test('mock object downloads use the API host without browser credentials', async
     globalThis.fetch = previousFetch;
   }
 });
+
+
+test('R2 accepts signed HTTPS objects and omits account cookies', async () => {
+  const url = 'https://' + 'a'.repeat(32) + '.r2.cloudflarestorage.com/test-bucket/media/project/normal.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=' + 'b'.repeat(64) + '&X-Amz-Expires=1800';
+  assert.equal(validAssetUrl(url), true);
+  assert.equal(validAssetUrl(url.replace('https:', 'http:')), false);
+  assert.equal(validAssetUrl(url.replace('Expires=1800', 'Expires=7200')), false);
+  assert.equal(validAssetUrl(url.split('?')[0]), false);
+  assert.equal(validAssetUrl(url.replace('/media/', '/private/')), false);
+  const original = globalThis.fetch;
+  globalThis.fetch = async (value, init) => {
+    assert.equal(value, url);
+    assert.equal(init.credentials, 'omit');
+    return new Response('fixture');
+  };
+  try { await fetchAsset(url, {credentials: 'include'}); }
+  finally { globalThis.fetch = original; }
+});
