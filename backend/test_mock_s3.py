@@ -428,8 +428,22 @@ class MockS3WorkflowTests(unittest.TestCase):
                     manifest = client.get(f"/api/projects/{item['id']}/session/manifest")
                     self.assertEqual(manifest.status_code, 200, manifest.text)
                     self.assertIn(expected_path, manifest.json()["videos"][0]["url"])
-                self.assertEqual(client.post(f"/api/projects/{mock.json()['id']}/videos/open", headers=csrf,
-                    json={"path": str(capture), "expected_revision": 0}).status_code, 409)
+                mock_id = mock.json()["id"]
+                before = app.state.service.load(mock_id)
+                removed = client.post(f"/api/projects/{mock_id}/videos/open", headers=csrf,
+                    json={"path": str(capture), "expected_revision": 0})
+                self.assertEqual(removed.status_code, 404, removed.text)
+                relink_path = f"/api/projects/{mock_id}/sources/relink"
+                relink_body = {"path": str(capture), "expected_revision": before["revision"]}
+                self.assertEqual(client.post(relink_path, headers=csrf, json=relink_body).status_code, 403)
+                app.state.auth.create_user("storage-admin", "Storage admin", "storage isolation fixture password", role="admin")
+                with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50003)) as admin:
+                    login = admin.post("/api/auth/login", json={"username": "storage-admin", "password": "storage isolation fixture password"})
+                    self.assertEqual(login.status_code, 200, login.text)
+                    relink = admin.post(relink_path, headers={"X-CSRF-Token": login.json()["csrf"]}, json=relink_body)
+                    self.assertEqual(relink.status_code, 409, relink.text)
+                    self.assertEqual(relink.json()["detail"], "S3 mock 项目不能关联 NAS 视频。")
+                self.assertEqual(app.state.service.load(mock_id), before)
                 project = client.get(f"/api/projects/{project['id']}").json()
                 annotations = project["annotations"]
                 annotations["posture"] = [{"id": "p1", "label": "动", "kind": "interval", "start_ms": 0,
