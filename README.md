@@ -113,6 +113,14 @@ R2 接入只作用于独立公网服务。NAS 和普通本机启动不设置这�
 
 探测只在随机 `_datamark-checks/<编号>/` 创建小型检查对象，核验条件创建、冲突拒绝和读回，保留对象供核查，不覆盖已有采集数据。跨域配置只替换本应用命名的规则，保留其它规则；额外前端域名须逐个传入 `--cors-origin`，不允许任意来源。连接成功不等于已验证所有业务权限。
 
+Ubuntu 上还可运行完整技术验证（需 FFmpeg、独立临时目录且可用空间超过 512 MiB）：
+
+```sh
+/opt/venv/bin/python -m deploy.verify_r2_workflow --config /run/secrets/r2.json --confirm-test-writes
+```
+
+该命令生成测试视频，使用临时账号数据库，经实际公网应用接口执行本机压缩、桌面缓存保留、R2 签名分片上传、草稿保存、JSON 写回重开、版本冲突拒绝及普通／倍速视频和图片下载核验。R2 请求使用真实凭据，但对象全部限制在随机 `_datamark-checks/<编号>/`，不发布正式 `daily/` 项目；检查对象保留供核查，不删除已有对象，不读取生产账号，不切换服务。临时桌面目录用于验证文件及内容一致性，不能代替真实 macOS／Windows 浏览器目录授权和外网用户验收。
+
 部署使用经过完整测试的镜像，将 `deploy/compose.r2-public.yaml` 叠加到原 `deploy/compose.public-setup.yaml`；若任务管理原已启用，还须保留 `deploy/compose.tasks-public.yaml`。配置 `DATAMARK_R2_CONFIG_FILE` 为宿主机密钥文件，`DATAMARK_R2_STATE_DIR` 为独立的公网持久状态目录；后者保存公网项目、草稿、上传进度与可再生成的媒体缓存，不是 NAS 状态目录。只有公网 API 加入存储出站网络，NAS 挂载与账号服务的私有网络保持原配置。`deploy/Dockerfile.r2-public` 可在现有已测试基础镜像上构建独立公网镜像，也可使用完整的 `deploy/Dockerfile.web` 构建本次提交。切换前用 SQLite 在线备份保存公网及任务数据库、保留旧镜像和覆盖文件；回滚时停止公网 API，恢复旧镜像与原覆盖文件，保留新状态目录供排查，不覆盖正在运行的数据库。
 
 启动时先核验桶连接；缺少密钥、权限或持久目录会拒绝启用 R2，不创建另一套账号或转用 NAS。成功启用后健康接口为 `mode: s3`、`storage_backend: s3`；只有共享账号与 R2 当前均可用时才显示 `ready: true`。不配置 R2 时仍是原 `public-setup` 行为。
