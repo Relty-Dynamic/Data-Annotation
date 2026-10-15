@@ -213,6 +213,8 @@ class TaskStore:
 
     def _visible(self, db, actor, task):
         roles = self._roles(db, actor)
+        if task['status'] == 'deleted' and 'leader' not in roles:
+            raise TaskError(403, '任务已删除，仅管理人员可查看历史')
         if not ('leader' in roles or ('annotator' in roles and actor['id'] in task['annotator_ids']) or ('reviewer' in roles and actor['id'] == task.get('reviewer_id'))):
             raise TaskError(403, '无权访问此任务')
 
@@ -234,11 +236,15 @@ class TaskStore:
         obj['video'] = self._read(db, 'videos', task['video_id'])
         return obj
 
-    def list_tasks(self, actor):
+    def list_tasks(self, actor, *, include_deleted=False):
         with self.db() as db:
+            if include_deleted:
+                self._require(db, actor, 'leader')
             result = []
             for row in db.execute('SELECT body FROM tasks'):
                 task = json.loads(row[0])
+                if task['status'] == 'deleted' and not include_deleted:
+                    continue
                 try:
                     result.append(self._view(db, actor, task))
                 except TaskError as exc:
@@ -267,6 +273,13 @@ class TaskStore:
                     result['finals' if final else 'submissions'].append(self._read(db, 'submissions', row[0]))
             return result
 
+    @staticmethod
+    def _check_self_review(actor, annotators, reviewer, participants):
+        if reviewer in annotators:
+            account = (participants or {}).get(reviewer, actor if reviewer == actor['id'] else {})
+            if account.get('role') != 'admin':
+                raise TaskError(422, '仅超级管理员可以复核自己的标注')
+
     def create_task(self, actor, body, *, participants=None):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -277,8 +290,9 @@ class TaskStore:
                 raise TaskError(409, '规则已删除，请选择其他已发布规则')
             annotators = body.get('annotator_ids', [])
             reviewer = body.get('reviewer_id')
-            if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or len(annotators) > 2 or len(set(annotators)) != len(annotators) or (reviewer is not None and not isinstance(reviewer, str)) or reviewer in annotators:
+            if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or len(annotators) > 2 or len(set(annotators)) != len(annotators) or (reviewer is not None and not isinstance(reviewer, str)):
                 raise TaskError(422, '任务人员配置不正确')
+            self._check_self_review(actor, annotators, reviewer, participants)
             try:
                 datetime.fromisoformat(body['deadline'].replace('Z', '+00:00'))
             except (KeyError, ValueError, AttributeError):
@@ -288,12 +302,10 @@ class TaskStore:
                     raise TaskError(409, '视频必须质检合格，并指定复核员')
                 for person, role in [(u, 'annotator') for u in annotators] + [(reviewer, 'reviewer')]:
                     participant = (participants or {}).get(person, actor if person == actor['id'] else {'id': person})
-                    if role == 'annotator' and participant.get('role') == 'admin':
-                        raise TaskError(422, '超级管理员暂不参与标注，请选择标注人')
                     self._require(db, participant, role)
             for row in db.execute('SELECT body FROM tasks'):
                 old = json.loads(row[0])
-                if old['video_id'] == video['id'] and old['task_type'] == rule['task_type']:
+                if old['status'] != 'deleted' and old['video_id'] == video['id'] and old['task_type'] == rule['task_type']:
                     raise TaskError(409, '该视频已有相同类型任务')
             task = {'id': uid(), 'video_id': video['id'], 'rule_id': rule['id'], 'task_type': rule['task_type'], 'annotator_ids': annotators, 'reviewer_id': reviewer, 'deadline': body['deadline'], 'status': 'annotating' if annotators else 'pending', 'revision': 0, 'current_submissions': {}, 'issues': [], 'created_by': actor['id'], 'created_at': stamp()}
             self._save(db, 'tasks', task, True)
@@ -305,9 +317,25 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
         task = self._read(db, 'tasks', id)
         self._visible(db, actor, task)
+        if task['status'] == 'deleted':
+            raise TaskError(410, '任务已删除，不能继续操作')
         if type(body.get('expected_revision')) is not int or body['expected_revision'] != task['revision']:
             raise TaskError(409, {'reason': '任务已更新，请刷新后重试', 'revision': task['revision']})
         return task
+
+    def delete_task(self, actor, id, body):
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._require(db, actor, 'leader')
+            task = self._read(db, 'tasks', id)
+            if task['status'] == 'deleted':
+                return {'id': id, 'status': 'deleted', 'revision': task['revision']}
+            task = self._mutation(db, actor, id, body)
+            previous_status = task['status']
+            task.update(status='deleted', deleted_from_status=previous_status,
+                        deleted_by=actor['id'], deleted_at=stamp())
+            self._finish(db, actor, task, 'delete_task', previous_status=previous_status)
+            return {'id': id, 'status': 'deleted', 'revision': task['revision']}
 
     def assign_task(self, actor, id, body, *, participants=None):
         with self.db() as db:
@@ -318,12 +346,11 @@ class TaskStore:
                 raise TaskError(409, '仅待分配任务可以分配人员')
             annotators = body.get('annotator_ids', [])
             reviewer = body.get('reviewer_id')
-            if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or not 1 <= len(annotators) <= 2 or len(set(annotators)) != len(annotators) or not isinstance(reviewer, str) or not reviewer or reviewer in annotators:
+            if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or not 1 <= len(annotators) <= 2 or len(set(annotators)) != len(annotators) or not isinstance(reviewer, str) or not reviewer:
                 raise TaskError(422, '任务人员配置不正确')
+            self._check_self_review(actor, annotators, reviewer, participants)
             for person, role in [(u, 'annotator') for u in annotators] + [(reviewer, 'reviewer')]:
                 participant = (participants or {}).get(person, actor if person == actor['id'] else {'id': person})
-                if role == 'annotator' and participant.get('role') == 'admin':
-                    raise TaskError(422, '超级管理员暂不参与标注，请选择标注人')
                 self._require(db, participant, role)
             deadline = body.get('deadline', task['deadline'])
             try:
@@ -341,8 +368,6 @@ class TaskStore:
         return self._view(db, actor, task)
 
     def save_draft(self, actor, id, body):
-        if actor.get('role') == 'admin':
-            raise TaskError(403, '超级管理员暂不参与标注')
         with self.db() as db:
             task = self._mutation(db, actor, id, body)
             if actor['id'] not in task['annotator_ids'] or task['status'] not in ('annotating', 'rework') or actor['id'] in task['current_submissions']:
@@ -375,8 +400,6 @@ class TaskStore:
                 raise TaskError(503, '最终版本与任务记录不一致')
 
     def submit(self, actor, id, body):
-        if actor.get('role') == 'admin':
-            raise TaskError(403, '超级管理员暂不参与标注')
         with self.db() as db:
             request_id = body.get('request_id')
             request_key = 'submit:' + id + ':' + actor['id'] + ':' + str(request_id)
@@ -425,7 +448,7 @@ class TaskStore:
     def start_review(self, actor, id, body):
         with self.db() as db:
             task = self._mutation(db, actor, id, body)
-            self._reviewer(db, actor, task)
+            self._reviewer(db, actor, task, allow_self=True)
             self._quality(db, task)
             if task['status'] != 'submitted':
                 raise TaskError(409, '任务尚未完成提交')
@@ -451,7 +474,7 @@ class TaskStore:
     def review(self, actor, id, body):
         with self.db() as db:
             task = self._mutation(db, actor, id, body)
-            self._reviewer(db, actor, task)
+            self._reviewer(db, actor, task, allow_self=True)
             self._quality(db, task)
             if task['status'] != 'reviewing' and not (task['status'] == 'adjudicating' and body.get('action') == 'return'):
                 raise TaskError(409, '任务不在复核中')

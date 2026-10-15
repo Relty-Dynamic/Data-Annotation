@@ -2,6 +2,7 @@ import {useEffect,useState,type FormEvent} from 'react';
 import {authFetch,type Account} from '../auth';
 import {apiUrl} from '../apiOrigin';
 import Timeline from '../Timeline';
+import {canReviewTask} from './permissions';
 import {formatTime,parseTime,type Project} from '../domain';
 import {composeFinal,statusNames,issueRange} from './types';
 import type {TaskItem,TaskRule,TaskRole,TaskVersion,TaskAnnotations,TaskIssue} from './types';
@@ -11,7 +12,7 @@ export default function TaskReview({task,rules,user,roles,accountName=(id:string
  const [mediaReady,setMediaReady]=useState(false),[mediaError,setMediaError]=useState('');
  useEffect(()=>{let cancelled=false,timer:ReturnType<typeof setTimeout>;setMediaReady(false);setMediaError('');async function poll(){try{const r=await authFetch(`/api/tasks/items/${task.id}/media`,{method:'HEAD'});if(cancelled)return;if(r.status===202){timer=setTimeout(poll,2000);return;}if(!r.ok){setMediaError(r.status===503?'素材尚未就绪，暂不能播放。':'无法读取视频，请检查任务权限。');return;}setMediaReady(true);}catch{if(!cancelled)setMediaError('视频连接失败，请重新打开任务。');}}poll();return()=>{cancelled=true;clearTimeout(timer)}} ,[task.id]);
  useEffect(()=>{setTime(0);setChosen({});setSelected(null);setSelectedAxis('');setSelectedVersion(null);setFocusIssue(null);setFormError('');},[task.id]);
- const leader=roles.includes('leader'),self=task.annotator_ids.includes(user.id),reviewer=!self&&(leader||task.reviewer_id===user.id);
+ const leader=roles.includes('leader'),self=task.annotator_ids.includes(user.id),reviewer=canReviewTask(user,roles,task);
  if(!rule)return <p>未取得任务规则，暂不能复核。</p>;
  function submitReview(event:FormEvent<HTMLFormElement>){event.preventDefault();const data=new FormData(event.currentTarget),reason=String(data.get('reason')??'').trim(),axis=String(data.get('axis')??'');const start=parseTime(String(data.get('start')??'')),end=parseTime(String(data.get('end')??''));if(reason&&(start===null||end===null||end<start)){setFormError('请填写有效起止时间，结束时间不能早于开始时间。');return;}setFormError('');const action=String(data.get('action')??'pass');if(action==='return'&&(!reason||!data.getAll('return_to').length)){setFormError('退回时请填写意见并选择返修人员。');return;}const entry={axis,start_ms:start,end_ms:end,reason};onAction('review',{action,resolved_issue_ids:data.getAll('resolved'),issues:action==='return'?[entry]:[],notes:action==='pass'&&reason?[entry]:[],...(action==='return'?{return_to:data.getAll('return_to')}:{} )})}
  function adjudicate(event:FormEvent<HTMLFormElement>){event.preventDefault();const data=new FormData(event.currentTarget),{annotations,contributors}=composeFinal(rule!.axes,versions,chosen);onAction('adjudicate',{annotations,contributors,resolutions:Object.fromEntries((task.issues??[]).map(issue=>[issue.id,String(data.get(issue.id)??'')])),request_id:crypto.randomUUID()})}

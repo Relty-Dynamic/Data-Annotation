@@ -380,6 +380,89 @@ class TaskHostTests(unittest.TestCase):
         self.assertEqual([], self.request(client, 'GET', f'/items/{task_id}')['submissions'])
         self.assertTrue(self.request(client, 'GET', url)['task_readonly'])
 
+    def test_task_delete_requires_manager_csrf_preserves_history_and_frees_type(self):
+        app, client = self.host()
+        task = self.initialize(app, client)
+        project_before = app.state.service.load(self.project['id'])
+        for manager in ('admin', 'lead'):
+            path = f"/items/{task['id']}"
+            for name in ('a', 'reviewer'):
+                headers = self.login(client, name)
+                self.request(client, 'DELETE', path, {'expected_revision': task['revision']}, headers, 403)
+                self.request(client, 'GET', '/items?include_deleted=true', expected=403)
+            headers = self.login(client, manager)
+            self.request(client, 'DELETE', path, {'expected_revision': task['revision']}, expected=403)
+            self.request(client, 'DELETE', path, {'expected_revision': task['revision'] + 1}, headers, 409)
+            deleted = self.request(client, 'DELETE', path, {'expected_revision': task['revision']}, headers)
+            self.assertEqual('deleted', deleted['status'])
+            self.assertEqual([], self.request(client, 'GET', '/items'))
+            self.assertTrue(any(t['id'] == task['id'] for t in self.request(client, 'GET', '/items?include_deleted=true')))
+            self.assertTrue(self.request(client, 'GET', path + '/workspace/project')['task_readonly'])
+            self.request(client, 'POST', path + '/start-review', {'expected_revision': deleted['revision']}, headers, 410)
+            audit = self.request(client, 'GET', '/audit?task_id=' + task['id'])
+            self.assertEqual(1, len([e for e in audit if e['action'] == 'delete_task']))
+            self.login(client, 'a')
+            self.request(client, 'GET', path, expected=403)
+            self.request(client, 'GET', path + '/workspace/project', expected=403)
+            headers = self.login(client, manager)
+            replacement = self.request(client, 'POST', '/items', {'video_id': task['video_id'],
+                'rule_id': task['rule_id'], 'annotator_ids': task['annotator_ids'],
+                'reviewer_id': task['reviewer_id'], 'deadline': task['deadline']}, headers)
+            self.assertNotEqual(task['id'], replacement['id'])
+            task = replacement
+        self.assertEqual(project_before, app.state.service.load(self.project['id']))
+
+    def test_admin_assignment_annotation_self_review_and_rework(self):
+        app, client = self.host()
+        original = self.initialize(app, client)
+        headers = self.login(client, 'admin')
+        admin_id = self.users['admin']['id']
+        self.assertEqual(['annotator', 'leader', 'reviewer'], self.request(client, 'GET', '/me')['roles'])
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                rule = self.request(client, 'POST', '/rules', {'name': 'admin rule',
+                    'task_type': 'admin-' + str(pending), 'axes': original['rule']['axes']}, headers)
+                assignment = {'annotator_ids': [admin_id], 'reviewer_id': admin_id}
+                task = self.request(client, 'POST', '/items', {'video_id': 'clip', 'rule_id': rule['id'],
+                    'deadline': '2026-10-26', **({} if pending else assignment)}, headers)
+                if pending:
+                    task = self.request(client, 'PUT', f"/items/{task['id']}/assignment",
+                        {'expected_revision': task['revision'], **assignment}, headers)
+                path = f"/items/{task['id']}"
+                editor = path + '/workspace/project'
+                self.assertFalse(self.request(client, 'GET', editor)['task_readonly'])
+                annotations = {'posture': [{'id': 'admin-segment', 'label': '坐', 'start_ms': 100, 'end_ms': 900}]}
+                saved = self.request(client, 'PUT', editor + '/draft',
+                    {'expected_revision': task['revision'], 'annotations': annotations}, headers)
+                task = self.request(client, 'POST', path + '/submit',
+                    {'expected_revision': saved['revision']}, headers)
+                old_id = task['current_submissions'][admin_id]['id']
+                self.assertTrue(self.request(client, 'GET', editor)['task_readonly'])
+                task = self.request(client, 'POST', path + '/start-review', {'expected_revision': task['revision']}, headers)
+                self.assertTrue(self.request(client, 'GET', editor)['task_readonly'])
+                task = self.request(client, 'POST', path + '/review', {'expected_revision': task['revision'],
+                    'action': 'return', 'return_to': [admin_id], 'issues': [{'axis': 'posture',
+                    'start_ms': 100, 'end_ms': 900, 'reason': 'check boundary'}]}, headers)
+                self.assertFalse(self.request(client, 'GET', editor)['task_readonly'])
+                task = self.request(client, 'POST', path + '/submit',
+                    {'expected_revision': task['revision'], 'annotations': annotations}, headers)
+                self.assertNotEqual(old_id, task['current_submissions'][admin_id]['id'])
+                history = self.request(client, 'GET', path + '/history')['submissions']
+                self.assertEqual(annotations, next(v for v in history if v['id'] == old_id)['annotations'])
+                task = self.request(client, 'POST', path + '/start-review', {'expected_revision': task['revision']}, headers)
+                task = self.request(client, 'POST', path + '/review', {'expected_revision': task['revision'],
+                    'action': 'pass', 'resolved_issue_ids': [i['id'] for i in task['issues'] if i['id'].startswith('review:')]}, headers)
+                self.assertEqual(admin_id, task['reviewed_by'])
+                self.assertTrue(task['review_complete'])
+                self.request(client, 'POST', path + '/accept', {'expected_revision': task['revision']}, headers, 403)
+        # An administrator can inspect all tasks but cannot annotate unassigned work.
+        path = f"/items/{original['id']}"
+        self.assertTrue(self.request(client, 'GET', path + '/workspace/project')['task_readonly'])
+        self.request(client, 'PUT', path + '/workspace/project/draft',
+            {'expected_revision': original['revision'], 'annotations': {}}, headers, 409)
+        self.request(client, 'POST', path + '/submit',
+            {'expected_revision': original['revision'], 'annotations': {}}, headers, 403)
+
     def test_public_host_shared_bridge_tasks_without_nas_media(self):
         with patch.dict('os.environ', {'DATAMARK_PUBLIC_ORIGIN': 'https://web.example.com',
                 'DATAMARK_PUBLIC_API_ORIGIN': 'https://api.example.com', 'DATAMARK_SHARED_ACCOUNTS': '0'}):
@@ -464,12 +547,13 @@ class TaskHostTests(unittest.TestCase):
             'axes': [{'id': 'posture', 'name': '姿势', 'mode': 'state', 'labels': ['坐']}]}, headers)
         body = {'video_id': 'clip', 'rule_id': rule['id'], 'annotator_ids': [self.users['admin']['id']],
                 'reviewer_id': self.users['admin']['id'], 'deadline': '2026-10-26'}
-        self.request(client, 'POST', '/items', body, headers, 422)
-        self.request(client, 'POST', '/items', {**body, 'reviewer_id': self.users['reviewer']['id']}, headers, 422)
-        assigned = self.request(client, 'POST', '/items', {**body, 'annotator_ids': []}, headers)
+        admin_task = self.request(client, 'POST', '/items', {**body, 'reviewer_id': self.users['reviewer']['id']}, headers)
+        self.assertEqual([self.users['admin']['id']], admin_task['annotator_ids'])
+        pending_rule = self.request(client, 'POST', '/rules', {'name': 'pending rule', 'task_type': 'pending',
+            'axes': rule['axes']}, headers)
+        assigned = self.request(client, 'POST', '/items', {**body, 'rule_id': pending_rule['id'], 'annotator_ids': []}, headers)
         assignment = {'expected_revision': assigned['revision'], 'annotator_ids': [self.users['admin']['id']],
                       'reviewer_id': self.users['reviewer']['id']}
-        self.request(client, 'PUT', f"/items/{assigned['id']}/assignment", assignment, headers, 422)
         assigned = self.request(client, 'PUT', f"/items/{assigned['id']}/assignment",
             {**assignment, 'annotator_ids': [self.users['a']['id']], 'reviewer_id': self.users['admin']['id']}, headers)
         self.assertTrue(self.request(client, 'GET', f"/items/{assigned['id']}/workspace/project")['task_readonly'])

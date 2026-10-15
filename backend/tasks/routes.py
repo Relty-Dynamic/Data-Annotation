@@ -235,8 +235,8 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
         return store.set_quality(actor(request), video_id, body.get('quality'))
 
     @router.get('/items')
-    def tasks(request: Request):
-        return store.list_tasks(actor(request))
+    def tasks(request: Request, include_deleted: bool = False):
+        return store.list_tasks(actor(request), include_deleted=include_deleted)
 
     @router.post('/items')
     def create(body: dict, request: Request):
@@ -255,6 +255,10 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     @router.get('/items/{task_id}/history')
     def history(task_id: str, request: Request):
         return store.history(actor(request), task_id)
+
+    @router.delete('/items/{task_id}')
+    def delete_task(task_id: str, body: dict, request: Request):
+        return store.delete_task(actor(request), task_id, body)
 
     @router.put('/items/{task_id}/assignment')
     def assign(task_id: str, body: dict, request: Request):

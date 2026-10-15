@@ -376,19 +376,16 @@ class TasksTests(unittest.TestCase):
             'axes': [{'id': 'posture', 'name': 'Posture', 'mode': 'state', 'labels': ['sit']}]})
         body = {'video_id': 'v', 'rule_id': rule['id'],
             'annotator_ids': ['admin'], 'reviewer_id': 'reviewer', 'deadline': '2026-10-26'}
-        self.expect(422, lambda: self.store.create_task(self.admin, body,
-                    participants={'admin': self.admin, 'reviewer': self.reviewer}))
-        # Historical submission made before this person became a superadmin.
-        former = {'id': 'admin', 'role': 'annotator'}
-        self.store.set_roles(self.admin, 'admin', ['annotator'])
-        task = self.store.create_task(self.lead, body, participants={'admin': former, 'reviewer': self.reviewer})
+        task = self.store.create_task(self.admin, body,
+                    participants={'admin': self.admin, 'reviewer': self.reviewer})
+        task = self.mutate('save_draft', self.admin, task, annotations=self.annotations())
         annotations = self.annotations()
         annotations['posture'][0].update(needs_review=True, review_reason='check')
-        task = self.mutate('submit', former, task, annotations=annotations)
+        task = self.mutate('submit', self.admin, task, annotations=annotations)
         self.expect(403, lambda: self.mutate('submit', self.admin, task, annotations=annotations))
-        self.expect(403, lambda: self.mutate('start_review', self.admin, task))
-        task = self.mutate('start_review', self.reviewer, task)
-        task = self.mutate('review', self.reviewer, task)
+        task = self.mutate('start_review', self.admin, task)
+        task = self.mutate('review', self.admin, task)
+        self.assertEqual('admin', task['reviewed_by'])
         self.expect(409, lambda: self.mutate('accept', self.lead, task))
         task = self.mutate('adjudicate', self.admin, task, annotations=annotations,
             contributors={'posture:'+s['id']: ['admin'] for s in annotations['posture']},
@@ -401,10 +398,66 @@ class TasksTests(unittest.TestCase):
         self.store.set_roles(self.admin, 'a', ['annotator', 'leader'])
         own = self.task()
         own = self.mutate('submit', self.a, own, annotations=annotations)
+        self.expect(403, lambda: self.mutate('start_review', self.a, own))
         own = self.mutate('start_review', self.reviewer, own)
+        self.expect(403, lambda: self.mutate('review', self.a, own))
         own = self.mutate('review', self.reviewer, own)
         self.expect(403, lambda: self.mutate('adjudicate', self.a, own,
             annotations=annotations, contributors={}, resolutions={i['id']: 'confirmed' for i in own['issues']}))
+
+    def test_delete_task_roles_revision_history_and_recreation(self):
+        for manager in (self.admin, self.lead):
+            task = self.task()
+            task = self.mutate('save_draft', self.a, task, annotations=self.annotations())
+            task = self.mutate('submit', self.a, task)
+            before_history = self.store.history(self.admin, task['id'])
+            before_files = dict(self.artifacts.values)
+            for actor in (self.a, self.reviewer):
+                self.expect(403, lambda: self.mutate('delete_task', actor, task))
+            self.expect(409, lambda: self.store.delete_task(manager, task['id'], {'expected_revision': 0}))
+            deleted = self.mutate('delete_task', manager, task)
+            self.assertEqual('deleted', deleted['status'])
+            self.assertEqual([], self.store.list_tasks(self.admin))
+            self.assertEqual(before_history, self.store.history(manager, task['id']))
+            self.assertEqual(before_files, self.artifacts.values)
+            self.assertEqual('deleted', self.store.get_task(manager, task['id'])['status'])
+            self.assertEqual(manager['id'], self.store.get_task(manager, task['id'])['deleted_by'])
+            self.expect(403, lambda: self.store.get_task(self.a, task['id']))
+            self.expect(403, lambda: self.store.list_tasks(self.reviewer, include_deleted=True))
+            self.expect(410, lambda: self.mutate('start_review', manager, deleted))
+            self.expect(410, lambda: self.mutate('save_draft', manager, deleted, annotations={}))
+            again = self.store.delete_task(manager, task['id'], {'expected_revision': task['revision']})
+            self.assertEqual(deleted, again)
+            audit = [e for e in self.store.audit(manager, task['id']) if e['action'] == 'delete_task']
+            self.assertEqual(1, len(audit))
+            self.assertEqual(manager['id'], audit[0]['actor_id'])
+        self.assertEqual(2, len(self.store.list_tasks(self.admin, include_deleted=True)))
+        replacement = self.task()
+        self.assertNotEqual(task['id'], replacement['id'])
+        self.assertEqual([replacement['id']], [t['id'] for t in self.store.list_tasks(self.a)])
+
+    def test_delete_delivered_task_preserves_delivery_and_audit(self):
+        task = self.task()
+        task = self.mutate('submit', self.a, task, annotations=self.annotations())
+        task = self.mutate('start_review', self.admin, task)
+        task = self.mutate('review', self.admin, task, action='pass')
+        task = self.mutate('accept', self.admin, task)
+        delivery = self.store.deliver(self.admin, {'task_ids': [task['id']],
+            'expected_revisions': {task['id']: task['revision']}, 'request_id': 'delete-delivered'})
+        task = self.store.get_task(self.admin, task['id'])
+        before = self.store.history(self.admin, task['id'])
+        files = dict(self.artifacts.values)
+        deleted = self.mutate('delete_task', self.lead, task)
+        self.assertEqual(delivery, self.store.delivery(self.lead, delivery['id']))
+        self.assertEqual(before, self.store.history(self.lead, task['id']))
+        self.assertEqual(files, self.artifacts.values)
+        for action in ('submit', 'start_review', 'review', 'adjudicate', 'accept', 'assign_task'):
+            self.expect(410, lambda: self.mutate(action, self.admin, deleted))
+        self.expect(409, lambda: self.store.deliver(self.admin, {'task_ids': [task['id']],
+            'expected_revisions': {task['id']: deleted['revision']}, 'request_id': 'deleted-new-delivery'}))
+        with self.store.db() as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute('DELETE FROM audit WHERE task_id=?', (task['id'],))
 
     def test_passing_review_can_keep_location_notes_without_forcing_rework(self):
         task = self.task()

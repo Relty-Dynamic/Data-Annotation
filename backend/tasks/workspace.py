@@ -52,7 +52,7 @@ class Workspaces:
             annotations = (own_submission or {}).get('annotations', {})
         project['annotations'] = {**project['annotations'], **annotations}
         project['revision'] = task['revision']
-        project['task_readonly'] = actor.get('role') == 'admin' or actor['id'] not in task['annotator_ids'] or bool(own_submission) or task['status'] not in ('annotating', 'rework')
+        project['task_readonly'] = actor['id'] not in task['annotator_ids'] or bool(own_submission) or task['status'] not in ('annotating', 'rework')
         project['task_rule'] = task['rule']
         project['task_feedback'] = [{key: issue[key] for key in ('id', 'axis', 'segment_id', 'start_ms', 'end_ms', 'reason') if key in issue}
                                     for issue in task.get('issues', []) if task['status'] == 'rework' and issue['id'].startswith('review:')]

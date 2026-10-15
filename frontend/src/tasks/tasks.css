@@ -28,6 +28,7 @@
 .task-panel-content>details,.task-review details{padding:12px 14px;margin:10px 0;background:#18212a;border:1px solid #343e49;border-radius:7px;overflow-wrap:anywhere}.task-panel summary{color:#bad3dc;cursor:pointer}.task-panel details p{margin-top:8px}
 .task-panel-content>section:not(.task-review){padding:16px 18px;margin:18px 0;border:1px solid #303b46;border-radius:8px;background:#161d24}.task-panel-content>section:not(.task-review)>h3{margin-top:0}.task-panel-content>section:not(.task-review)>button,.task-panel-content>section:not(.task-review)>label{margin-top:12px}
 .task-error{padding:12px 14px;margin:14px 0;background:#332426;color:#e0acaa;border:1px solid #664347;border-radius:6px;line-height:1.6}
+.task-panel .task-success{padding:12px 14px;margin:14px 0;background:#19332d;color:#9be2cf;border:1px solid #3b7565;border-radius:6px;line-height:1.6}
 .task-review{margin-top:24px;padding-top:6px;border-top:1px solid #343e49;min-width:0}.task-review>button{margin:12px 0}.task-review video{display:block;width:100%;max-height:360px;margin:16px 0;border:1px solid #343e49;border-radius:8px;background:#0c1115}
 .task-comparison{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px}.task-comparison>section{min-width:0;padding:10px;background:#151d24;border:1px solid #303b46;border-radius:8px}.task-comparison h4{margin:6px 0 12px}
 .task-issue{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;margin:8px 0;border:1px solid #344450;border-left:3px solid #7893a3;border-radius:5px;background:#19252e}.task-difference{border-left-color:#d6a55c;background:#2c281f}.task-flag{border-left-color:#ac92d0;background:#272335}.task-review-issue{border-left-color:#79a8c5;background:#1d2d39}.task-issue.focused{outline:1px solid #73dac8;outline-offset:1px}
@@ -35,4 +36,34 @@
 @media(max-width:760px){.task-overlay{padding:12px}.task-panel{padding:18px;height:calc(100dvh - 24px)}.task-panel form,.task-panel fieldset{grid-template-columns:1fr;padding:14px}.task-panel>header{margin-bottom:16px}.task-panel>nav{gap:6px}.task-panel>nav button{padding:7px 9px}.task-panel article{align-items:flex-start}.task-panel article select{margin-left:0}}
 
 .task-trace{display:flex;gap:10px 20px;flex-wrap:wrap;margin:12px 0;padding:12px 14px;background:#16242b;border:1px solid #344a54;border-radius:7px;color:#aac2cd;font-size:12px;overflow-wrap:anywhere}.task-segment-trace{border-color:#4b796e}.task-review-note{margin:8px 0;padding:10px 12px;border-left:3px solid #73b8a7;background:#1b302b}
+.task-list-filters{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:12px 0}.task-list-filters>label:last-child{flex:1;max-width:440px;min-width:min(100%,220px)}
 .task-source-actions{display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1}.task-source-listing{grid-column:1/-1;min-width:0;padding:12px;background:#1b2630;border:1px solid #35434e;border-radius:7px}.task-source-listing>div{display:flex;flex-direction:column;gap:6px;margin:10px 0;max-height:240px;overflow:auto}.task-source-listing>div button{justify-content:flex-start;text-align:left}.task-source-listing>div span{padding:6px 10px;color:#96acba;overflow-wrap:anywhere}.task-source-claim .claim-backdrop{z-index:1400}
+
+.task-panel .task-assignment-form{display:flex;flex-direction:column;gap:22px;margin:0;padding:22px}
+.task-assignment-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.task-panel .task-assignment-heading h3{margin:0 0 6px;font-size:16px;color:#dce5ed}
+.task-panel .task-assignment-heading p{margin:0;font-size:12px}
+.task-panel label.task-assignment-mode{padding:9px 12px;background:#1d2932;border:1px solid #354752;border-radius:7px;font-size:12px}
+.task-assignment-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:20px;align-items:stretch}
+.task-panel .task-assignment-grid fieldset{margin:0;padding:16px;background:#18212a;gap:14px;align-content:start}
+.task-panel .task-assignment-grid legend{font-size:13px;color:#c4d5df;padding:0 8px}
+.task-panel .task-assignment-materials{display:flex;flex-direction:column;gap:12px}
+.task-assignment-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#aabecb;font-size:12px}
+.task-assignment-section-heading>span:last-child{color:#87bcb0}
+.task-panel .task-assignment-materials>label{flex:1;display:flex;flex-direction:column}
+.task-panel .task-assignment-materials select{flex:1;min-height:260px}
+.task-panel .task-assignment-form select[multiple]{padding:6px}
+.task-assignment-form select[multiple] option{padding:9px 10px;border-radius:4px;overflow:hidden;text-overflow:ellipsis}
+.task-assignment-settings{display:flex;flex-direction:column;gap:20px;min-width:0}
+.task-panel .task-assignment-rule{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.task-panel .task-assignment-people{grid-template-columns:minmax(0,1fr);flex:1}
+.task-assignment-people:disabled{opacity:.5}
+.task-panel .task-assignment-form .task-assignment-hint{color:#8196a5;font-size:11px;line-height:1.6;margin:0;font-weight:400}
+.task-panel .task-assignment-empty{padding:12px;background:#202c35;border:1px dashed #405563;border-radius:6px;margin:0;font-size:12px}
+.task-assignment-footer{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-top:18px;border-top:1px solid #303b46}
+.task-panel .task-assignment-footer p{margin:0;font-size:12px}
+.task-panel .task-assignment-footer button{min-width:150px;padding:10px 20px;flex-shrink:0}
+.task-panel .task-assignment-form :is(input,select){box-sizing:border-box}
+.task-panel .task-assignment-form :is(input,select):focus-visible{outline:2px solid #73cfbc;outline-offset:2px}
+@media(max-width:1000px){.task-assignment-grid{grid-template-columns:minmax(0,1fr)}.task-panel .task-assignment-materials select{min-height:200px;flex:none}.task-panel .task-assignment-people{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.task-panel .task-assignment-form{padding:14px;gap:18px}.task-panel .task-assignment-rule,.task-panel .task-assignment-people{grid-template-columns:minmax(0,1fr)}.task-assignment-footer{align-items:stretch;flex-direction:column}.task-assignment-footer button{width:100%}}
