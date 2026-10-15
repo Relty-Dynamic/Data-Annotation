@@ -101,6 +101,24 @@ class TaskHostTests(unittest.TestCase):
             self.assertFalse(self.state.exists())
             self.assertFalse(self.artifacts.exists())
 
+    def test_delete_published_rule_admin_only_csrf_and_bound_task_preserved(self):
+        app, client = self.host()
+        task = self.initialize(app, client)
+        rule_id = task['rule_id']
+        for name in ('lead', 'a', 'reviewer'):
+            headers = self.login(client, name)
+            self.request(client, 'DELETE', '/rules/' + rule_id, headers=headers, expected=403)
+        headers = self.login(client, 'admin')
+        self.request(client, 'DELETE', '/rules/' + rule_id, expected=403)
+        self.assertTrue(self.request(client, 'GET', '/rules'))
+        self.request(client, 'DELETE', '/rules/' + rule_id, headers=headers)
+        self.request(client, 'DELETE', '/rules/' + rule_id, headers=headers)
+        self.assertEqual([], self.request(client, 'GET', '/rules'))
+        detail = self.request(client, 'GET', '/items/' + task['id'])
+        self.assertEqual(rule_id, detail['rule']['id'])
+        self.request(client, 'POST', '/items', {'video_id': 'clip', 'rule_id': rule_id,
+            'annotator_ids': [], 'reviewer_id': None, 'deadline': '2026-10-26'}, headers=headers, expected=409)
+
     def test_auth_csrf_roster_and_roles_preserve_legacy_identity_with_upload_defaults(self):
         app, client = self.host()
         self.assertEqual(client.get('/api/tasks/me').status_code, 401)

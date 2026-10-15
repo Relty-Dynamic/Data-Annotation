@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -63,6 +64,41 @@ class TasksTests(unittest.TestCase):
         self.expect(403,lambda:self.store.get_task(self.b,task['id']))
         self.expect(403,lambda:self.mutate('start_review',self.a,task))
         self.expect(409,lambda:self.store.register_video(self.admin,{'video_id':'v','collector_id':'c','date':'d','scene':'s','duration_ms':1,'source':{'backend':'nas','key':'v'}}))
+
+    def test_admin_deletes_rule_without_breaking_bound_task_or_history(self):
+        task = self.task()
+        for actor in (self.lead, self.a, self.reviewer):
+            self.expect(403, lambda: self.store.delete_rule(actor, self.rule['id']))
+        self.store.delete_rule(self.admin, self.rule['id'])
+        self.store.delete_rule(self.admin, self.rule['id'])
+        self.assertEqual([], self.store.list_rules(self.lead))
+        self.expect(409, lambda: self.task())
+        self.assertEqual(self.rule, self.store.get_task(self.a, task['id'])['rule'])
+        task = self.mutate('save_draft', self.a, task, annotations=self.annotations())
+        task = self.mutate('submit', self.a, task, annotations=self.annotations())
+        task = self.mutate('start_review', self.reviewer, task)
+        task = self.mutate('review', self.reviewer, task, action='pass', issues=[])
+        task = self.mutate('accept', self.lead, task)
+        self.assertEqual('accepted', task['status'])
+        self.assertEqual(self.rule, task['rule'])
+        delivery = self.store.deliver(self.lead, {'task_ids': [task['id']],
+            'expected_revisions': {task['id']: task['revision']}, 'request_id': 'deleted-rule-delivery'})
+        rows = list(csv.DictReader(io.StringIO(self.artifacts.get(delivery['artifact_key']).decode('utf-8-sig'))))
+        self.assertTrue(rows)
+        self.assertTrue(all(row['rule_id'] == self.rule['id'] for row in rows))
+        reopened = TaskStore(Path(self.tmp.name), self.artifacts)
+        self.assertEqual([], reopened.list_rules(self.admin))
+        self.assertEqual(self.rule, reopened.get_task(self.lead, task['id'])['rule'])
+        with self.store.db() as db:
+            events = [json.loads(row[0]) for row in db.execute('SELECT body FROM audit')]
+            deleted = [event for event in events if event['action'] == 'delete_rule']
+            self.assertEqual(1, len(deleted))
+            self.assertEqual(self.admin['id'], deleted[0]['actor_id'])
+            self.assertTrue(deleted[0]['at'])
+            for table in ('rules', 'deleted_rules'):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(f'DELETE FROM {table}')
+        self.expect(404, lambda: self.store.delete_rule(self.admin, 'missing'))
 
     def test_invalid_rework_targets_and_contributor_format_leave_task_unchanged(self):
         task = self.task()

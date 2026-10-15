@@ -160,6 +160,10 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     def publish(body: dict, request: Request):
         return store.publish_rule(actor(request), body)
 
+    @router.delete('/rules/{rule_id}')
+    def delete_rule(rule_id: str, request: Request):
+        return store.delete_rule(actor(request), rule_id)
+
     @router.get('/videos')
     def videos(request: Request):
         return store.list_videos(actor(request))

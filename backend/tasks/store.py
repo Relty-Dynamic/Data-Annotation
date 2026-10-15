@@ -38,6 +38,7 @@ class TaskStore:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS roles(user_id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS rules(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS deleted_rules(id TEXT PRIMARY KEY REFERENCES rules(id), body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS videos(id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS drafts(task_id TEXT,user_id TEXT,body TEXT,PRIMARY KEY(task_id,user_id));
@@ -46,7 +47,7 @@ class TaskStore:
             CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY,task_id TEXT,body TEXT);
             CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,body TEXT);
             ''')
-            for table in ('rules', 'submissions', 'audit', 'deliveries', 'requests'):
+            for table in ('rules', 'deleted_rules', 'submissions', 'audit', 'deliveries', 'requests'):
                 for action in ('UPDATE', 'DELETE'):
                     db.execute(f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action} BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT,'immutable record'); END")
 
@@ -113,7 +114,19 @@ class TaskStore:
         with self.db() as db:
             if not self._roles(db, actor):
                 raise TaskError(403, '需要任务角色')
-            return [json.loads(r[0]) for r in db.execute('SELECT body FROM rules')]
+            return [json.loads(r[0]) for r in db.execute('SELECT body FROM rules WHERE id NOT IN (SELECT id FROM deleted_rules)')]
+
+    def delete_rule(self, actor, rule_id):
+        if actor.get('role') != 'admin':
+            raise TaskError(403, '只有超级管理员可删除已发布规则')
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self._read(db, 'rules', rule_id)
+            if not db.execute('SELECT 1 FROM deleted_rules WHERE id=?', (rule_id,)).fetchone():
+                entry = {'id': rule_id, 'deleted_by': actor['id'], 'deleted_at': stamp()}
+                self._save(db, 'deleted_rules', entry, True)
+                self._audit(db, actor, 'delete_rule', rule_id=rule_id)
+        return {'id': rule_id, 'deleted': True}
 
     def publish_rule(self, actor, body):
         with self.db() as db:
@@ -257,6 +270,8 @@ class TaskStore:
             self._require(db, actor, 'leader')
             video = self._read(db, 'videos', body.get('video_id'))
             rule = self._read(db, 'rules', body.get('rule_id'))
+            if db.execute('SELECT 1 FROM deleted_rules WHERE id=?', (rule['id'],)).fetchone():
+                raise TaskError(409, '规则已删除，请选择其他已发布规则')
             annotators = body.get('annotator_ids', [])
             reviewer = body.get('reviewer_id')
             if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or len(annotators) > 2 or len(set(annotators)) != len(annotators) or (reviewer is not None and not isinstance(reviewer, str)) or reviewer in annotators:

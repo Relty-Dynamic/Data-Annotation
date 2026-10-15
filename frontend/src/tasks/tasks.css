@@ -3,6 +3,8 @@
 .task-panel-content{flex:1;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:#455563 transparent;padding-right:8px;margin-right:-8px}
 .task-panel>header{flex:none;display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:20px}
 .task-panel>header h2{font-size:18px;font-weight:500}
+.task-panel button.task-danger,.task-panel .task-rule-delete-dialog button.task-danger{color:#edb4b1;border-color:#865353;background:#38262a}.task-panel button.task-danger:hover:not(:disabled),.task-panel .task-rule-delete-dialog button.task-danger:hover:not(:disabled){color:#ffe0dd;border-color:#c98780;background:#503036}
+.task-rule-delete-dialog{width:min(480px,calc(100vw - 32px));max-height:calc(100dvh - 32px);box-sizing:border-box;overflow-y:auto;margin:auto;padding:24px;background:#1b222a;color:#dce5ed;border:1px solid #485664;border-radius:12px;box-shadow:0 25px 100px #0007;overflow-wrap:anywhere}.task-rule-delete-dialog::backdrop{background:#080d13c7;backdrop-filter:blur(3px)}.task-rule-delete-dialog h3{margin:0 0 12px}.task-panel .task-rule-delete-dialog form{display:flex;justify-content:flex-end;gap:10px;margin:20px 0 0;padding:0;background:none;border:0}.task-panel .task-rule-delete-dialog form>button+button{margin-top:0}
 .task-panel h3{margin:22px 0 12px;font-size:14px;font-weight:600}.task-panel h4{font-size:13px;color:#c4d5df}
 .task-panel p{color:#9bafbd;line-height:1.7;overflow-wrap:anywhere}.task-panel-content>p{margin:12px 0}
 .task-panel>nav{flex:none;display:flex;gap:8px;flex-wrap:wrap;padding-bottom:16px;margin-bottom:18px;border-bottom:1px solid #343e49}
