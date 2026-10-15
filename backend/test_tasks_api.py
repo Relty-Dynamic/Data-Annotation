@@ -548,7 +548,7 @@ class TaskHostTests(unittest.TestCase):
 
 
 class ArtifactContractTests(unittest.TestCase):
-    def test_file_artifacts_immutable_safe_keys_and_symlinks(self):
+    def test_file_artifacts_immutable_safe_keys_and_readback(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             store = FileArtifacts(root / 'safe')
@@ -562,15 +562,25 @@ class ArtifactContractTests(unittest.TestCase):
             for key in ('../escape', '/absolute', 'task//v', 'task/./v'):
                 with self.assertRaises(HTTPException):
                     store.put(key, payload)
-            (root / 'safe' / 'link').symlink_to(root, target_is_directory=True)
-            with self.assertRaises(HTTPException):
-                store.put('link/escape', payload)
-            with self.assertRaises(ValueError):
-                FileArtifacts(root / 'safe' / 'link')
             with patch.object(store, 'get', return_value=b'corrupt'):
                 with self.assertRaises(HTTPException) as error:
                     store.put('task/v2.json', payload)
                 self.assertEqual(503, error.exception.status_code)
+
+    def test_file_artifacts_reject_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            store = FileArtifacts(root / 'safe')
+            try:
+                (root / 'safe' / 'link').symlink_to(root, target_is_directory=True)
+            except OSError as error:
+                if getattr(error, 'winerror', None) == 1314:
+                    self.skipTest('Windows account lacks symbolic-link privilege')
+                raise
+            with self.assertRaises(HTTPException):
+                store.put('link/escape', b'version')
+            with self.assertRaises(ValueError):
+                FileArtifacts(root / 'safe' / 'link')
 
     def test_object_provider_conditional_create_and_verified_readback(self):
         class Provider:

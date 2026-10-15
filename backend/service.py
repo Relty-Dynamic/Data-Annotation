@@ -1161,7 +1161,7 @@ class ProjectService:
             for video in reversed(old_videos):
                 if value == video["end_ms"]:
                     return target[video["id"]]["end_ms"]
-            raise HTTPException(409, "已有标注的时间无法对应原视频，未进行补导入。")
+            raise HTTPException(409, "已有标注的时间无法对应原视频，未更改项目。")
 
         result = empty_annotations()
         closed_pending = 0
@@ -1190,7 +1190,7 @@ class ProjectService:
                     else:
                         spans.append([mapped_left, mapped_right])
                 if not spans or (record["end_ms"] is not None and covered != stop - record["start_ms"]):
-                    raise HTTPException(409, "已有标注无法完整对应原视频，未进行补导入，请先检查该标注。")
+                    raise HTTPException(409, "已有标注无法完整对应原视频，未更改项目，请先检查该标注。")
                 if record["end_ms"] is None:
                     if spans[-1][1] == duration_ms:
                         spans[-1][1] = None
@@ -1203,78 +1203,13 @@ class ProjectService:
         return validate_annotations(result, duration_ms, videos=videos,
                                     custom_tracks=project.get("custom_tracks", []), enabled_fixed_tracks=fixed_tracks(project), fixed_label_options=track_labels(project)), warnings
 
-    def supplement(self, ident: str, paths: list[Path], expected_revision: int, skipped_names: list[str] | None = None) -> dict:
-        """Atomically extend one project; only incoming sources are probed/read."""
-        self.sessions.invalidate(ident, preserve_ready=True)
-        with self.lock:
-            previous = self.load(ident)
-            if previous["revision"] != expected_revision:
-                raise HTTPException(409, "该项目已在其他窗口更新，请重新打开项目后补导入。")
-            seen = {video["name"].casefold() for video in previous["videos"]}
-            skipped, additions = list(skipped_names or []), []
-            for path in paths:
-                path = path.resolve()
-                if self.is_managed_copy(path) or CACHE_FOLDER in path.parts:
-                    raise HTTPException(422, "请从原视频目录补导入，不要选择平台导入副本或缓存文件。")
-                if path.name.casefold() in seen:
-                    if path.name not in skipped:
-                        skipped.append(path.name)
-                    continue
-                if path.suffix.casefold() not in VIDEO_EXTENSIONS:
-                    raise HTTPException(422, f"不支持的视频文件格式：{path.name}")
-                seen.add(path.name.casefold())
-                additions.append(path)
-            if not additions:
-                return {"project": self.public(previous), "added_count": 0, "skipped_names": skipped}
-            if self.source_overlap(additions, except_id=ident):
-                raise HTTPException(409, "补导入的视频已属于其他项目，不能由两个标注员同时编辑。")
-            if len(previous["videos"]) + len(additions) > 1000:
-                raise HTTPException(422, "补导入后单个项目不能超过 1000 个视频。")
-            all_paths = [Path(previous["_sources"][video["id"]]["path"]) for video in previous["videos"]] + additions
-            fresh = self.create(all_paths, previous["name"], Path(previous["source_dir"]) if previous["source_dir"] else None,
-                                ident, imported_at=previous.get("imported_at"), existing=previous)
-            annotations, warnings = self.remap_annotations(previous, fresh["videos"], fresh["duration_ms"])
-            legacy_fingerprints = dict(previous.get("_legacy_cache_fingerprints", {}))
-            for video in previous["videos"]:
-                legacy_fingerprints.setdefault(video["id"], previous["source_fingerprint"])
-            # Keep source-directory identity and writeback conflict hashes intact.
-            # A supplemented project is reopened as this saved composition.
-            project = {**previous, **{key: fresh[key] for key in
-                       ("videos", "_sources", "source_fingerprint", "duration_ms", "recording_start", "gaps")},
-                       "annotations": annotations, "revision": previous["revision"] + 1, "updated_at": now(),
-                       "draft_dirty": True, "_supplemented": True, "_supplement_warnings": warnings,
-                       "_legacy_cache_fingerprints": legacy_fingerprints,
-                       "warnings": alignment_warnings(fresh["videos"]) + warnings}
-            self.attach_source_caches(project, video_ids={video["id"] for video in fresh["videos"] if video["name"].casefold() not in {item["name"].casefold() for item in previous["videos"]}})
-            public = self.public(project)
-            self.save(project)
-            return {"project": public, "added_count": len(additions), "skipped_names": skipped}
-
-    def supplement_path(self, ident: str, raw_path: str, expected_revision: int) -> dict:
-        if not raw_path or not raw_path.strip().strip('"'):
-            raise HTTPException(422, "请输入要补导入的视频文件或目录路径。")
-        path = Path(raw_path.strip().strip('"')).expanduser()
-        try:
-            path = path.resolve(strict=True)
-            if path.is_file():
-                paths = [path]
-            else:
-                fpv = next((child for child in path.iterdir() if child.is_dir() and child.name.casefold() == "fpv"), None)
-                folder = fpv or path
-                paths = [item for item in folder.iterdir() if item.is_file() and item.suffix.casefold() in VIDEO_EXTENSIONS]
-        except OSError:
-            raise HTTPException(422, "无法访问补导入素材，请检查服务器路径、网络及共享目录权限。")
-        if not paths:
-            raise HTTPException(422, "没有找到支持的视频，请选择视频文件或所在目录。")
-        return self.supplement(ident, paths, expected_revision)
-
     def reopen_supplemented(self, project: dict, paths: list[Path], *, import_external: bool = True) -> dict:
         """A source directory is only one part of a supplemented composition."""
         by_name = {video["name"].casefold(): video for video in project["videos"]}
         for path in paths:
             video = by_name.get(path.name.casefold())
             if video is None:
-                raise HTTPException(409, "该目录含有尚未加入项目的视频，请打开现有项目后使用补导入。")
+                raise HTTPException(409, "该目录含有未纳入现有项目的视频。补导入功能已移除；请从项目列表打开原项目继续标注。")
             original = project["_sources"][video["id"]]
             stamp = self.source_stamp(path)
             same_path = os.path.normcase(str(path.resolve())) == os.path.normcase(original["path"])
@@ -1832,6 +1767,8 @@ class ProjectService:
     @staticmethod
     def attach_library_track(project: dict, track: dict) -> None:
         axis = track["id"]
+        if axis == "habit":
+            raise HTTPException(410, "内置习惯轴已停用；请创建自定义事件轴。")
         if axis in AXES:
             if axis in fixed_tracks(project):
                 return
@@ -1847,6 +1784,7 @@ class ProjectService:
 
     @project_locked
     def initialize_track_library(self, ident: str, defaults: list[dict], *, actor: dict | None = None) -> dict:
+        defaults = [track for track in defaults if track["id"] != "habit"]
         project = self.load(ident, allow_deleting=True)
         if project.get("_deleting"):
             return self.public(project)
@@ -1911,6 +1849,8 @@ class ProjectService:
             raise HTTPException(409, "项目已在其他窗口更新，请重新打开后选择时间轴。")
         if not isinstance(ids, list) or any(not isinstance(axis, str) for axis in ids) or len(set(ids)) != len(ids):
             raise HTTPException(422, "时间轴选择无效或重复。")
+        if "habit" in ids:
+            raise HTTPException(422, "内置习惯轴已停用；历史标注仍保留，可使用自定义事件轴继续标注。")
         snapshots = set(fixed_tracks(project)) | {track["id"] for track in project.get("custom_tracks", [])}
         available = {track["id"]: track for track in library}
         if any(axis not in snapshots and axis not in available for axis in ids):
@@ -1958,6 +1898,8 @@ class ProjectService:
             return self.public(project)
 
     def set_fixed_track(self, ident: str, track_id: str, enabled: bool, expected_revision: int) -> dict:
+        if track_id == "habit" and enabled:
+            raise HTTPException(410, "内置习惯轴已停用；请创建自定义事件轴。")
         if track_id not in AXES:
             raise HTTPException(404, "找不到这条固定时间轴。")
         with self.lock:
@@ -2072,8 +2014,12 @@ class ProjectService:
                           "url": None, "thumbnail_url": None, "stamp": source["stamp"]})
         return digest(document_bytes(items))
 
-    def export_documents(self, project: dict, *, for_writeback: bool = False) -> tuple[str, dict[str, bytes]]:
-        written_tracks = selected_tracks(project) if for_writeback else [*AXES, *(track["id"] for track in project.get("custom_tracks", []))]
+    def export_documents(self, project: dict, *, for_writeback: bool = False,
+                         include_retired: bool = True) -> tuple[str, dict[str, bytes]]:
+        active_selection = [axis for axis in selected_tracks(project) if axis != "habit"]
+        written_tracks = (active_selection if for_writeback else
+                          [*[axis for axis in AXES if include_retired or axis != "habit"],
+                           *(track["id"] for track in project.get("custom_tracks", []))])
         if for_writeback and not written_tracks:
             raise HTTPException(422, "请先选择至少一条时间轴，再写回原目录。")
         exported_annotations = {axis: records if axis in written_tracks else []
@@ -2084,7 +2030,7 @@ class ProjectService:
         save_id = uuid.uuid4().hex
         recording_start = datetime.fromisoformat(project["recording_start"]).astimezone(timezone(timedelta(hours=8)))
         timebase = {"unit": "ms", "origin": "recording_datetime", "real_time_format": "HHMMSS", "recording_start": project["recording_start"], "timezone": "Asia/Shanghai", "gaps": project["gaps"], "interval": "[start,end)", "point_semantics": "instant; start_ms=end_ms", "duration_ms": project["duration_ms"], "source_fingerprint": project["source_fingerprint"], "fixed_tracks": fixed_tracks(project), "track_labels": track_labels(project), "videos": [{key: video[key] for key in ("id", "relative_path", "recording_start", "original_media_start_ms", "duration_ms", "start_ms", "end_ms")} for video in project["videos"]]}
-        timebase["selected_tracks"] = selected_tracks(project)
+        timebase["selected_tracks"] = active_selection if for_writeback or not include_retired else selected_tracks(project)
         if for_writeback:
             timebase["written_tracks"] = written_tracks
         timebase["track_names"] = project.get("track_names", {})
@@ -2181,6 +2127,12 @@ class ProjectService:
             for axis, payload in documents.items():
                 archive.writestr(filename_for_axis(axis), payload)
         return buffer.getvalue()
+
+    def export_files(self, ident: str) -> dict:
+        project = self.load(ident)
+        _, documents = self.export_documents(project, include_retired=False)
+        return {"documents": [{"name": filename_for_axis(axis), "content": payload.decode("utf-8")}
+                              for axis, payload in documents.items()]}
 
     @staticmethod
     def expected_external_hashes(project: dict) -> dict:

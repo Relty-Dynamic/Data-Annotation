@@ -31,8 +31,6 @@ html, body, #root { width: 100%; height: 100%; min-height: 0; overflow: hidden; 
 .annotation-content .record-list { max-height: none; overflow: visible; }
 .annotation-footer { flex: 0 0 auto; padding: 8px 12px; }
 .section-caption { margin-bottom: 9px; }
-.cursor-card { padding: 10px; }
-.cursor-card strong { font-size: 18px; }
 .instruction { margin-block: 11px; }
 .state-buttons button { height: 65px; }
 .current-label { margin-bottom: 14px; }
@@ -81,7 +79,6 @@ html, body, #root { width: 100%; height: 100%; min-height: 0; overflow: hidden; 
   .statusbar { flex-wrap: nowrap; font-size: 9px; }
   .statusbar > span:last-child { display: none; }
   .track-tabs { padding-inline: 7px; }
-  .cursor-card strong { font-size: 15px; }
   .annotation-footer { padding: 6px 8px; }
   .instruction { font-size: 10px; }
   .empty-preview { padding: 10px; }
@@ -110,7 +107,6 @@ html, body, #root { width: 100%; height: 100%; min-height: 0; overflow: hidden; 
   .track-tabs button { padding: 5px 0; font-size: 10px; gap: 4px; }
   .annotation-content { padding: 8px; }
   .annotation-footer .secondary { font-size: 9px; padding: 5px; }
-  .cursor-card { flex-wrap: wrap; gap: 4px; padding: 7px; }
   .time-fields, .capture-fields { gap: 5px; }
   .capture-fields input, .time-fields input { font-size: 9px; }
   .statusbar { padding: 5px 9px; }
@@ -176,16 +172,15 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 .delete-project-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 23px; }
 .delete-project-confirm { padding: 9px 16px; min-height: 36px; border: 1px solid #d8847b; border-radius: 6px; background: #b95550; color: #fff4ef; }
 
-/* Keep supplement import accessible without pushing the workspace off-screen. */
+/* Compact project actions. */
 .workspace-actions { min-width: 0; max-width: 75%; gap: 8px; }
 .workspace-actions > button { flex: 0 0 auto; white-space: nowrap; }
 .workspace-actions .project-switcher { flex: 0 1 205px; }
 .workspace-actions .project-picker { width: 165px; max-width: 100%; min-width: 100px; flex: 1 1 auto; }
-.supplement-action { border-color: #446b68; color: #afe3d7; background: #1c302f; }
-.supplement-target { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 11px 12px; margin: 15px 0 12px; border: 1px solid #38554f; border-radius: 6px; background: #192b28; }
-.supplement-target span, .supplement-target small { font-size: 11px; color: #8aafa4; }
-.supplement-target strong { color: #c2e6da; font-weight: 550; overflow-wrap: anywhere; }
-.supplement-target small { margin-left: auto; }
+.relink-target { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 11px 12px; margin: 15px 0 12px; border: 1px solid #38554f; border-radius: 6px; background: #192b28; }
+.relink-target span, .relink-target small { font-size: 11px; color: #8aafa4; }
+.relink-target strong { color: #c2e6da; font-weight: 550; overflow-wrap: anywhere; }
+.relink-target small { margin-left: auto; }
 .import-modal { overflow-y: auto; outline: none; }
 .import-modal p.import-error { margin-top: 14px; padding: 11px 12px; border: 1px solid #825251; border-radius: 6px; background: #39272a; color: #f0bcb4; line-height: 1.7; overflow-wrap: anywhere; }
 @media (max-width: 1250px) {
@@ -284,7 +279,7 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 :fullscreen .workspace-fullscreen-exit { display: block; }
 .save-indicator { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #8cabba; }
 .editor-grid { grid-template-columns: minmax(0, 1fr) clamp(280px, 26vw, 350px); gap: 8px 10px; margin: 8px 12px; }
-.workspace-sidebar { grid-column: 2; grid-row: 1 / 3; display: flex; flex-direction: column; align-items: stretch; min-width: 0; min-height: 0; gap: 8px; overflow: hidden; }
+.workspace-sidebar { grid-column: 2; grid-row: 1 / 3; display: flex; flex-direction: column; align-items: stretch; min-width: 0; min-height: 0; gap: 8px; overflow-y: auto; scrollbar-width: thin; }
 .workspace-tools { flex: 0 0 auto; min-width: 0; padding: 8px; background: #171d23; border: 1px solid #2a353f; border-radius: 8px; }
 .workspace-tools .workspace-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; max-width: none; gap: 6px; }
 .workspace-tools .workspace-actions > button { width: auto; min-width: 0; min-height: 30px; padding: 5px 7px; gap: 5px; font-size: 11px; }
@@ -295,14 +290,12 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 .workspace-tools .project-delete-button { width: 30px; height: 30px; }
 .workspace-tools .prepare-action { grid-column: 1 / -1; }
 .output-status { display: flex; flex-wrap: wrap; gap: 3px 9px; margin-top: 6px; color: #d1b889; font-size: 10px; line-height: 1.5; }
-.workspace-sidebar .annotation-panel { flex: 0 1 auto; min-height: 0; height: auto; max-height: 100%; align-self: stretch; }
+.workspace-sidebar .annotation-panel { flex: 0 0 auto; min-height: 0; height: auto; max-height: none; align-self: stretch; }
 .annotation-panel > .panel-heading { flex-basis: 28px; height: 28px; min-height: 28px; padding-inline: 10px; }
 .annotation-panel .track-tabs { padding: 4px 8px 0; }
 .annotation-panel .track-tabs button { padding-block: 6px; }
 .annotation-content { flex: 1 1 auto; padding: 9px 10px; scrollbar-gutter: auto; }
 .annotation-content > .section-caption { margin-bottom: 6px; }
-.cursor-card { padding: 7px 9px; }
-.cursor-card strong { font-size: 17px; }
 .instruction { display: none; }
 .state-buttons { margin-top: 9px; gap: 7px; }
 .state-buttons button { height: 46px; gap: 3px; }
@@ -352,7 +345,6 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
   .save-indicator { font-size: 9px; max-width: 95px; overflow: hidden; white-space: nowrap; }
   .top-actions { gap: 3px; }
   .compact-project-name { font-size: 11px; }
-  .cursor-card strong { font-size: 14px; }
   .annotation-panel .track-tabs { padding-inline: 5px; }
   .workspace-tools .project-picker select { padding-inline: 26px; font-size: 10px; }
   .play-options { width: 100%; margin: 0; }
@@ -420,7 +412,7 @@ html, body, #root, .app-shell { overscroll-behavior-x: none; touch-action: pan-y
 .workspace-tools .project-delete-button { width: 34px; height: 34px; }
 .workspace-tools .project-output-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding-top: 9px; margin-top: 3px; border-top: 1px solid #37444e; }
 .project-output-actions > span { grid-column: 1 / -1; color: #a4bac7; font-size: 11px; font-weight: 600; }
-.project-output-actions .writeback-action { grid-column: 1 / -1; }
+.project-output-actions .writeback-action, .project-output-actions .posture-import-action { grid-column: 1 / -1; }
 .workspace-tools .output-status { margin-top: 8px; padding: 7px 9px; border: 1px solid #584a35; border-radius: 5px; background: #2a251d; color: #ead09a; font-size: 11px; }
 .save-indicator { min-height: 25px; padding: 3px 8px; border: 1px solid #354d48; border-radius: 5px; background: #1b2d2a; color: #b7ddd3; font-size: 11px; }
 .save-indicator .status-dot.bad { background: #e4a18f; }
@@ -565,9 +557,6 @@ html, body, #root { background: var(--bg); }
 .delete-custom-track-dialog[open] { display: flex; flex-direction: column; gap: 15px; }
 .delete-custom-track-dialog .import-error { padding: 9px 11px; border: 1px solid #825251; border-radius: 6px; background: #39272a; color: #f0bcb4; }
 .delete-custom-track-confirm { padding: 8px 14px; border: 1px solid #bd6e68; border-radius: 6px; background: #a54b4b; color: #fff5f1; }
-.cursor-card { border-color: #395361; background: linear-gradient(120deg, #1a303b, #15242e); }
-.cursor-card > span { color: #aac1ca; }
-.cursor-card strong { color: #d1f0e9; }
 .state-buttons button { border-color: #405563; background: #20313c; color: #d0dfe5; }
 .state-buttons button:hover:not(:disabled) { border-color: #83b5b6; background: #28404d; }
 .state-buttons button.chosen { box-shadow: inset 0 0 0 1px #88b8df55; }
@@ -600,3 +589,19 @@ html, body, #root { background: var(--bg); }
 .hidden-fixed-templates { align-items: center; }
 .cache-location-dialog[open] { display:flex; flex-direction:column; gap:14px; }
 .cache-location-dialog label { display:flex; flex-direction:column; gap:8px; }
+
+.sidebar-module { flex: 0 0 auto; min-width: 0; border: 1px solid #344653; border-radius: 8px; background: #18252f; overflow: hidden; }
+.sidebar-module > .panel-heading { height: 29px; min-height: 29px; padding: 0 10px; }
+.module-content { padding: 8px 10px; }
+.module-placeholder { padding: 12px 10px; color: #91a6b4; font-size: 11px; line-height: 1.6; }
+.project-management .module-content { display: flex; flex-direction: column; gap: 6px; }
+.project-management .prepare-action { min-height: 28px; padding: 4px 8px; font-size: 11px; }
+.output-actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.output-actions > button { min-height: 30px; padding: 5px 9px; font-size: 11px; }
+.output-actions .output-status { margin: 0; }
+.annotation-editor .segment-editor { margin: 0; border: 0; }
+.annotation-editor .section-caption { margin: 0; }
+.annotation-editor .danger-icon { width: 27px; height: 25px; }
+.annotation-editor input, .annotation-editor select { min-height: 32px; padding: 7px 9px; font-size: 12px; }
+.annotation-editor .input-hint { color: #91a6b4; font-size: 10px; line-height: 1.5; }
+.annotation-editor .annotation-author { font-size: 10px; color: #8295a3; margin-top: 6px; }

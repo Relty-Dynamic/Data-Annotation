@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -116,12 +117,17 @@ class ProjectNamingTests(unittest.TestCase):
         self.assertEqual((reopened["id"], reopened["name"], reopened["revision"]),
                          (project["id"], project["name"], project["revision"]))
 
-    def test_supplement_and_supplemented_reopen_preserve_renamed_project(self):
+    def test_legacy_composition_reopen_preserves_renamed_project(self):
         project = self.service.open_path(str(self.source), name="开始名称")
         renamed = self.service.rename_project(project["id"], "追加素材的项目", project["revision"])
         extra = self.root / "clip_20260914000005.mp4"
         extra.write_bytes(b"synthetic new source")
-        after = self.service.supplement(project["id"], [extra], renamed["revision"])["project"]
+        before = self.service.load(project['id'])
+        composed = self.service.create([*[Path(source['path']) for source in before['_sources'].values()], extra],
+                                       before['name'], self.source, before['id'], existing=before)
+        after = {**before, **{key: composed[key] for key in ('videos', '_sources', 'source_fingerprint', 'duration_ms', 'recording_start', 'gaps')},
+                 '_supplemented': True}
+        self.service.save(after)
         self.assertEqual(after["name"], "追加素材的项目")
         reopened = self.service.open_path(str(self.source), name="不得覆盖补导入名称")
         self.assertEqual((reopened["id"], reopened["name"]), (project["id"], after["name"]))

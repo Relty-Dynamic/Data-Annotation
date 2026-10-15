@@ -18,6 +18,20 @@ from backend.testing_annotations import complete_annotations, complete_project
 from backend.service import LEGACY_TRACK_LABELS, AXES, FILENAMES, ProjectService, empty_annotations, natural_key, parse_recording_start, recording_layout, validate_annotations
 
 ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_AXES = ("scene", "posture", "category")
+
+
+def seed_historical_timeline(service, ident):
+    """Create an explicit legacy batch so retired habit imports stay covered."""
+    stored = service.load(ident)
+    _, documents = service.export_documents(stored, include_retired=True)
+    directory = Path(stored["source_dir"]) / "timeline"
+    directory.mkdir(exist_ok=True)
+    for axis, raw in documents.items():
+        (directory / FILENAMES[axis]).write_bytes(raw)
+    stored["_external_hashes"] = service.current_external_hashes(Path(stored["source_dir"]))
+    service.save(stored)
+    return documents
 
 
 class ValidationTests(unittest.TestCase):
@@ -267,7 +281,10 @@ class PersistenceTests(unittest.TestCase):
             point_time = second["start_ms"] + 123
             annotations["habit"] = [{"id": "aligned-event", "label": "喝水", "kind": "point", "start_ms": point_time, "end_ms": point_time}]
             updated = self.service.update_draft(project["id"], complete_annotations(project, annotations), project["revision"])
-            self.service.writeback(project["id"])
+            historical = seed_historical_timeline(self.service, project["id"])
+            written = self.service.writeback(project["id"])
+            self.assertNotIn(str(source / "timeline" / FILENAMES["habit"]), written["paths"])
+            self.assertEqual((source / "timeline" / FILENAMES["habit"]).read_bytes(), historical["habit"])
             for axis in AXES:
                 document = json.loads((source / "timeline" / FILENAMES[axis]).read_bytes())
                 policy = document["timebase"]["alignment_policy"]
@@ -543,7 +560,10 @@ class PersistenceTests(unittest.TestCase):
         annotations["category"] = [{"id": "category-clock", "label": "专注", "start_ms": 11250, "end_ms": 11999}]
         annotations["habit"] = [{"id": "drink-water", "label": "喝水", "kind": "point", "start_ms": 11250, "end_ms": 11250}]
         updated = self.service.update_draft(project["id"], complete_annotations(project, annotations), 0)
-        self.service.writeback(project["id"])
+        historical = seed_historical_timeline(self.service, project["id"])
+        written = self.service.writeback(project["id"])
+        self.assertNotIn(str(source / "timeline" / FILENAMES["habit"]), written["paths"])
+        self.assertEqual((source / "timeline" / FILENAMES["habit"]).read_bytes(), historical["habit"])
         for axis in AXES:
             with self.subTest(axis=axis):
                 document = json.loads((source / "timeline" / FILENAMES[axis]).read_bytes())
@@ -618,7 +638,9 @@ class PersistenceTests(unittest.TestCase):
         # local IDs to the source identity fingerprint.
         other = ProjectService(self.root / "another-local-runtime")
         imported = other.open_path(str(self.source))
-        self.assertEqual(imported["annotations"], project["annotations"])
+        self.assertEqual(imported["annotations"], {**project["annotations"], "habit": []})
+        self.assertEqual(self.service.load(project["id"])["annotations"], project["annotations"])
+        self.assertFalse((self.source / "timeline" / FILENAMES["habit"]).exists())
         path = self.source / "timeline" / FILENAMES["scene"]
         path.write_bytes(path.read_bytes() + b"\n")
         with self.assertRaises(HTTPException) as context:
@@ -642,7 +664,10 @@ class PersistenceTests(unittest.TestCase):
             {"id": "point-end", "label": "眨眼", "kind": "point", "start_ms": 3000, "end_ms": 3000},
         ])
         updated = self.service.update_draft(project["id"], complete_annotations(project, annotations), project["revision"])
-        self.service.writeback(project["id"])
+        historical = seed_historical_timeline(self.service, project["id"])
+        written = self.service.writeback(project["id"])
+        self.assertNotIn(str(self.source / "timeline" / FILENAMES["habit"]), written["paths"])
+        self.assertEqual((self.source / "timeline" / FILENAMES["habit"]).read_bytes(), historical["habit"])
         document = json.loads((self.source / "timeline" / FILENAMES["habit"]).read_bytes())
         point = next(item for item in document["segments"] if item["id"] == "point-end")
         self.assertEqual((point["kind"], point["start_ms"], point["end_ms"]), ("point", 3000, 3000))
@@ -661,7 +686,7 @@ class PersistenceTests(unittest.TestCase):
     def test_partial_write_failure_restores_all_originals(self):
         project = self.annotated_project()
         self.service.writeback(project["id"])
-        before = {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES}
+        before = {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in OUTPUT_AXES}
         original_replace = os.replace
         count = 0
         def failing_replace(source, target):
@@ -674,7 +699,7 @@ class PersistenceTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as context:
                 self.service.writeback(project["id"])
         self.assertEqual(context.exception.status_code, 500)
-        self.assertEqual(before, {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES})
+        self.assertEqual(before, {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in OUTPUT_AXES})
 
     def test_mismatched_export_batch_and_fingerprint_rejected(self):
         project = self.annotated_project()

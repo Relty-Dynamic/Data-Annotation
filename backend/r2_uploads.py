@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -23,20 +24,20 @@ class R2Uploads:
         root.mkdir(parents=True, exist_ok=True)
         self.provider, self.service = provider, service
         self.lock = threading.RLock()
-        with sqlite3.connect(self.path) as con:
+        with closing(sqlite3.connect(self.path)) as con, con:
             con.execute('CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, owner TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL)')
             con.execute('CREATE UNIQUE INDEX IF NOT EXISTS upload_request ON uploads(owner,digest)')
         self.path.chmod(0o600)
 
     def save(self, job):
-        with sqlite3.connect(self.path) as con:
+        with closing(sqlite3.connect(self.path)) as con, con:
             con.execute('INSERT INTO uploads VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document',
                         (job['id'], job['owner'], job['digest'], json.dumps(job, ensure_ascii=False)))
 
     def load(self, ident, user):
         if not user.get('can_upload'):
             raise HTTPException(403, '上传权限已关闭。')
-        with sqlite3.connect(self.path) as con:
+        with closing(sqlite3.connect(self.path)) as con, con:
             row = con.execute('SELECT document FROM uploads WHERE id=? AND owner=?', (ident, user['id'])).fetchone()
         if not row:
             raise HTTPException(404, '上传任务不存在。')
@@ -73,7 +74,7 @@ class R2Uploads:
             raise HTTPException(422, '备注超过限制。')
         request_digest = hashlib.sha256(document_bytes(manifest)).hexdigest()
         with self.lock:
-            with sqlite3.connect(self.path) as con:
+            with closing(sqlite3.connect(self.path)) as con, con:
                 previous = con.execute('SELECT document FROM uploads WHERE owner=? AND digest=?', (user['id'], request_digest)).fetchone()
             if previous:
                 return self.public(json.loads(previous[0]))

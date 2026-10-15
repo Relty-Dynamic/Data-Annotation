@@ -183,6 +183,11 @@ def install(app, session, accounts, provider, root):
         project(ident, request)
         return Response(service.export_zip(ident), media_type='application/zip', headers={'Content-Disposition': f'attachment; filename="timelines-{ident}.zip"'})
 
+    @router.get('/projects/{ident}/export-documents')
+    def export_documents(ident: str, request: Request):
+        project(ident, request)
+        return service.export_files(ident)
+
     @router.post('/projects/{ident}/writeback')
     def writeback(ident: str, body: WritebackRequest, request: Request):
         body = body.model_dump()

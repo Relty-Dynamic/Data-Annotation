@@ -66,6 +66,7 @@ class AccountAccessTests(unittest.TestCase):
         csrf = self.login("worker", "another long safe password")
         self.assertEqual(self.client.get("/api/projects").json(), [])
         self.assertEqual(self.client.get(f"/api/projects/{project_id}").status_code, 403)
+        self.assertEqual(self.client.get(f"/api/projects/{project_id}/export-documents").status_code, 403)
         self.assertEqual(self.client.get(f"/api/%70rojects/{project_id}").status_code, 403)
         self.assertEqual(self.client.get(f"/api/session-media/{project_id}/v1/v0001").status_code, 403)
         self.assertEqual(self.client.post(f"/api/projects/{project_id}/writeback", headers={"X-CSRF-Token": csrf}).status_code, 403)
@@ -74,6 +75,9 @@ class AccountAccessTests(unittest.TestCase):
         self.auth.assign(project_id, self.annotator["id"])
         self.assertEqual(len(self.client.get("/api/projects").json()), 1)
         self.assertEqual(self.client.get(f"/api/projects/{project_id}").status_code, 200)
+        with patch.object(self.app.state.service, "export_files", return_value={"documents": []}) as export_files:
+            self.assertEqual(self.client.get(f"/api/projects/{project_id}/export-documents").status_code, 200)
+            export_files.assert_called_once_with(project_id)
         reset_path = f"/api/projects/{project_id}/annotations/reset-from-empty-source"
         self.assertEqual(self.client.post(reset_path, json={"expected_revision": 0}).status_code, 403)
         with patch.object(self.app.state.service, "reset_annotations_from_empty_source", return_value={"ok": True}) as reset:
@@ -102,6 +106,27 @@ class AccountAccessTests(unittest.TestCase):
             restore.assert_called_once_with(project_id, 0)
         self.auth.set_active(self.annotator["id"], False)
         self.assertEqual(self.client.get("/api/projects").status_code, 401)
+
+    def test_cloud_sync_retains_final_flow_without_direct_export_endpoint(self):
+        project_id = self.project["id"]
+        path = f"/api/cloud/projects/{project_id}/sync"
+        body = {"final": True}
+        self.assertEqual(self.client.post(path, json=body).status_code, 401)
+        headers = {"X-CSRF-Token": self.login("worker", "another long safe password")}
+        self.assertEqual(self.client.post(path, json=body, headers=headers).status_code, 403)
+        self.auth.assign(project_id, self.annotator["id"])
+        self.assertEqual(self.client.post(path, json=body).status_code, 403)
+        result = {"id": project_id, "revision": 0, "has_documents": True, "nas_relative_path": "fixture/timeline"}
+        with patch.object(self.app.state.cloud_mirror, "sync", return_value=result) as sync:
+            removed = self.client.post(f"/api/cloud/projects/{project_id}/export", json={"expected_revision": 0}, headers=headers)
+            self.assertEqual(removed.status_code, 404, removed.text)
+            sync.assert_not_called()
+            response = self.client.post(path, json=body, headers=headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), result)
+            self.assertEqual(sync.call_args.args[0], self.annotator["id"])
+            self.assertEqual(sync.call_args.args[1]["id"], project_id)
+            self.assertEqual(sync.call_args.kwargs, {"final": True})
 
     def test_server_owns_attribution_and_records_delete(self):
         project_id = self.project["id"]

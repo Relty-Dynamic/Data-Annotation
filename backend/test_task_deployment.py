@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -22,7 +23,7 @@ class TaskDeploymentBackupTests(unittest.TestCase):
                 if with_tasks:
                     names.append('tasks/state/tasks.sqlite3')
                 for name in names:
-                    with sqlite3.connect(state / name) as connection:
+                    with closing(sqlite3.connect(state / name)) as connection, connection:
                         connection.execute('CREATE TABLE IF NOT EXISTS evidence (value TEXT)')
                         connection.execute('DELETE FROM evidence')
                         connection.execute('INSERT INTO evidence VALUES (?)', (name,))
@@ -32,6 +33,6 @@ class TaskDeploymentBackupTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((backup / 'tasks.sqlite3').exists(), with_tasks)
                 for name in names:
-                    with sqlite3.connect(backup / Path(name).name) as connection:
+                    with closing(sqlite3.connect(backup / Path(name).name)) as connection:
                         self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
                         self.assertEqual(connection.execute('SELECT value FROM evidence').fetchone()[0], name)

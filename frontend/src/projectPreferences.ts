@@ -24,3 +24,16 @@ export function writeProjectPreference(key: string, value: string | null, storag
     return true;
   } catch { return false; }
 }
+
+export function readRemovedProjects(key: string, storage?: PreferenceStorage): string[] {
+  try {
+    const value: unknown = JSON.parse(readProjectPreference(key, storage) ?? '[]');
+    return Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === 'string'))] : [];
+  } catch { return []; }
+}
+
+export function updateRemovedProjects(key: string, id: string, removed: boolean, storage?: PreferenceStorage): {ids: string[]; saved: boolean} {
+  const ids = readRemovedProjects(key, storage).filter(value => value !== id);
+  if (removed) ids.push(id);
+  return {ids, saved: writeProjectPreference(key, JSON.stringify(ids), storage)};
+}

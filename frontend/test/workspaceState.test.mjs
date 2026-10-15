@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isSegmentDraftDirty } from '../src/domain.ts';
-import { readProjectPreference, readRestorableProjectPreference, writeProjectPreference } from '../src/projectPreferences.ts';
+import { readProjectPreference, readRestorableProjectPreference, writeProjectPreference, readRemovedProjects, updateRemovedProjects } from '../src/projectPreferences.ts';
 import { preparationFailureMessage, OLD_PLAYBACK_BACKEND } from '../src/preparationErrors.ts';
 
 const interval = {id:'a', label:'喝水', start_ms:1500, end_ms:5000};
@@ -58,6 +58,62 @@ test('clearing another project does not hide the remembered project', () => {
   const values = new Map([['last', 'b'], ['cleared', JSON.stringify({id:'a', at:1})]]);
   const storage = {getItem:key=>values.get(key)??null, setItem:(key,value)=>values.set(key,value), removeItem:key=>values.delete(key)};
   assert.equal(readRestorableProjectPreference('last', 'cleared', storage), 'b');
+});
+
+function memoryStorage(entries = []) {
+  const values = new Map(entries);
+  return {getItem:key=>values.get(key)??null, setItem:(key,value)=>values.set(key,value), removeItem:key=>values.delete(key)};
+}
+
+test('removing multiple projects persists all hidden IDs for a later page load', () => {
+  const storage = memoryStorage();
+  const key = 'removed:user-a';
+  assert.deepEqual(updateRemovedProjects(key, 'project-a', true, storage), {ids: ['project-a'], saved: true});
+  assert.deepEqual(updateRemovedProjects(key, 'project-b', true, storage), {ids: ['project-a', 'project-b'], saved: true});
+  const refreshedStorage = memoryStorage([[key, storage.getItem(key)]]);
+  assert.deepEqual(readRemovedProjects(key, refreshedStorage), ['project-a', 'project-b']);
+  updateRemovedProjects(key, 'project-a', true, refreshedStorage);
+  assert.deepEqual(new Set(readRemovedProjects(key, refreshedStorage)), new Set(['project-a', 'project-b']));
+  assert.equal(readRemovedProjects(key, refreshedStorage).length, 2);
+});
+
+test('explicitly reopening one removed project restores only that project', () => {
+  const key = 'removed:user-a';
+  const storage = memoryStorage([[key, JSON.stringify(['project-a', 'project-b', 'project-c'])]]);
+  assert.deepEqual(updateRemovedProjects(key, 'project-b', false, storage), {ids: ['project-a', 'project-c'], saved: true});
+  assert.deepEqual(readRemovedProjects(key, storage), ['project-a', 'project-c']);
+  assert.deepEqual(updateRemovedProjects(key, 'never-removed', false, storage), {ids: ['project-a', 'project-c'], saved: true});
+});
+
+test('removed projects are isolated by the signed-in user preference key', () => {
+  const storage = memoryStorage();
+  updateRemovedProjects('removed:user-a', 'shared-project', true, storage);
+  assert.deepEqual(readRemovedProjects('removed:user-b', storage), []);
+  updateRemovedProjects('removed:user-b', 'other-project', true, storage);
+  updateRemovedProjects('removed:user-b', 'shared-project', false, storage);
+  assert.deepEqual(readRemovedProjects('removed:user-a', storage), ['shared-project']);
+  assert.deepEqual(readRemovedProjects('removed:user-b', storage), ['other-project']);
+});
+
+test('corrupt removed-project preferences do not throw and recover on the next change', () => {
+  for (const value of ['not json', 'null', '{}', '42', '"project-a"']) {
+    const storage = memoryStorage([['removed', value]]);
+    assert.deepEqual(readRemovedProjects('removed', storage), []);
+    assert.deepEqual(updateRemovedProjects('removed', 'project-a', true, storage), {ids: ['project-a'], saved: true});
+    assert.deepEqual(readRemovedProjects('removed', storage), ['project-a']);
+  }
+  const storage = memoryStorage([['removed', JSON.stringify(['project-a', null, 9, {}, 'project-a', 'project-b'])]]);
+  assert.deepEqual(readRemovedProjects('removed', storage), ['project-a', 'project-b']);
+});
+
+test('blocked or full storage reports unsaved removal state without losing the in-memory result', () => {
+  const blocked = {getItem(){throw new Error('blocked');}, setItem(){throw new Error('blocked');}, removeItem(){throw new Error('blocked');}};
+  assert.deepEqual(readRemovedProjects('removed', blocked), []);
+  assert.deepEqual(updateRemovedProjects('removed', 'project-a', true, blocked), {ids: ['project-a'], saved: false});
+  const full = {getItem(){return '["project-a"]';}, setItem(){throw new Error('quota');}, removeItem(){throw new Error('blocked');}};
+  assert.deepEqual(updateRemovedProjects('removed', 'project-b', true, full), {ids: ['project-a', 'project-b'], saved: false});
+  assert.deepEqual(updateRemovedProjects('removed', 'project-a', false, full), {ids: [], saved: false});
+  assert.deepEqual(readRemovedProjects('removed', full), ['project-a']);
 });
 
 test('missing session route on confirmed old server gives exact restart steps', () => {

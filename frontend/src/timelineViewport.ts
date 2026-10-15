@@ -1,12 +1,12 @@
 export const DEFAULT_WINDOW_MS = 3_600_000;
-export const MIN_WINDOW_MS = 300_000;
+export const MIN_WINDOW_MS = 60_000;
 
 export function timelineWheelAction(ctrl: boolean, alt: boolean): 'zoom' | 'pan' | 'native' {
   if (ctrl) return 'zoom';
   return alt ? 'pan' : 'native';
 }
 
-/** A short recording always fits; longer recordings can zoom down to five minutes. */
+/** A short recording always fits; longer recordings can zoom down to one minute. */
 export function timelineWindow(duration: number, requested = DEFAULT_WINDOW_MS): number {
   const limit = Number.isFinite(duration) ? Math.max(1, duration) : 1;
   const minimum = Math.min(MIN_WINDOW_MS, limit);

@@ -22,6 +22,31 @@ class LibraryApiTests(unittest.TestCase):
         self.auth.assign(self.project["id"], self.annotator["id"])
         return {"X-CSRF-Token": self.login("worker", "another long safe password")}
 
+    def test_retired_habit_is_hidden_and_cannot_be_enabled_but_custom_events_work(self):
+        with self.auth.connection() as con:
+            con.execute("INSERT INTO track_library VALUES ('*','habit','旧习惯','event','[\"喝水\"]')")
+        headers = {"X-CSRF-Token": self.login("admin", "correct horse battery staple")}
+        self.assertNotIn("habit", [track["id"] for track in self.client.get("/api/account/track-library").json()])
+        body = {"id": "habit", "name": "习惯", "mode": "event", "labels": ["喝水"], "is_default": True}
+        self.assertEqual(self.client.post("/api/account/track-library", json=body, headers=headers).status_code, 410)
+        self.assertEqual(self.client.put("/api/account/track-library/habit", json=body, headers=headers).status_code, 410)
+        self.assertEqual(self.client.post("/api/account/track-library/habit/default", json={"is_default": False}, headers=headers).status_code, 410)
+        headers = self.worker()
+        project = self.app.state.service.load(self.project["id"])
+        historical = {"id": "legacy", "label": "喝水", "kind": "point", "lane": 0, "start_ms": 200, "end_ms": 200}
+        project["annotations"]["habit"] = [historical]
+        self.app.state.service.save(project)
+        path = f'/api/projects/{project["id"]}/track-selection'
+        self.assertEqual(self.client.put(path, json={"tracks": ["habit"], "expected_revision": project["revision"]}, headers=headers).status_code, 422)
+        custom = {"id": "food", "name": "饮食事件", "mode": "event", "labels": ["喝水"]}
+        self.assertEqual(self.client.post("/api/account/track-library", json=custom, headers=headers).status_code, 200)
+        selected = self.client.put(path, json={"tracks": ["food"], "expected_revision": project["revision"]}, headers=headers)
+        self.assertEqual(selected.status_code, 200, selected.text)
+        self.assertEqual(selected.json()["annotations"]["habit"], [historical])
+        self.assertEqual(selected.json()["custom_tracks"][0]["mode"], "event")
+        with self.auth.connection() as con:
+            self.assertIsNotNone(con.execute("SELECT 1 FROM track_library WHERE id='habit'").fetchone())
+
     def test_shared_defaults_permissions_and_personal_isolation(self):
         headers = self.worker()
         defaults = self.client.get("/api/account/track-library").json()

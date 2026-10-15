@@ -53,6 +53,25 @@ class TasksTests(unittest.TestCase):
             fn()
         self.assertEqual(status,caught.exception.status)
 
+    def test_db_commits_and_closes_connection(self):
+        with self.store.db() as db:
+            self.assertEqual(1, db.execute('PRAGMA foreign_keys').fetchone()[0])
+            db.execute('INSERT INTO roles VALUES (?,?)', ('committed', '["annotator"]'))
+        with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+            db.execute('SELECT 1')
+        self.assertEqual(['annotator'], self.store.roles({'id': 'committed'})['roles'])
+
+    def test_db_rolls_back_and_closes_connection_on_error(self):
+        with self.assertRaisesRegex(RuntimeError, 'abort transaction'):
+            with self.store.db() as db:
+                db.execute('UPDATE roles SET body=? WHERE user_id=?', ('["leader"]', self.a['id']))
+                db.execute('INSERT INTO roles VALUES (?,?)', ('rolled-back', '["reviewer"]'))
+                raise RuntimeError('abort transaction')
+        with self.assertRaisesRegex(sqlite3.ProgrammingError, 'closed'):
+            db.execute('SELECT 1')
+        self.assertEqual(['annotator'], self.store.roles(self.a)['roles'])
+        self.assertEqual([], self.store.roles({'id': 'rolled-back'})['roles'])
+
     def test_permissions_qc_and_unique(self):
         self.expect(422,lambda:self.store.publish_rule(self.admin,{}))
         self.expect(403,lambda:self.store.set_roles(self.a,'a',['leader']))

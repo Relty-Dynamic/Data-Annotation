@@ -30,7 +30,7 @@ test('short gaps keep their proportional width and adjacent or overlapping gaps 
 test('gaps stay at most 24 pixels wide at all zoom levels and in short projects', () => {
   for (const duration of [26 * HOUR, 25 * HOUR + 1000]) {
     const gaps = [{start_ms: 1000, end_ms: 25 * HOUR}];
-    for (const windowMs of [300_000, HOUR, 30 * HOUR]) {
+    for (const windowMs of [60_000, 300_000, HOUR, 30 * HOUR]) {
       const scale = recordingScale(duration, gaps, windowMs, 800);
       const width = 800 * scale.duration / timelineWindow(scale.duration, windowMs);
       const gapPixels = (scale.toDisplay(gaps[0].end_ms) - scale.toDisplay(gaps[0].start_ms)) / scale.duration * width;
@@ -45,7 +45,7 @@ test('zoom after a day-long gap keeps the exact real timestamp under the mouse',
   let axisWidth = width * scale.duration / timelineWindow(scale.duration, windowMs);
   const time = 30 * HOUR + 123_456;
   let scrollLeft = scale.toDisplay(time) / scale.duration * axisWidth - pointer;
-  for (const next of [300_000, 2 * HOUR, HOUR, 600_000]) {
+  for (const next of [60_000, 300_000, 2 * HOUR, HOUR, 600_000]) {
     const result = zoomRecordingScale(duration, gaps, windowMs, next, width, scrollLeft, pointer);
     scale = recordingScale(duration, gaps, result.windowMs, width);
     near(scale.toTime((result.scrollLeft + pointer) / result.axisWidth * scale.duration), time);

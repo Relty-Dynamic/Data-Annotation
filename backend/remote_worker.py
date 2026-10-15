@@ -583,7 +583,7 @@ class Worker:
                 if self.writeback_service.current_external_hashes(source_dir) != self.writeback_service.expected_external_hashes(previous):
                     raise HTTPException(409, 'Annotations changed after the previous save; writeback was stopped.')
                 result = {'paths': [str(source_dir / 'timeline' / filename_for_axis(axis)) for axis in
-                                    selected_tracks(project)],
+                                    selected_tracks(project) if axis != 'habit'],
                           'save_id': previous['last_writeback']['save_id']}
                 return self._writeback_response(result, previous)
             project['_remote_writeback_request_id'] = request_id

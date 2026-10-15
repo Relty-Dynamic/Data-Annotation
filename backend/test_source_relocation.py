@@ -58,7 +58,9 @@ class SourceRelocationTests(unittest.TestCase):
         fresh = ProjectService(self.root / 'fresh-app')
         try:
             imported = fresh.open_path(str(self.source))
-            self.assertEqual(imported['annotations'], old['annotations'])
+            self.assertEqual(imported['annotations'], {**old['annotations'], 'habit': []})
+            self.assertEqual(self.service.load(old['id'])['annotations'], old['annotations'])
+            self.assertFalse((self.source / 'timeline' / FILENAMES['habit']).exists())
         finally:
             fresh.sessions.close()
             fresh.previews.close()
@@ -67,8 +69,8 @@ class SourceRelocationTests(unittest.TestCase):
         project = self.annotated_project()
         self.service.writeback(project['id'])
         old = self.service.load(project['id'])
-        for axis in ('category', 'habit'):
-            (self.source / 'timeline' / FILENAMES[axis]).unlink()
+        (self.source / 'timeline' / FILENAMES['category']).unlink()
+        self.assertFalse((self.source / 'timeline' / FILENAMES['habit']).exists())
         originals = {axis: (self.source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in ('scene', 'posture')}
         self.move_to_fpv()
         inspected = self.service.inspect_source_claim(str(self.source))

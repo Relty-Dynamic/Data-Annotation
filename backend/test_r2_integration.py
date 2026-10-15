@@ -228,6 +228,59 @@ class R2ProjectTests(unittest.TestCase):
                     self.assertIsNone(auth.session(logged.cookies.get('datamark_session')))
                     self.assertFalse((self.root / '.local/auth.sqlite3').exists())
 
+    def test_local_json_export_preserves_hidden_axes_and_checks_ownership(self):
+        from backend.auth import AuthStore
+        from backend.shared_accounts import AccountClient, create_app as bridge_app
+        accounts_root = self.root / 'accounts'
+        auth = AuthStore(accounts_root)
+        auth.create_user('admin', 'Admin', 'correct horse battery staple', 'admin')
+        for username in ('worker', 'other'):
+            auth.create_user(username, username.title(), 'another long safe password')
+        origin = 'https://datamark.example.com'
+        env = {'DATAMARK_PUBLIC_ORIGIN': origin, 'DATAMARK_PUBLIC_API_ORIGIN': 'https://api.example.com:8443',
+               'DATAMARK_R2_CONFIG': '/protected/config', 'DATAMARK_R2_STATE': str(self.root), 'DATAMARK_TASKS_ENABLED': '0'}
+        with patch.dict(os.environ, env), patch('backend.r2_store.R2Store', return_value=self.provider):
+            bridge = TestClient(bridge_app(accounts_root), base_url='http://accounts:8766')
+            with TestClient(create_app(accounts=AccountClient(bridge)), base_url='https://api.example.com:8443') as client:
+                logged = client.post('/api/auth/login', json={'username': 'worker', 'password': 'another long safe password'}, headers={'Origin': origin})
+                self.assertEqual(logged.status_code, 200)
+                headers = {'Origin': origin, 'X-CSRF-Token': logged.json()['csrf']}
+                service = client.app.state.r2_service
+                with patch.object(service, 'probe', side_effect=self.service.probe):
+                    opened = client.post('/api/storage/projects/open', json={'path': PREFIX}, headers=headers)
+                self.assertEqual(opened.status_code, 200, opened.text)
+                value = opened.json()
+                service.add_custom_track(value['id'], '饮食', 'event', [], value['revision'], json_name='food')
+                stored = service.load(value['id'])
+                stored['fixed_tracks'].append('habit')  # Simulate a retained legacy project definition.
+                stored['annotations']['scene'] = [{'id': 'scene', 'label': '室内', 'start_ms': 0, 'end_ms': 500, 'lane': 0}]
+                stored['annotations']['food'] = [{'id': 'food', 'label': '喝水', 'kind': 'point', 'start_ms': 700, 'end_ms': 700, 'lane': 2}]
+                stored['annotations']['habit'] = [{'id': 'legacy', 'label': '散步', 'kind': 'interval', 'start_ms': 100, 'end_ms': None, 'lane': 0}]
+                service.save(stored)
+                endpoint = '/api/projects/' + value['id']
+                rejected = client.put(endpoint + '/track-selection', json={'tracks': ['habit'], 'expected_revision': stored['revision']}, headers=headers)
+                self.assertEqual(rejected.status_code, 422, rejected.text)
+                selected = client.put(endpoint + '/track-selection', json={'tracks': ['posture'], 'expected_revision': stored['revision']}, headers=headers)
+                self.assertEqual(selected.status_code, 200, selected.text)
+                self.assertEqual(selected.json()['annotations']['habit'], stored['annotations']['habit'])
+                before = service.load(value['id'])
+                objects = dict(self.provider.objects)
+                exported = client.get(endpoint + '/export-documents')
+                self.assertEqual(exported.status_code, 200, exported.text)
+                documents = {item['name']: json.loads(item['content']) for item in exported.json()['documents']}
+                self.assertEqual(set(documents), {'scene.timeline.json', 'posture.timeline.json', 'category.timeline.json', 'food.timeline.json'})
+                self.assertEqual(documents['scene.timeline.json']['segments'][0]['label'], '室内')
+                self.assertEqual(documents['food.timeline.json']['segments'][0]['lane'], 2)
+                self.assertEqual(documents['posture.timeline.json']['segments'], [])
+                self.assertTrue(all(document['timebase']['selected_tracks'] == ['posture'] for document in documents.values()))
+                self.assertEqual(service.load(value['id']), before)
+                self.assertEqual(self.provider.objects, objects)
+                client.cookies.clear()
+                self.assertEqual(client.get(endpoint + '/export-documents').status_code, 401)
+                other = client.post('/api/auth/login', json={'username': 'other', 'password': 'another long safe password'}, headers={'Origin': origin})
+                self.assertEqual(other.status_code, 200)
+                self.assertEqual(client.get(endpoint + '/export-documents').status_code, 403)
+
     def test_new_host_reads_verified_committed_batch(self):
         value = self.open()
         self.service.writeback(value['id'])
