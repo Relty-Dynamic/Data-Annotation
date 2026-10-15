@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.service import ProjectService, empty_annotations
+from backend.test_service import seed_historical_timeline
 from backend.testing_annotations import complete_annotations
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,7 +230,10 @@ class ActualMediaTests(unittest.TestCase):
             annotations = empty_annotations()
             annotations["habit"] = [{"id": "event", "label": "咳嗽", "kind": "point", "start_ms": 11500, "end_ms": 11500}]
             service.update_draft(project["id"], complete_annotations(project, annotations), 0)
-            service.writeback(project["id"])
+            historical = seed_historical_timeline(service, project["id"])
+            written = service.writeback(project["id"])
+            self.assertNotIn(str(source.parent / "timeline" / "habit.timeline.json"), written["paths"])
+            self.assertEqual((source.parent / "timeline" / "habit.timeline.json").read_bytes(), historical["habit"])
             exported = json.loads((source.parent / "timeline" / "habit.timeline.json").read_bytes())
             self.assertEqual(exported["timebase"]["origin"], "recording_datetime")
             self.assertEqual(exported["segments"][0]["start_ms"], 11500)

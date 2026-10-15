@@ -193,7 +193,7 @@ class SourceBrowserTests(unittest.TestCase):
                 changed = client.put(f'/api/projects/{project["id"]}/draft', json={"annotations": annotations, "expected_revision": project["revision"]}, headers=admin_csrf)
                 self.assertEqual(changed.status_code, 200, changed.text)
                 self.assertEqual(client.post(f'/api/projects/{project["id"]}/writeback', headers=admin_csrf).status_code, 200)
-                old = {axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}
+                old = {axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in project["selected_tracks"]}
                 self.assertEqual({path.name for path in (source / "timeline").glob("*.timeline.json")}, {FILENAMES[axis] for axis in old})
                 worker_login = client.post("/api/auth/login", json={"username": "worker", "password": "correct horse battery staple"})
                 worker_csrf = {"X-CSRF-Token": worker_login.json()["csrf"]}
@@ -214,8 +214,8 @@ class SourceBrowserTests(unittest.TestCase):
                 self.assertTrue(all(not rows for rows in fresh['annotations'].values()))
                 self.assertEqual(auth.assignment(project['id']), worker['id'])
                 archive = source / '.annotation-backups' / fresh['source_backup_id']
-                self.assertEqual({axis: (archive / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
-                self.assertEqual({axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
+                self.assertEqual({axis: (archive / FILENAMES[axis]).read_bytes() for axis in old}, old)
+                self.assertEqual({axis: (source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in old}, old)
                 self.assertEqual(client.post(f'/api/projects/{project["id"]}/writeback', headers=worker_csrf).status_code, 200)
                 self.assertEqual(json.loads((source / 'timeline' / FILENAMES['scene']).read_bytes())['segments'], [])
 
@@ -228,7 +228,7 @@ class SourceBrowserTests(unittest.TestCase):
             original = writer.open_path(str(source))
             writer.update_draft(original["id"], complete_annotations(original), original["revision"])
             writer.writeback(original["id"])
-            old = {axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}
+            old = {axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in original["fixed_tracks"] if axis != "habit"}
             self.assertEqual({path.name for path in (source / "timeline").glob("*.timeline.json")}, {FILENAMES[axis] for axis in old})
             app_root = self.root / "new-platform"
             auth = AuthStore(app_root)
@@ -248,8 +248,8 @@ class SourceBrowserTests(unittest.TestCase):
                     fresh = opened.json()
                     self.assertTrue(all(not rows for rows in fresh["annotations"].values()))
                     backup = source / ".annotation-backups" / fresh["source_backup_id"]
-                    self.assertEqual({axis: (backup / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
-                    self.assertEqual({axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in ("scene", "posture", "category")}, old)
+                    self.assertEqual({axis: (backup / FILENAMES[axis]).read_bytes() for axis in old}, old)
+                    self.assertEqual({axis: (source / "timeline" / FILENAMES[axis]).read_bytes() for axis in old}, old)
 
     def test_takeover_can_continue_nas_json_while_archiving_dirty_platform_draft(self):
         source = self.nas / "采集"
@@ -304,20 +304,3 @@ class SourceBrowserTests(unittest.TestCase):
                 second = client.post("/api/auth/login", json={"username": "second", "password": "correct horse battery staple"})
                 opened = client.post("/api/projects/open", json={"path": str(source)}, headers={"X-CSRF-Token": second.json()["csrf"]})
                 self.assertEqual(opened.status_code, 409, opened.text)
-
-    def test_supplement_cannot_take_video_from_another_project(self):
-        first = self.nas / "采集甲"
-        second = self.nas / "采集乙"
-        first.mkdir()
-        second.mkdir()
-        (first / "A09999_20260917120000_0000.avi").write_bytes(b"first")
-        other_video = second / "A09999_20260917130000_0000.avi"
-        other_video.write_bytes(b"second")
-        with patch.object(ProjectService, "probe", return_value={"duration_ms": 1000, "codec": "h264", "pixel_format": "yuv420p", "audio_codecs": []}):
-            service = ProjectService(self.root)
-            owned = service.open_path(str(first))
-            service.open_path(str(second))
-            with self.assertRaises(HTTPException) as conflict:
-                service.supplement(owned["id"], [other_video], owned["revision"])
-            self.assertEqual(conflict.exception.status_code, 409)
-            self.assertEqual(len(service.load(owned["id"])["videos"]), 1)

@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from backend.remote_worker import MAX_BODY, create_worker
 from backend.remote import RemoteClient
-from backend.service import AXES, FILENAMES, ProjectService, filename_for_axis
+from backend.service import FILENAMES, ProjectService, filename_for_axis
 from backend.session_cache import PROFILE, SessionCache
 from backend.testing_annotations import complete_project
 
@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKEN = 'unit-test-worker-token-with-32-characters'
 NORMAL = b'0000ftyp' + b'normal-mp4' * 8
 FAST = b'0000ftyp' + b'fast-mp4' * 8
+OUTPUT_AXES = ('scene', 'posture', 'category')
 
 
 class FakeSessions:
@@ -276,21 +277,26 @@ class RemoteWorkerTests(unittest.TestCase):
 
     def test_writeback_preserves_paths_and_checks_external_conflicts(self):
         project = self.project()
+        project['selected_tracks'] = [*OUTPUT_AXES, 'habit']
         project['videos'][0]['relative_path'] = 'FPV/' + self.source.name
         project['_sources']['v0001']['cache_directory'] = str(self.root / 'outside')
         project['_sources']['v0001']['cache_identity_path'] = 'private-client-path'
         response = self.client.post('/v1/writeback', json={'project': project})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertFalse(response.json()['project']['draft_dirty'])
-        for axis in AXES:
+        for axis in OUTPUT_AXES:
             document = json.loads((self.nas / 'timeline' / FILENAMES[axis]).read_bytes())
             self.assertIn('FPV/' + self.source.name, json.dumps(document))
+        self.assertFalse((self.nas / 'timeline' / FILENAMES['habit']).exists())
         saved = self.worker.writeback_service.load(project['id'])
         self.assertNotIn('cache_directory', saved['_sources']['v0001'])
         self.assertNotIn('cache_identity_path', saved['_sources']['v0001'])
         replay = self.client.post('/v1/writeback', json={'project': project})
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(replay.json(), response.json())
+        self.assertEqual(set(replay.json()['result']['paths']),
+                         {str(path) for path in (self.nas / 'timeline').glob('*.timeline.json')})
+        self.assertFalse((self.nas / 'timeline' / FILENAMES['habit']).exists())
         project.update(response.json()['project'])
         response = self.client.post('/v1/writeback', json={'project': project})
         self.assertEqual(response.status_code, 200, response.text)
@@ -370,11 +376,12 @@ class RemoteWorkerTests(unittest.TestCase):
 
     def test_writeback_replays_committed_save_after_lost_response_and_restart(self):
         project = self.project()
+        project['selected_tracks'] = [*OUTPUT_AXES, 'habit']
         with patch.object(self.worker, '_writeback_response', side_effect=ConnectionResetError('response lost')):
             with self.assertRaises(ConnectionResetError):
                 self.client.post('/v1/writeback', json={'project': project})
         saved = self.worker.writeback_service.load(project['id'])
-        snapshots = {axis: (self.nas / 'timeline' / FILENAMES[axis]).read_bytes() for axis in AXES}
+        snapshots = {axis: (self.nas / 'timeline' / FILENAMES[axis]).read_bytes() for axis in OUTPUT_AXES}
         self.worker.close()
         self.app = create_worker(self.root / 'app', token=TOKEN, allowed_roots=[self.nas])
         self.worker = self.app.state.worker
@@ -387,8 +394,11 @@ class RemoteWorkerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()['result']['save_id'], saved['last_writeback']['save_id'])
         self.assertEqual(response.json()['project']['last_writeback'], saved['last_writeback'])
+        self.assertEqual(set(response.json()['result']['paths']),
+                         {str(self.nas / 'timeline' / FILENAMES[axis]) for axis in OUTPUT_AXES})
+        self.assertFalse((self.nas / 'timeline' / FILENAMES['habit']).exists())
         self.assertFalse((self.nas / '.annotation-backups').exists())
-        for axis in AXES:
+        for axis in OUTPUT_AXES:
             self.assertEqual((self.nas / 'timeline' / FILENAMES[axis]).read_bytes(), snapshots[axis])
 
     def test_replayed_writeback_still_rejects_a_real_external_edit(self):
@@ -454,7 +464,7 @@ class RemoteWorkerTests(unittest.TestCase):
         expected = ProjectService.current_source_fingerprint(project)
         first = self.client.post('/v1/writeback', json={'project': project})
         self.assertEqual(first.status_code, 200, first.text)
-        for axis in AXES:
+        for axis in OUTPUT_AXES:
             document = json.loads((self.nas / 'timeline' / FILENAMES[axis]).read_bytes())
             self.assertEqual(document['timebase']['source_fingerprint'], 'f' * 64)
             self.assertEqual(document['timebase']['source_fingerprint_aliases'], [expected])
@@ -462,7 +472,8 @@ class RemoteWorkerTests(unittest.TestCase):
         fresh['source_fingerprint'] = expected
         restored, hashes = self.worker.service.read_external(fresh)
         self.assertEqual(restored, project['annotations'])
-        self.assertTrue(all(hashes.values()))
+        self.assertTrue(all(hashes[axis] for axis in OUTPUT_AXES))
+        self.assertIsNone(hashes['habit'])
         replay = self.client.post('/v1/writeback', json={'project': project})
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(replay.json(), first.json())
@@ -516,7 +527,8 @@ class RemoteWorkerTests(unittest.TestCase):
         response = self.client.post('/v1/writeback', json={'project': project})
         self.assertEqual(response.status_code, 200, response.text)
         destination = self.source.parent / 'timeline'
-        self.assertTrue(all((destination / FILENAMES[axis]).is_file() for axis in AXES))
+        self.assertTrue(all((destination / FILENAMES[axis]).is_file() for axis in OUTPUT_AXES))
+        self.assertFalse((destination / FILENAMES['habit']).exists())
         self.assertFalse((supplement / 'timeline').exists())
         self.assertEqual(extra.read_bytes(), b'supplemented-original')
         project.update(response.json()['project'])

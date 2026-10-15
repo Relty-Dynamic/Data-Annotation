@@ -499,36 +499,6 @@ class PlaybackSessionTests(unittest.TestCase):
             self.assertEqual(self.asset(kind, video_id).stat().st_mtime_ns, mtime)
         self.assertNotEqual(self.service.sessions.manifest(self.ident)["version"], manifest["version"])
 
-    def test_supplement_reuses_existing_compacts_and_only_prepares_new_video(self):
-        self.prepare()
-        existing = {video["id"]: (self.asset("normal", video["id"]), self.asset("normal", video["id"]).stat().st_mtime_ns)
-                    for video in self.project["videos"]}
-        before = dict(self.encodes)
-        added = self.source / "A09999_20260917115959_0099.avi"
-        added.write_bytes(b"additional-original")
-        self.service.supplement(self.ident, [added], self.project["revision"])
-        project = self.service.load(self.ident)
-        video = next(video for video in project["videos"] if video["name"] == added.name)
-        spec = self.service.preview_spec(project, video["id"])
-        spec.target.write_bytes(MEDIA)
-        spec.thumbnail_target.write_bytes(THUMB)
-        self.service.fast_preview_path(spec).write_bytes(FAST)
-        directory = self.service.storyboards.directory(spec.key)
-        directory.mkdir(parents=True)
-        (directory / "sheet-00000.jpg").write_bytes(SHEET)
-        (directory / "manifest.json").write_text(json.dumps({
-            "version": 1, "interval_ms": 1000, "tile_width": 160, "tile_height": 90,
-            "columns": 10, "rows": 10, "frame_count": 1, "sheets": ["sheet-00000.jpg"],
-        }), encoding="utf-8")
-        self.prepare()
-        for video_id, (path, mtime) in existing.items():
-            self.assertEqual(self.asset("normal", video_id), path)
-            self.assertEqual(path.stat().st_mtime_ns, mtime)
-        for source, count in before.items():
-            self.assertEqual(self.encodes[source], count)
-        self.assertEqual(self.encodes[str(spec.target)], 1)
-        self.assertEqual(self.service.sessions.status(self.ident)["ready"], 3)
-
     def test_invalidate_retry_still_waits_for_writer_after_first_timeout(self):
         entered, release = threading.Event(), threading.Event()
         def hold_writer(args, stopping):
@@ -573,7 +543,13 @@ class PlaybackSessionTests(unittest.TestCase):
     def add_fixture_video(self):
         path = self.source / "A09999_20260917120002_0002.avi"
         path.write_bytes(b"third-original")
-        self.service.supplement(self.ident, [path], self.service.load(self.ident)["revision"])
+        previous = self.service.load(self.ident)
+        paths = [Path(source['path']) for source in previous['_sources'].values()]
+        composed = self.service.create([*paths, path], previous['name'], self.source, self.ident, existing=previous)
+        fixture = {**previous, **{key: composed[key] for key in ('videos', '_sources', 'source_fingerprint', 'duration_ms', 'recording_start', 'gaps')},
+                   '_supplemented': True,
+                   '_legacy_cache_fingerprints': {video['id']: previous['source_fingerprint'] for video in previous['videos']}}
+        self.service.save(fixture)
         self.project = self.service.load(self.ident)
         video = next(video for video in self.project["videos"] if video["name"] == path.name)
         spec = self.service.preview_spec(self.project, video["id"])
@@ -1272,18 +1248,6 @@ class SkipFailedPlaybackTests(unittest.TestCase):
         annotations['scene'] = [{'id': 'cross', 'label': '室内', 'start_ms': 0, 'end_ms': 3000}]
         with self.assertRaises(HTTPException):
             validate_annotations(annotations, 3000, videos=[videos[0], videos[2]])
-
-    def test_supplement_keeps_skipped_source_and_selection(self):
-        self.make_partial()
-        public = self.service.skip_failed_videos(self.ident, ['v0001'], self.project['revision'])
-        path = self.source / 'A09999_20260917120002_0002.avi'
-        path.write_bytes(b'new-original')
-        result = self.service.supplement(self.ident, [path], public['revision'])
-        self.assertEqual(result['added_count'], 1)
-        self.assertEqual(len(result['project']['videos']), 2)
-        self.assertEqual(result['project']['skipped_videos'][0]['name'], self.project['videos'][0]['name'])
-        self.assertEqual(len(self.service.load(self.ident)['videos']), 3)
-        self.assertEqual(result['project']['videos'][0]['start_ms'], 1000)
 
 
 if __name__ == "__main__":

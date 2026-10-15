@@ -156,8 +156,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='track_library'").fetchone():
                 return {'axes': [{'id': key, 'name': AXIS_NAMES[key], 'mode':'state', 'labels': labels, 'is_default': True}
                                  for key, labels in DEFAULT_TRACK_LABELS.items() if key in ('scene','posture','category')]}
-            rows = con.execute("SELECT * FROM track_library WHERE scope IN (?,?) ORDER BY CASE scope WHEN '*' THEN 0 ELSE 1 END,rowid", ('*', saved[0]['id'])).fetchall()
-            return {'axes': [TrackLibrary.track(row) for row in rows]}
+        return {'axes': TrackLibrary(auth).list(saved[0]['id'])}
 
     return app
 

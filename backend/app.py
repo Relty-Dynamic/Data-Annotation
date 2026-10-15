@@ -41,17 +41,13 @@ class OpenRequest(BaseModel):
     takeover_confirmations: int = Field(default=0, ge=0, le=2, strict=True)
 
 
-class SupplementRequest(OpenRequest):
+class RelinkSourcesRequest(OpenRequest):
     expected_revision: int = Field(ge=0, strict=True)
 
 
 class FilesRequest(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=1000)
     name: str | None = Field(default=None, strict=True)
-
-
-class SupplementFilesRequest(FilesRequest):
-    expected_revision: int = Field(ge=0, strict=True)
 
 
 class PickFilesRequest(BaseModel):
@@ -418,7 +414,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
 
     @app.get("/api/health")
     def health():
-        capabilities = ["source-local-cache", "supplement-import", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "account-login", "account-track-library", "subaxis-annotations", "selected-track-writeback"]
+        capabilities = ["source-local-cache", "compact-local-playback", "direct-compact-preparation", "parallel-compact-preparation", "four-axis-annotations", "project-naming", "account-login", "account-track-library", "subaxis-annotations", "selected-track-writeback"]
         if task_workspaces:
             capabilities.append('task-management')
         if service.desktop_cache.enabled:
@@ -918,44 +914,13 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         # Deliberately no multipart parser: never spool old-client video bytes.
         raise HTTPException(410, "平台已改为直接读取原视频，请刷新页面后选择本机文件或填写原目录路径。")
 
-    @app.post("/api/projects/{project_id}/videos/open")
-    def supplement_path(project_id: str, body: SupplementRequest, request: Request):
-        require_hybrid_local(request)
-        if mock_mode and service.load(project_id).get("_mock_s3"):
-            raise HTTPException(409, "S3 mock 项目不能补入 NAS 视频。")
-        require_nas_source(body.path)
-        return service.supplement_path(project_id, body.path, body.expected_revision)
-
-    @app.post("/api/projects/{project_id}/videos/files")
-    def supplement_files(project_id: str, body: SupplementFilesRequest, request: Request):
-        require_hybrid_local(request)
-        if mock_mode and service.load(project_id).get("_mock_s3"):
-            raise HTTPException(409, "S3 mock 项目不能补入 NAS 视频。")
-        paths = []
-        for value in body.paths:
-            require_nas_source(value)
-            if not value.strip():
-                raise HTTPException(422, "请选择有效的视频文件路径。")
-            try:
-                path = Path(value.strip().strip('"')).expanduser().resolve(strict=True)
-            except OSError:
-                raise HTTPException(422, "无法访问所选视频，请检查原目录或 SD 卡连接。")
-            if not path.is_file():
-                raise HTTPException(422, "请选择视频文件，或通过目录路径补导入。")
-            paths.append(path)
-        return service.supplement(project_id, paths, body.expected_revision)
-
     @app.post("/api/projects/{project_id}/sources/relink")
-    def relink_sources(project_id: str, body: SupplementRequest, request: Request):
+    def relink_sources(project_id: str, body: RelinkSourcesRequest, request: Request):
         require_hybrid_local(request)
         if mock_mode and service.load(project_id).get("_mock_s3"):
             raise HTTPException(409, "S3 mock 项目不能关联 NAS 视频。")
         require_nas_source(body.path)
         return service.relink_sources(project_id, body.path, body.expected_revision)
-
-    @app.post("/api/projects/{project_id}/videos/upload")
-    def legacy_supplement_upload(project_id: str):
-        raise HTTPException(410, "平台已改为原目录读取，请刷新页面后使用补导入文件或目录，不再上传视频副本。")
 
     @app.get("/api/projects/{project_id}")
     def get_project(project_id: str, request: Request):
@@ -1014,6 +979,10 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
     @app.get("/api/projects/{project_id}/export")
     def export(project_id: str):
         return Response(service.export_zip(project_id), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="timelines-{project_id[:32]}.zip"'})
+
+    @app.get("/api/projects/{project_id}/export-documents")
+    def export_documents(project_id: str):
+        return service.export_files(project_id)
 
     @app.post("/api/projects/{project_id}/writeback")
     def writeback(project_id: str, body: WritebackRequest | None = None):

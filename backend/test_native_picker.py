@@ -112,9 +112,10 @@ class NativePickerTests(unittest.TestCase):
         with TestClient(app, base_url="http://127.0.0.1") as client:
             before = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*") if path.is_file())
             with patch("starlette.requests.Request.form", side_effect=AssertionError("must not parse multipart")):
-                for url in ("/api/projects/upload", "/api/projects/" + "a" * 32 + "/videos/upload"):
+                for url, status in (("/api/projects/upload", 410),
+                                    ("/api/projects/" + "a" * 32 + "/videos/upload", 404)):
                     response = client.post(url, files=[("files", ("A09999_20260917120000_0000.avi", b"x" * 100, "video/x-msvideo"))])
-                    self.assertEqual(response.status_code, 410, response.text)
+                    self.assertEqual(response.status_code, status, response.text)
             self.assertEqual(client.get("/api/projects").json(), [])
             after = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*") if path.is_file())
             self.assertEqual(after, before)

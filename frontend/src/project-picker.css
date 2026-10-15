@@ -1,0 +1,24 @@
+.project-menu-picker { width: 100%; min-width: 0; }
+.project-menu-trigger { display: flex; width: 100%; min-height: 34px; padding: 7px 10px; gap: 8px; border: 1px solid #405362; border-radius: 6px; background: #18232d; color: #e6f0f5; text-align: left; }
+.project-menu-trigger:hover:not(:disabled) { background: #20303c; border-color: #668a99; }
+.project-menu-trigger > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-menu-trigger > svg { flex: 0 0 auto; color: #a6c3ce; }
+.project-menu-trigger > svg:last-child { transition: transform .15s; }
+.project-menu-trigger > svg.is-open { transform: rotate(180deg); }
+.project-menu-popover { position: fixed; z-index: 1000; display: flex; flex-direction: column; gap: 4px; padding: 7px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; border: 1px solid #405362; border-radius: 8px; background: #18212a; color: #e6f0f5; box-shadow: 0 12px 30px #0008; scrollbar-width: thin; }
+.project-menu-popover button { font-size: 12px; }
+.project-menu-popover button:focus-visible { outline-offset: -2px; }
+.project-menu-create { flex: 0 0 auto; width: 100%; min-height: 37px; margin-bottom: 3px; padding: 8px; border: 1px dashed #6e978f; border-radius: 7px; background: #20322f; color: #b5e3d8; }
+.project-menu-create:hover { background: #2a4640; }
+.project-menu-row { display: flex; align-items: center; flex: 0 0 auto; min-width: 0; gap: 3px; padding: 3px; border: 1px solid transparent; border-radius: 6px; }
+.project-menu-row.is-current { background: #243b38; border-color: #41665e; }
+.project-menu-row:hover { background: #263540; }
+.project-menu-choice { justify-content: flex-start; flex: 1; min-width: 0; min-height: 32px; padding: 4px 2px; gap: 5px; border-radius: 4px; text-align: left; }
+.project-menu-current-mark { display: flex; align-items: center; flex: 0 0 14px; width: 14px; color: #8addc7; }
+.project-menu-name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-menu-name small { display: block; margin-top: 2px; color: #8ba1b0; font-size: 10px; }
+.project-menu-action { flex: 0 0 29px; width: 29px; height: 30px; padding: 0; border: 1px solid #435462; border-radius: 5px; background: #202d37; color: #b3cbd5; }
+.project-menu-action:hover { background: #334b56; border-color: #84c4bd; }
+.project-menu-remove { border-color: #60444a; background: #30262c; color: #d4a3a1; }
+.project-menu-remove:hover { background: #543039; border-color: #af747a; color: #ffcfca; }
+.project-menu-empty { padding: 10px 6px; text-align: center; color: #8fa3b2; font-size: 12px; }

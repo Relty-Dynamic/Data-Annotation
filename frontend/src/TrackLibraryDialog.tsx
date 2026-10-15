@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from 'react';
 import {ArrowLeft, BookOpen, Plus, Pencil, Trash2, X} from 'lucide-react';
-import {libraryRequest, type LibraryTrack} from './trackLibrary';
+import {availableLibraryTracks, libraryRequest, type LibraryTrack} from './trackLibrary';
+import {isAvailableTrack} from './domain';
 import './track-library.css';
 
 const emptyTrack=():LibraryTrack=>({id:'',name:'',mode:'state',labels:[],is_default:false});
@@ -20,7 +21,7 @@ export default function TrackLibraryDialog({admin,onClose}:{admin:boolean;onClos
   const dialog=useRef<HTMLDialogElement>(null),nameInput=useRef<HTMLInputElement>(null),returnFocus=useRef<string>('');
   const [tracks,setTracks]=useState<LibraryTrack[]>([]),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState('');
   const [edit,setEdit]=useState<LibraryTrack|null>(null),[creating,setCreating]=useState(false),[labels,setLabels]=useState(''),[remove,setRemove]=useState<LibraryTrack|null>(null);
-  const refresh=async()=>setTracks(await libraryRequest<LibraryTrack[]>('/api/account/track-library'));
+  const refresh=async()=>setTracks(availableLibraryTracks(await libraryRequest<LibraryTrack[]>('/api/account/track-library')));
   useEffect(()=>{const element=dialog.current;element?.showModal();void refresh().catch(reason=>setError(reason.message)).finally(()=>setLoading(false));return()=>element?.close();},[]);
   const editing=edit!==null;
   useEffect(()=>{
@@ -33,6 +34,7 @@ export default function TrackLibraryDialog({admin,onClose}:{admin:boolean;onClos
   const run=async(action:()=>Promise<void>)=>{setBusy(true);setError('');try{await action();}catch(reason){setError(reason instanceof Error?reason.message:'时间轴操作失败');}finally{setBusy(false);}};
   const save=()=>run(async()=>{
     if(!edit)return;
+    if(!isAvailableTrack(edit.id.trim()))throw new Error('此 JSON 名为已停用的预置轴保留，请使用其他名称。');
     const items=labels.split(/[\n,，、]+/).map(value=>value.trim()).filter(Boolean);
     if(!edit.name.trim()||!edit.id.trim()||!items.length||items.length>32||new Set(items).size!==items.length)throw new Error('请填写名称、JSON 名和 1–32 个不重复的标签。');
     const saved=await libraryRequest<LibraryTrack>(`/api/account/track-library${creating?'':`/${encodeURIComponent(edit.id)}`}`,creating?'POST':'PUT',{...edit,id:edit.id.trim(),name:edit.name.trim(),labels:items});

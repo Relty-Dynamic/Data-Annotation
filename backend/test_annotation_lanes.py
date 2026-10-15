@@ -128,7 +128,10 @@ class LanePersistenceTests(unittest.TestCase):
         stored = self.service.load(project["id"])
         public = self.service.public(stored)
         snapshot = {key: public[key] for key in ("id", "name", "revision", "duration_ms", "videos", "fixed_tracks", "track_labels", "custom_tracks", "selected_tracks", "track_names", "annotations")}
-        documents = {axis: (self.source / "timeline" / FILENAMES[axis]).read_text(encoding="utf-8") for axis in AXES}
+        snapshot["selected_tracks"] = [axis for axis in snapshot["selected_tracks"] if axis != "habit"]
+        documents = {axis: (self.source / "timeline" / FILENAMES[axis]).read_text(encoding="utf-8")
+                     for axis in snapshot["selected_tracks"]}
+        self.assertFalse((self.source / "timeline" / FILENAMES["habit"]).exists())
         self.assertEqual(validate_report(snapshot, documents)["annotations"], expected)
 
     def test_lane_changes_are_audited_and_legacy_normalization_is_not_a_fake_edit(self):

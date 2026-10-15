@@ -19,6 +19,10 @@ from backend import test_service
 from backend.testing_annotations import complete_annotations
 
 
+OUTPUT_AXES = ("scene", "posture", "category")
+OUTPUT_FILENAMES = {FILENAMES[axis] for axis in OUTPUT_AXES}
+
+
 def interval(ident, label, start, end, **extra):
     return {"id": ident, "label": label, "kind": "interval", "start_ms": start, "end_ms": end, **extra}
 
@@ -131,6 +135,18 @@ class FourAxisPersistenceTests(unittest.TestCase):
     setUp = test_service.PersistenceTests.setUp
     tearDown = test_service.PersistenceTests.tearDown
     annotated_project = test_service.PersistenceTests.annotated_project
+
+    def historical_timeline_files(self, project):
+        """Seed an old four-file batch without enabling retired habit writeback."""
+        stored = self.service.load(project["id"])
+        _, documents = self.service.export_documents(stored, include_retired=True)
+        directory = self.source / "timeline"
+        directory.mkdir(exist_ok=True)
+        for axis, raw in documents.items():
+            (directory / filename_for_axis(axis)).write_bytes(raw)
+        stored["_external_hashes"] = self.service.current_external_hashes(self.source)
+        self.service.save(stored)
+        return stored
 
     def test_fixed_tracks_can_all_be_removed_and_restored_with_empty_json(self):
         project = self.service.open_path(str(self.source))
@@ -330,7 +346,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.service.writeback(project["id"])
         path = self.source / "timeline" / filename_for_axis(axis)
         original = path.read_bytes()
-        fixed_before = {name: (self.source / "timeline" / name).read_bytes() for name in FILENAMES.values()}
+        fixed_before = {name: (self.source / "timeline" / name).read_bytes() for name in OUTPUT_FILENAMES}
         self.service.delete_custom_track(project["id"], axis, added["revision"])
         original_hashes = self.service.current_external_hashes
         calls = 0
@@ -344,7 +360,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
                 self.service.writeback(project["id"])
         self.assertEqual(error.exception.status_code, 500)
         self.assertEqual(path.read_bytes(), original)
-        self.assertEqual({name: (self.source / "timeline" / name).read_bytes() for name in FILENAMES.values()}, fixed_before)
+        self.assertEqual({name: (self.source / "timeline" / name).read_bytes() for name in OUTPUT_FILENAMES}, fixed_before)
 
     def test_custom_state_rejects_unknown_labels_or_same_lane_overlaps(self):
         project = self.annotated_project()
@@ -422,17 +438,19 @@ class FourAxisPersistenceTests(unittest.TestCase):
         updated = self.service.update_draft(project["id"], annotations, project["revision"])
         self.assertEqual(updated["annotations"]["category"], project["annotations"]["category"])
 
-    def test_upgrade_old_three_hash_baseline_writes_four_same_batch_files(self):
+    def test_upgrade_old_three_hash_baseline_writes_active_same_batch_files(self):
         stored = self.legacy_files(self.annotated_project())
         self.service.update_draft(stored["id"], complete_annotations(stored), stored["revision"])
         saved = self.service.writeback(stored["id"])
-        self.assertEqual(len(saved["paths"]), 4)
+        self.assertEqual(len(saved["paths"]), len(OUTPUT_AXES))
         self.assertEqual(set(self.service.load(stored["id"])["_external_hashes"]), set(AXES))
-        for axis in AXES:
+        self.assertIsNone(self.service.load(stored["id"])["_external_hashes"]["habit"])
+        for axis in OUTPUT_AXES:
             document = json.loads((self.source / "timeline" / FILENAMES[axis]).read_bytes())
             self.assertEqual(document["schema_version"], 3)
             self.assertEqual(document["save_id"], saved["save_id"])
         self.assertEqual(json.loads((self.source / FILENAMES["scene"]).read_bytes())["schema_version"], 1)
+        self.assertFalse((self.source / "timeline" / FILENAMES["habit"]).exists())
 
     def test_four_postures_survive_save_export_writeback_and_reopen(self):
         project = self.annotated_project()
@@ -446,10 +464,10 @@ class FourAxisPersistenceTests(unittest.TestCase):
                          ["moving", "sitting", "standing", "lying"])
         self.service.writeback(project["id"])
         result, _ = self.service.read_external(self.service.load(project["id"]))
-        self.assertEqual(result, updated["annotations"])
+        self.assertEqual(result, {**updated["annotations"], "habit": []})
         fresh = ProjectService(self.root / "posture-fresh")
         try:
-            self.assertEqual(fresh.open_path(str(self.source))["annotations"], updated["annotations"])
+            self.assertEqual(fresh.open_path(str(self.source))["annotations"], {**updated["annotations"], "habit": []})
         finally:
             fresh.previews.close()
 
@@ -466,7 +484,12 @@ class FourAxisPersistenceTests(unittest.TestCase):
             exported = json.loads(archive.read(FILENAMES["habit"]))
         self.assertEqual(exported["schema_version"], 3)
         self.assertEqual(exported["segments"][0]["created_by"], "user-1")
-        self.service.writeback(project["id"])
+        self.historical_timeline_files(saved)
+        habit_path = self.source / "timeline" / FILENAMES["habit"]
+        historical_habit = habit_path.read_bytes()
+        writeback = self.service.writeback(project["id"])
+        self.assertNotIn(str(habit_path), writeback["paths"])
+        self.assertEqual(habit_path.read_bytes(), historical_habit)
         imported, _ = self.service.read_external(self.service.load(project["id"]))
         self.assertEqual(imported["habit"][0], author)
 
@@ -477,7 +500,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         updated = self.service.update_draft(project["id"], annotations, project["revision"])
         self.service.writeback(project["id"])
         result, _ = self.service.read_external(self.service.load(project["id"]))
-        self.assertEqual(result, updated["annotations"])
+        self.assertEqual(result, {**updated["annotations"], "habit": []})
         self.assertEqual([r["mode"] for r in result["category"]], ["state", "overlay"])
 
     def assert_optional_category_roundtrip(self, category):
@@ -497,20 +520,20 @@ class FourAxisPersistenceTests(unittest.TestCase):
                           for record in documents["category"]["segments"]], category)
         self.assertEqual(self.service.load(project["id"])["annotations"], expected)
         saved = self.service.writeback(project["id"])
-        self.assertEqual(len(saved["paths"]), 4)
+        self.assertEqual(len(saved["paths"]), len(OUTPUT_AXES))
         stored = self.service.load(project["id"])
         result, hashes = self.service.read_external(stored)
-        self.assertEqual(result, expected)
+        self.assertEqual(result, {**expected, "habit": []})
         self.assertEqual(hashes, stored["_external_hashes"])
         self.assertEqual(stored["annotations"], expected)
-        for axis in AXES:
+        for axis in OUTPUT_AXES:
             document = json.loads((self.source / "timeline" / FILENAMES[axis]).read_bytes())
             self.assertEqual(document["schema_version"], 3)
             self.assertEqual(document["save_id"], saved["save_id"])
         fresh = ProjectService(self.root / "optional-category-fresh")
         try:
             reopened = fresh.open_path(str(self.source))
-            self.assertEqual(reopened["annotations"], expected)
+            self.assertEqual(reopened["annotations"], {**expected, "habit": []})
         finally:
             fresh.previews.close()
 
@@ -610,7 +633,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
             exported = json.loads(archive.read(FILENAMES["scene"]))
             self.assertEqual(exported["segments"][0]["start_ms"], 1500)
         self.service.writeback(project["id"])
-        self.assertTrue(all((self.source / "timeline" / filename).exists() for filename in FILENAMES.values()))
+        self.assertEqual({path.name for path in (self.source / "timeline").iterdir()}, OUTPUT_FILENAMES)
 
     def test_missing_category_is_blank_but_mixed_version_or_batch_is_rejected(self):
         project = self.annotated_project()
@@ -630,10 +653,9 @@ class FourAxisPersistenceTests(unittest.TestCase):
 
     def test_every_partial_fixed_axis_set_imports_only_present_annotations(self):
         project = self.annotated_project()
-        self.service.writeback(project['id'])
+        stored = self.historical_timeline_files(project)
         directory = self.source / 'timeline'
         originals = {axis: (directory / FILENAMES[axis]).read_bytes() for axis in AXES}
-        stored = self.service.load(project['id'])
         for mask in range(1, 2 ** len(AXES)):
             present = {axis for index, axis in enumerate(AXES) if mask & (1 << index)}
             with self.subTest(present=present):
@@ -651,13 +673,13 @@ class FourAxisPersistenceTests(unittest.TestCase):
                 self.assertEqual(labels, stored['track_labels'])
                 self.assertEqual(tracks, [])
 
-    def test_partial_nas_continue_can_edit_and_write_complete_batch(self):
+    def test_partial_nas_continue_can_edit_and_write_active_batch(self):
         project = self.annotated_project()
         self.service.writeback(project['id'])
         directory = self.source / 'timeline'
         originals = {axis: (directory / FILENAMES[axis]).read_bytes() for axis in ('scene', 'posture')}
         for axis in ('category', 'habit'):
-            (directory / FILENAMES[axis]).unlink()
+            (directory / FILENAMES[axis]).unlink(missing_ok=True)
         inspection = self.service.inspect_source_claim(str(self.source))
         opened = self.service.open_path(str(self.source), claim_mode='continue', claim_hashes=inspection['hashes'])
         self.assertEqual(opened['annotations']['scene'], project['annotations']['scene'])
@@ -670,9 +692,9 @@ class FourAxisPersistenceTests(unittest.TestCase):
         annotations['category'] = [interval('new-category', '专注', 0, opened['duration_ms'])]
         self.service.update_draft(opened['id'], annotations, opened['revision'])
         self.service.writeback(opened['id'])
-        documents = {axis: json.loads((directory / FILENAMES[axis]).read_bytes()) for axis in AXES}
+        documents = {axis: json.loads((directory / FILENAMES[axis]).read_bytes()) for axis in OUTPUT_AXES}
         self.assertEqual(len({doc['save_id'] for doc in documents.values()}), 1)
-        self.assertEqual(documents['habit']['segments'], [])
+        self.assertFalse((directory / FILENAMES['habit']).exists())
         reread, _ = self.service.read_external(self.service.load(opened['id']))
         self.assertEqual(reread['category'][0]['label'], '专注')
 
@@ -694,7 +716,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertNotIn(axis, hashes)
         self.assertEqual(tracks, project['custom_tracks'])
         path.write_bytes(raw)
-        for fixed in AXES:
+        for fixed in OUTPUT_AXES:
             (directory / FILENAMES[fixed]).unlink()
         imported, _, tracks, enabled, labels = self.service.read_external(stored, include_tracks=True)
         self.assertEqual(imported[axis], stored['annotations'][axis])
@@ -712,22 +734,22 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 409)
         self.assertEqual((self.source / FILENAMES["category"]).read_text(encoding="utf-8"), "external work")
 
-    def test_fourth_file_failure_rolls_back_category_and_other_three_files(self):
+    def test_last_file_failure_rolls_back_all_active_files(self):
         project = self.annotated_project()
         self.service.writeback(project["id"])
-        originals = {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES}
+        originals = {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in OUTPUT_AXES}
         replace = os.replace
         calls = 0
         def fail_last(source, target):
             nonlocal calls
             calls += 1
-            if calls == 4:
-                raise OSError("simulated fourth-file failure")
+            if calls == len(OUTPUT_AXES):
+                raise OSError("simulated last-file failure")
             return replace(source, target)
         with patch("backend.service.os.replace", side_effect=fail_last), self.assertRaises(HTTPException) as error:
             self.service.writeback(project["id"])
         self.assertEqual(error.exception.status_code, 500)
-        self.assertEqual(originals, {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in AXES})
+        self.assertEqual(originals, {axis: (self.source / "timeline" / FILENAMES[axis]).read_bytes() for axis in OUTPUT_AXES})
 
     def test_scene_export_only_advertises_current_options_and_used_legacy_ids(self):
         project = self.annotated_project()
@@ -752,13 +774,13 @@ class FourAxisPersistenceTests(unittest.TestCase):
         project = self.annotated_project()
         saved = self.service.writeback(project["id"])
         self.assertEqual({Path(p).parent for p in saved["paths"]}, {self.source / "timeline"})
-        self.assertEqual({p.name for p in (self.source / "timeline").iterdir()}, set(FILENAMES.values()))
+        self.assertEqual({p.name for p in (self.source / "timeline").iterdir()}, OUTPUT_FILENAMES)
         self.assertFalse(any((self.source / name).exists() for name in FILENAMES.values()))
 
     def test_reopen_after_deleting_timeline_json_does_not_revive_legacy_or_saved_scene(self):
         project = self.legacy_files(self.annotated_project())
         self.service.writeback(project['id'])
-        for name in FILENAMES.values():
+        for name in OUTPUT_FILENAMES:
             (self.source / 'timeline' / name).unlink()
         reopened = self.service.open_path(str(self.source))
         self.assertEqual(reopened['id'], project['id'])
@@ -775,13 +797,13 @@ class FourAxisPersistenceTests(unittest.TestCase):
     def test_writeback_recreates_deleted_json_without_reopening_or_clearing_draft(self):
         project = self.annotated_project()
         first = self.service.writeback(project['id'])
-        original = {axis: (self.source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in AXES}
-        for axis in AXES:
+        original = {axis: (self.source / 'timeline' / FILENAMES[axis]).read_bytes() for axis in OUTPUT_AXES}
+        for axis in OUTPUT_AXES:
             (self.source / 'timeline' / FILENAMES[axis]).unlink()
         second = self.service.writeback(project['id'])
         self.assertNotEqual(first['save_id'], second['save_id'])
-        self.assertEqual(set(second['paths']), {str(self.source / 'timeline' / name) for name in FILENAMES.values()})
-        for axis in AXES:
+        self.assertEqual(set(second['paths']), {str(self.source / 'timeline' / name) for name in OUTPUT_FILENAMES})
+        for axis in OUTPUT_AXES:
             self.assertEqual(json.loads((self.source / 'timeline' / FILENAMES[axis]).read_bytes())['segments'],
                              json.loads(original[axis])['segments'])
         self.assertEqual(self.service.open_path(str(self.source))['annotations'], project['annotations'])
@@ -833,7 +855,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         dirty = self.service.update_draft(project['id'],
             {**stored['annotations'], 'scene': [interval('draft-scene', '室外', 0, stored['duration_ms'])]},
             stored['revision'])
-        for name in FILENAMES.values():
+        for name in OUTPUT_FILENAMES:
             (self.source / 'timeline' / name).unlink()
         reopened = self.service.open_path(str(self.source))
         self.assertEqual(reopened['annotations']['scene'], dirty['annotations']['scene'])
@@ -882,7 +904,7 @@ class FourAxisPersistenceTests(unittest.TestCase):
         self.service.writeback(stored["id"])
         self.assertEqual(originals, {axis: (self.source / FILENAMES[axis]).read_bytes() for axis in LEGACY_AXES})
         result, _ = self.service.read_external(self.service.load(stored["id"]))
-        self.assertEqual(result, self.service.load(stored["id"])["annotations"])
+        self.assertEqual(result, {**self.service.load(stored["id"])["annotations"], "habit": []})
         (self.source / "timeline" / FILENAMES["category"]).unlink()
         partial, hashes = self.service.read_external(stored)
         self.assertEqual(partial['category'], [])

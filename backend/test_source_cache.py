@@ -785,21 +785,33 @@ class SourceCacheTests(unittest.TestCase):
                 last = self.video(2 if supplemented else 0, folder)
                 os.utime(last, ns=(1_600_000_000_000_000_000, 1_600_000_000_000_000_000))
                 before, copy_path, _ = self.legacy_project(last, uploaded=True)
+                before['custom_tracks'] = [{'id': 'legacy_events', 'name': '旧事件', 'mode': 'event', 'labels': []}]
+                before['annotations']['legacy_events'] = before['annotations']['habit']
+                before['annotations']['habit'] = []
+                self.service.save(before)
                 self.assertNotEqual(last.stat().st_mtime_ns, copy_path.stat().st_mtime_ns)
                 if supplemented:
                     earlier = [self.video(index, folder) for index in (0, 1)]
-                    self.service.supplement(before['id'], earlier, before['revision'])
+                    # A saved legacy composition may retain video IDs in insertion order.
+                    composed = self.service.create([copy_path, *earlier], before['name'], None,
+                                                   before['id'], existing=before)
+                    annotations, _ = self.service.remap_annotations(before, composed['videos'], composed['duration_ms'])
+                    composed.update(annotations=annotations, revision=before['revision'] + 1,
+                                    draft_dirty=True, _supplemented=True,
+                                    custom_tracks=before['custom_tracks'],
+                                    _legacy_cache_fingerprints={'v0001': before['source_fingerprint']})
+                    self.service.save(composed)
                     before = self.service.load(before['id'])
                     self.assertEqual([video['id'] for video in before['videos']],
                                      ['v0002', 'v0003', 'v0001'])
-                    self.assertEqual(before['annotations']['habit'][0]['start_ms'], 2250)
+                    self.assertEqual(before['annotations']['legacy_events'][0]['start_ms'], 2250)
                 linked = self.service.relink_sources(before['id'], str(last.parent), before['revision'])['project']
                 stored = self.service.load(before['id'])
                 self.assertEqual(stored['source_fingerprint'], before['source_fingerprint'])
                 self.assertTrue(all(not video['relative_path'].startswith('FPV/') for video in stored['videos']))
                 linked = self.service.update_draft(before['id'], complete_annotations(linked), linked['revision'])
                 self.service.writeback(before['id'])
-                export = last.parent.parent / 'timeline' / FILENAMES['habit']
+                export = last.parent.parent / 'timeline' / 'legacy_events.timeline.json'
                 document = json.loads(export.read_bytes())
                 self.assertEqual(document['timebase']['source_fingerprint'], before['source_fingerprint'])
                 self.assertEqual(len(document['timebase']['source_fingerprint_aliases']), 1)

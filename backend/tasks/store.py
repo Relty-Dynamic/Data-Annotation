@@ -7,6 +7,7 @@ import math
 import os
 import sqlite3
 import uuid
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from .validation import validate_annotations
@@ -54,10 +55,12 @@ class TaskStore:
         if os.name != 'nt':
             os.chmod(self.path, 0o600)
 
+    @contextmanager
     def db(self):
-        db = sqlite3.connect(self.path, timeout=30)
-        db.execute('PRAGMA foreign_keys=ON')
-        return db
+        with closing(sqlite3.connect(self.path, timeout=30)) as db:
+            db.execute('PRAGMA foreign_keys=ON')
+            with db:
+                yield db
 
     def _read(self, db, table, key):
         row = db.execute(f'SELECT body FROM {table} WHERE id=?', (key,)).fetchone()

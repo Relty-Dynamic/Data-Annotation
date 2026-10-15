@@ -80,6 +80,27 @@ class SharedAccountTests(unittest.TestCase):
         self.assertEqual(old.status_code, 401)
         self.login('changed shared password')
 
+    def test_axis_library_hides_retired_habit_and_preserves_personal_scope(self):
+        from backend.track_library import TrackLibrary
+        library = TrackLibrary(self.auth)
+        personal = library.save(self.worker['id'], 'food', '饮食', 'event', ['喝水'], create=True)
+        library.save(self.user['id'], 'adminaxis', '管理员个人轴', 'state', ['安静'], create=True)
+        with self.auth.connection() as con:
+            con.execute("INSERT INTO track_library VALUES ('*','habit','旧习惯','event','[\"喝水\"]')")
+        self.assertEqual(self.bridge.post('/v1/axis-library', json={'token': 'invalid'}).status_code, 401)
+        logged = self.bridge.post('/v1/login', json={'username': 'worker',
+            'password': 'another long safe password', 'client': 'fixture-worker'}).json()
+        response = self.bridge.post('/v1/axis-library', json={'token': logged['token']})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(set(response.json()), {'axes'})
+        axes = response.json()['axes']
+        self.assertEqual([axis['id'] for axis in axes], ['scene', 'posture', 'category', 'food'])
+        self.assertTrue(all(axis['is_default'] for axis in axes[:-1]))
+        self.assertEqual(axes[-1], personal)
+        self.assertEqual(axes, library.list(self.worker['id']))
+        with self.auth.connection() as con:
+            self.assertIsNotNone(con.execute("SELECT 1 FROM track_library WHERE id='habit'").fetchone())
+
     def test_nas_deactivation_revokes_public_session(self):
         self.login()
         self.auth.set_active(self.worker['id'], False)

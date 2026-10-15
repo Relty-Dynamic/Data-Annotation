@@ -1,8 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type CSSProperties, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type CSSProperties, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { arrangeLanes, customTrack, formatTime, isPointSegment, isEventTrack, projectTracks, timelineSnapPoints, trackName, type Project, type Segment, type Track, type VideoGap } from './domain';
 import HoverPreview from './HoverPreview';
-import type { ExternalTimeline } from './externalTimeline';
 import { sessionAssetUrl } from './sessionAssets';
 import { DEFAULT_WINDOW_MS, timelineWheelAction, timelineWindow, visibleTimelineTicks } from './timelineViewport';
 import { recordingScale, zoomRecordingScale, snapDisplayedTime } from './timelineScale';
@@ -10,11 +9,11 @@ import './timeline.css';
 
 export interface TimelineProps {
   project: Project;
-  comparison?: ExternalTimeline | null;
   currentTime: number;
   activeTrack: Track;
   trackRevealVersion?: number;
   selectedId: string | null;
+  selectedBoundary?: 'start' | 'end' | null;
   anchorControls?: ReactNode;
   anchors?: number[];
   selectedRange?: { start_ms: number; end_ms: number } | null;
@@ -24,6 +23,8 @@ export interface TimelineProps {
   onScrubEnd?: (cancelled: boolean, targetMs: number) => void;
   onTrackSelect: (track: Track) => void;
   onSegmentSelect: (track: Track, segment: Segment, seekTime?: number) => void;
+  onBoundarySelect?: (track: Track, segment: Segment, edge: 'start' | 'end') => boolean;
+  onBoundaryDismiss?: () => void;
 }
 
 const HOUR_MS = DEFAULT_WINDOW_MS;
@@ -47,6 +48,8 @@ interface ScrubSession {
   startY: number;
   grabOffset: number;
   hasMoved: boolean;
+  exactStart: number | null;
+  snapPoints: number[];
   latestTime: number;
   lastSeekTime: number | null;
   lastSeekAt: number;
@@ -88,8 +91,8 @@ function positionStyle(start: number, end: number, duration: number): CSSPropert
   return { left: `${safeStart / duration * 100}%`, width: `${(safeEnd - safeStart) / duration * 100}%` };
 }
 
-export default function Timeline({ project, comparison, currentTime, activeTrack, trackRevealVersion = 0, selectedId, anchorControls, anchors = NO_ANCHORS, selectedRange = null, onRangeDismiss, onSeek, onScrubStart, onScrubEnd, onTrackSelect, onSegmentSelect }: TimelineProps) {
-  const GUTTER = comparison ? 152 : 112;
+export default function Timeline({ project, currentTime, activeTrack, trackRevealVersion = 0, selectedId, selectedBoundary = null, anchorControls, anchors = NO_ANCHORS, selectedRange = null, onRangeDismiss, onSeek, onScrubStart, onScrubEnd, onTrackSelect, onSegmentSelect, onBoundarySelect, onBoundaryDismiss }: TimelineProps) {
+  const GUTTER = 112;
   const [scrollX, setScrollX] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(720);
   const [plotViewportWidth, setPlotViewportWidth] = useState(710);
@@ -103,6 +106,8 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   const pendingViewRef = useRef<{ projectId: string; windowMs: number; scrollLeft: number } | null>(null);
   const wheelHandlerRef = useRef<(event: WheelEvent) => void>(() => {});
   const [hoverTime, setHoverTime] = useState<HoverTime | null>(null);
+  const [hoveringBoundary, setHoveringBoundary] = useState(false);
+  const dismissedPointerClick = useRef(false);
   const [scrubTime, setScrubTime] = useState<number | null>(null);
   const scrubRef = useRef<ScrubSession | null>(null);
   const callbacksRef = useRef({ onSeek, onScrubStart, onScrubEnd });
@@ -119,13 +124,11 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
   const duration = Math.max(project.duration_ms, 1);
-  const displayedTime = scrubTime ?? currentTime;
-  const rows = useMemo(() => [
-    ...(comparison ? [{key: 'external', track: comparison.track, external: true, segments: arrangeLanes(comparison.segments, duration)}] : []),
-    ...(comparison ? [comparison.track] : projectTracks(project)).map(track => ({key: track, track, external: false, segments: arrangeLanes(project.annotations[track] ?? [], duration)})),
-  ], [comparison, project, duration]);
-  const visibleAnchors = useMemo(() => anchors.slice(-3).filter((time) => Number.isFinite(time) && time >= 0 && time <= project.duration_ms), [anchors, project.duration_ms]);
-  const snapPoints = useMemo(() => timelineSnapPoints(comparison ? {...project, annotations: Object.fromEntries(projectTracks(project).map(track=>[track,track===comparison.track?[...(project.annotations[track]??[]),...comparison.segments]:[]]))} : project, visibleAnchors), [project, visibleAnchors, comparison]);
+  // Boundary edits can stop at a neighbor or recording gap before the pointer does.
+  const displayedTime = selectedBoundary ? currentTime : scrubTime ?? currentTime;
+  const rows = useMemo(() => projectTracks(project).map(track => ({track, segments: arrangeLanes(project.annotations[track] ?? [], duration)})), [project, duration]);
+  const visibleAnchors = useMemo(() => anchors.slice(-2).filter((time) => Number.isFinite(time) && time >= 0 && time <= project.duration_ms), [anchors, project.duration_ms]);
+  const snapPoints = useMemo(() => timelineSnapPoints(project, visibleAnchors), [project, visibleAnchors]);
   const rangeStart = Math.max(0, Math.min(selectedRange?.start_ms ?? 0, project.duration_ms));
   const rangeEnd = Math.max(rangeStart, Math.min(selectedRange?.end_ms ?? 0, project.duration_ms));
   const snapPointsRef = useRef(snapPoints);
@@ -209,7 +212,6 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   }, [axisWidth, viewportWidth, project.id]);
 
   useLayoutEffect(() => {
-    if (comparison) return;
     const viewport = tracksViewportRef.current;
     const target = selectedSegmentRef.current ?? trackGroupRefs.current[activeTrack]?.firstElementChild;
     if (!viewport || !(target instanceof HTMLElement)) return;
@@ -217,7 +219,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     const bottom = top + target.offsetHeight;
     if (top < viewport.scrollTop) viewport.scrollTop = Math.max(0, top - 6);
     else if (bottom > viewport.scrollTop + viewport.clientHeight) viewport.scrollTop = bottom + 6 - viewport.clientHeight;
-  }, [activeTrack, trackRevealVersion, selectedId, rows, comparison]);
+  }, [activeTrack, trackRevealVersion, selectedId, rows]);
 
   useEffect(() => {
     const hide = () => setHoverTime(null);
@@ -316,6 +318,8 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
   }
 
   function pointerTime(clientX: number, session: ScrubSession): number | null {
+    // A second click selects the exact edge, even when its handle is wider than the block.
+    if (session.exactStart !== null && !session.hasMoved) return session.exactStart;
     const scroller = scrollRef.current;
     const ruler = rulerRef.current;
     if (!scroller || !ruler) return null;
@@ -325,7 +329,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     const left = viewport.left + scroller.clientLeft + GUTTER;
     const right = viewport.left + scroller.clientLeft + (tracksViewportRef.current?.clientWidth ?? scroller.clientWidth);
     const pointer = Math.max(left, Math.min(clientX - session.grabOffset, right));
-    return snapDisplayedTime(scale.toTime((pointer - plot.left) / plot.width * scale.duration), snapPointsRef.current, scale, plot.width);
+    return snapDisplayedTime(scale.toTime((pointer - plot.left) / plot.width * scale.duration), session.snapPoints, scale, plot.width);
   }
 
   function updateScrub(now: number) {
@@ -366,25 +370,26 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     if (scrubRef.current === session) session.frame = requestAnimationFrame(scrubFrame);
   }
 
-  function beginScrub(event: ReactPointerEvent<HTMLElement>, fromHandle = false) {
+  function beginScrub(event: ReactPointerEvent<HTMLElement>, fromHandle = false, exactStart: number | null = null) {
     if (event.button !== 0 || !event.isPrimary || scrubRef.current) return;
     const plot = rulerRef.current?.getBoundingClientRect();
     if (!plot || plot.width <= 0) return;
     event.preventDefault();
     event.stopPropagation();
     const now = performance.now();
+    const initialTime = exactStart ?? displayedTime;
     const session: ScrubSession = {
       pointerId: event.pointerId, owner: event.currentTarget, projectId: project.id,
       clientX: event.clientX, startX: event.clientX, startY: event.clientY,
-      grabOffset: fromHandle ? event.clientX - (plot.left + progress * plot.width) : 0,
-      hasMoved: false, latestTime: displayedTime, lastSeekTime: null,
+      grabOffset: fromHandle ? event.clientX - (plot.left + scale.toDisplay(initialTime) / scale.duration * plot.width) : 0,
+      hasMoved: false, exactStart, snapPoints: [...snapPointsRef.current], latestTime: initialTime, lastSeekTime: null,
       lastSeekAt: -Infinity, lastFrameAt: now, frame: 0,
     };
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch { return; }
     scrubRef.current = session;
     event.currentTarget.focus({ preventScroll: true });
     setHoverTime(null);
-    setScrubTime(displayedTime);
+    setScrubTime(initialTime);
     callbacksRef.current.onScrubStart?.();
     updateScrub(now);
     if (scrubRef.current === session) session.frame = requestAnimationFrame(scrubFrame);
@@ -430,6 +435,37 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     onClick: (event: MouseEvent<HTMLElement>) => { event.preventDefault(); event.stopPropagation(); },
   };
 
+  function nearSelectedBoundary(clientX: number, clientY: number) {
+    const plot = rulerRef.current?.getBoundingClientRect();
+    const scroller = scrollRef.current;
+    if (!selectedBoundary || !plot || plot.width <= 0 || !scroller) return false;
+    const viewport = scroller.getBoundingClientRect();
+    const left = viewport.left + scroller.clientLeft + GUTTER;
+    const right = viewport.left + scroller.clientLeft + (tracksViewportRef.current?.clientWidth ?? scroller.clientWidth);
+    if (clientX < left || clientX > right || clientY < viewport.top || clientY >= viewport.top + scroller.clientHeight) return false;
+    const edgeX = plot.left + scale.toDisplay(currentTime) / scale.duration * plot.width;
+    return edgeX >= left && edgeX <= right && Math.abs(clientX - edgeX) <= 7;
+  }
+
+  function captureBoundaryPointer(event: ReactPointerEvent<HTMLElement>) {
+    if (event.button !== 0 || !event.isPrimary) return;
+    dismissedPointerClick.current = false;
+    if (!selectedBoundary || scrubRef.current) return;
+    const target = event.target instanceof Element ? event.target : null;
+    // Existing handles retain their own exact-edge selection and pointer capture.
+    if (target?.closest('.tl-boundary-handle, .tl-playhead-handle')) return;
+    if (target?.closest('.tl-body') && nearSelectedBoundary(event.clientX, event.clientY)) {
+      beginScrub(event, true, currentTime);
+      return;
+    }
+    // Consume the entire click, even after the parent has cleared selectedBoundary.
+    // Otherwise a block's click or a surface's pointerdown would immediately seek.
+    dismissedPointerClick.current = true;
+    event.preventDefault(); event.stopPropagation();
+    setHoverTime(null); setHoveringBoundary(false);
+    onBoundaryDismiss?.();
+  }
+
   function hoverVideoAt(time: number) {
     const exact = project.videos.find((video) => time >= video.start_ms && time < video.end_ms);
     if (exact) return exact;
@@ -455,6 +491,9 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
 
   function showHoverTime(event: MouseEvent<HTMLElement>) {
     if (scrubRef.current) return;
+    const nearBoundary = nearSelectedBoundary(event.clientX, event.clientY);
+    setHoveringBoundary(nearBoundary);
+    if (nearBoundary) { setHoverTime(null); return; }
     const scroller = scrollRef.current;
     const viewport = scroller?.getBoundingClientRect();
     if (!scroller || !viewport || event.clientX < viewport.left + scroller.clientLeft + GUTTER || event.clientX > viewport.left + scroller.clientLeft + (tracksViewportRef.current?.clientWidth ?? scroller.clientWidth)) {
@@ -499,35 +538,78 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
     });
   }
 
-  function renderSegment(track: Track, segment: Segment, lane = 0, external = false) {
+  function renderSegment(track: Track, segment: Segment, lane = 0) {
     const end = segment.end_ms ?? project.duration_ms;
-    const selected = !comparison && segment.id === selectedId && activeTrack === track;
-    const point = isEventTrack(project,track) && isPointSegment(segment);
+    const selected = segment.id === selectedId && activeTrack === track;
+    const point = isPointSegment(segment);
+    const top = lane === 0 ? 11 : 6;
+    const narrow = !point && pixelAt(end) - pixelAt(segment.start_ms) < 24;
+    const edges: Array<'start' | 'end'> = point || segment.end_ms === null ? ['start'] : ['start', 'end'];
     return (
+      <Fragment key={segment.id}>
       <button
-        key={segment.id}
         ref={selected ? selectedSegmentRef : undefined}
         type="button"
         className={`tl-segment tl-segment-${customTrack(project,track)?'custom':track}${selected ? ' tl-segment-selected' : ''}${segment.end_ms === null ? ' tl-segment-open' : ''}${point ? ' tl-segment-point' : ''}`}
-        style={{ ...position(segment.start_ms, point ? segment.start_ms : end), top: lane === 0 ? 11 : 6 }}
-        title={`${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${point ? `${segment.label} · 时点 ${formatTime(segment.start_ms)}` : `${segment.label} · ${formatTime(segment.start_ms)} → ${segment.end_ms === null ? '标注中' : formatTime(segment.end_ms)}`}`}
-        aria-label={point ? `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，时点 ${formatTime(segment.start_ms)}` : `${comparison ? (external ? '外部' : '项目') : ''}${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，从 ${formatTime(segment.start_ms)}${segment.end_ms === null ? '，标注中' : ` 到 ${formatTime(segment.end_ms)}`}`}
+        style={{ ...position(segment.start_ms, point ? segment.start_ms : end), top }}
+        title={`${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${point ? `${segment.label} · ${formatTime(segment.start_ms)}` : `${segment.label} · ${formatTime(segment.start_ms)} → ${segment.end_ms === null ? '标注中' : formatTime(segment.end_ms)}`}`}
+        aria-label={point ? `${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，${formatTime(segment.start_ms)}` : `${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，从 ${formatTime(segment.start_ms)}${segment.end_ms === null ? '，标注中' : ` 到 ${formatTime(segment.end_ms)}`}`}
         aria-pressed={selected}
         onClick={(event) => {
           event.stopPropagation();
           // The parent accepts the selection and commits one seek, or keeps its pending edit.
           const seekTime = event.detail === 0 ? segment.start_ms : timeAtClientX(event.clientX)?.time ?? segment.start_ms;
-          if (comparison) onSeek(seekTime); else onSegmentSelect(track, segment, seekTime);
+          onSegmentSelect(track, segment, seekTime);
         }}
       >
         <span className="tl-segment-label">{segment.label}</span>
         {!point && segment.end_ms === null && <span className="tl-open-dot" aria-hidden="true" />}
       </button>
+      {selected && onBoundarySelect && edges.map(edge => {
+        const edgeTime = edge === 'start' ? segment.start_ms : end;
+        const edgeName = point ? '标注位置' : edge === 'start' ? '开始边界' : '结束边界';
+        const boundarySelected = selectedBoundary === edge || (point && selectedBoundary !== null);
+        return <button
+          key={edge}
+          type="button"
+          className={`tl-boundary-handle tl-boundary-${edge}${narrow ? ' tl-boundary-narrow' : ''}${point ? ' tl-boundary-point' : ''}${boundarySelected ? ' tl-boundary-selected' : ''}`}
+          style={{left: `${scale.toDisplay(edgeTime) / scale.duration * 100}%`, top: narrow ? top + (edge === 'start' ? -6 : 12) : top - 3}}
+          data-boundary={edge}
+          aria-label={`${segment.label}：${edgeName}，${formatTime(edgeTime)}`}
+          aria-pressed={boundarySelected}
+          title={`${edgeName} ${formatTime(edgeTime)} · 拖动或使用进度快捷键调整`}
+          onPointerDown={event => {
+            if (event.button !== 0 || !event.isPrimary || scrubRef.current) return;
+            event.preventDefault(); event.stopPropagation();
+            if (onBoundarySelect(track, segment, edge)) beginScrub(event, true, edgeTime);
+          }}
+          {...scrubPointerHandlers}
+          onClick={event => {
+            event.preventDefault(); event.stopPropagation();
+            // Keyboard activation has no pointerdown; pointer clicks were handled above.
+            if (event.detail === 0) onBoundarySelect(track, segment, edge);
+          }}
+        ><span aria-hidden="true" /></button>;
+      })}
+      </Fragment>
     );
   }
 
   return (
-    <section ref={rootRef} className={`tl-root${comparison ? ' tl-comparison' : ''}${scrubTime !== null ? ' tl-is-scrubbing' : ''}`} aria-label="视频与标注时间轴">
+    <section ref={rootRef} data-boundary-keep className={`tl-root${scrubTime !== null ? ' tl-is-scrubbing' : ''}${selectedBoundary ? ' tl-is-boundary-editing' : ''}${selectedBoundary && hoveringBoundary ? ' tl-is-boundary-hovering' : ''}`} aria-label="视频与标注时间轴"
+      onPointerDownCapture={captureBoundaryPointer}
+      onPointerMove={scrubPointerHandlers.onPointerMove}
+      onPointerUp={scrubPointerHandlers.onPointerUp}
+      onPointerCancel={event => { dismissedPointerClick.current = false; scrubPointerHandlers.onPointerCancel(event); }}
+      onLostPointerCapture={scrubPointerHandlers.onLostPointerCapture}
+      onClickCapture={event => {
+        if (dismissedPointerClick.current && event.detail > 0) {
+          dismissedPointerClick.current = false;
+          event.preventDefault(); event.stopPropagation();
+        } else if (selectedBoundary && event.detail === 0 && !(event.target instanceof Element && event.target.closest('.tl-boundary-handle, .tl-playhead-handle'))) {
+          event.preventDefault(); event.stopPropagation(); onBoundaryDismiss?.();
+        }
+      }}>
       <header className="tl-toolbar">
         <div className="tl-heading"><h2>时间轴</h2></div>
         {anchorControls}
@@ -539,7 +621,7 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
         </div>
         <span className="tl-screen-duration" title={`无视频间隔已压缩，悬停查看实际起止时间；每屏录制时间约 ${formatTime(visibleDuration)}；普通滚轮上下滚动，Alt + 滚轮左右浏览，Ctrl + 滚轮缩放`}>录制 {Math.abs(visibleDuration - HOUR_MS) < 1 ? '1小时' : rulerTime(visibleDuration)}</span>
       </header>
-      <div className="tl-body" onMouseMove={showHoverTime} onMouseLeave={() => setHoverTime(null)} onPointerDownCapture={(event) => {
+      <div className="tl-body" onMouseMove={showHoverTime} onMouseLeave={() => { setHoverTime(null); setHoveringBoundary(false); }} onPointerDownCapture={(event) => {
         // Capture runs before scrub/segment handlers; toolbar buttons live outside this surface.
         const axis = event.target instanceof Element && event.target.closest('.tl-row, .tl-playhead-handle');
         if (selectedRange && event.button === 0 && event.isPrimary && axis) onRangeDismiss?.();
@@ -577,15 +659,15 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
             </div>
           </div>
           </div>
-          <div className="tl-tracks-viewport" ref={tracksViewportRef} style={{ width: viewportWidth }} role="region" tabIndex={0} aria-label={comparison ? `外部与项目${trackName(project,comparison.track)}对照轴` : "项目标注时间轴，可上下滚动查看主轴和子轴"} onScroll={(event) => {
+          <div className="tl-tracks-viewport" ref={tracksViewportRef} style={{ width: viewportWidth }} role="region" tabIndex={0} aria-label="项目标注时间轴，可上下滚动查看主轴和子轴" onScroll={(event) => {
             const left = event.currentTarget.scrollLeft;
             if (scrollRef.current && Math.abs(scrollRef.current.scrollLeft - left) > 0.5) scrollRef.current.scrollLeft = left;
             setHoverTime(null);
           }}>
             <div className="tl-tracks-content" style={{ width: contentWidth }}>
-              {rows.map(({key, track, external, segments}) => {
-                const active = !comparison && activeTrack === track;
-                const groupName = `${comparison ? (external ? '外部 · ' : '项目 · ') : ''}${trackName(project,track)}`;
+              {rows.map(({track, segments}) => {
+                const active = activeTrack === track;
+                const groupName = trackName(project,track);
                 const laneSegments = new Map<number, typeof segments>([[0, []]]);
                 for (const item of segments) {
                   if (!laneSegments.has(item.lane)) laneSegments.set(item.lane, []);
@@ -593,11 +675,11 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
                 }
                 const lanes = [...laneSegments.entries()].sort(([left], [right]) => left - right);
                 const laneCount = lanes.length;
-                return <div className={`tl-track-group tl-track-${customTrack(project,track)?'custom':track}${external ? ' tl-external-row' : ''}${active ? ' tl-track-active' : ''}`} key={key}
-                  ref={(element) => { if (!external) trackGroupRefs.current[track] = element; }}
+                return <div className={`tl-track-group tl-track-${customTrack(project,track)?'custom':track}${active ? ' tl-track-active' : ''}`} key={track}
+                  ref={(element) => { trackGroupRefs.current[track] = element; }}
                   role="group" aria-label={`${groupName}：主轴${laneCount > 1 ? `及 ${laneCount - 1} 条子轴` : ''}`}>
                   {lanes.map(([lane, items], index) => <div className={`tl-row tl-track-row ${lane === 0 ? 'tl-main-row' : 'tl-child-row'}${index === laneCount - 1 ? ' tl-last-lane' : ''}`} key={lane} data-lane={lane}>
-                    <button type="button" className="tl-gutter tl-track-select" aria-pressed={active} onClick={() => { if (!comparison) onTrackSelect(track); }} aria-label={`${comparison ? '' : '选择'}${groupName}${lane === 0 ? '主轴' : `子轴 ${lane}`}`} title={`${groupName} · ${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${items.length} 条标注`}>
+                    <button type="button" className="tl-gutter tl-track-select" aria-pressed={active} onClick={() => onTrackSelect(track)} aria-label={`选择${groupName}${lane === 0 ? '主轴' : `子轴 ${lane}`}`} title={`${groupName} · ${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${items.length} 条标注`}>
                       {lane === 0 ? <>
                         <span className="tl-track-title"><span className={`tl-row-dot tl-dot-${customTrack(project,track)?'custom':track}`} /><span className="tl-track-name">{groupName}</span><span className="tl-count">{segments.length}</span></span>
                         <span className="tl-lane-name">主轴{laneCount > 1 && <span className="tl-child-count"> · {laneCount - 1} 条子轴</span>}</span>
@@ -607,8 +689,8 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
                       if ((event.target as HTMLElement).closest('button')) return;
                       beginScrub(event);
                     }} {...scrubPointerHandlers}>
-                      {!items.length && <span className="tl-empty-track">{comparison ? '暂无记录' : !segments.length ? isEventTrack(project,track) ? '记录事件，或用锚点添加子轴标注' : '点击右侧标签，或用锚点选择区间' : '主轴留空'}</span>}
-                      {items.map(({segment}) => renderSegment(track, segment, lane, external))}
+                      {!items.length && <span className="tl-empty-track">{!segments.length ? isEventTrack(project,track) ? '记录事件，或用锚点添加子轴标注' : '点击右侧标签，或用锚点选择区间' : '主轴留空'}</span>}
+                      {items.map(({segment}) => renderSegment(track, segment, lane))}
                       {renderGaps('track')}
                     </div>
                   </div>)}
@@ -624,12 +706,12 @@ export default function Timeline({ project, comparison, currentTime, activeTrack
             left: pixelAt(rangeStart),
             width: pixelAt(rangeEnd) - pixelAt(rangeStart),
           }} />}
-          {visibleAnchors.map((time, index) => <div key={`${index}-${time}`} className="tl-anchor" style={{ left: pixelAt(time) }} aria-label={`锚点 ${index + 1}，${formatTime(time)}`}>
-            <span className={`tl-anchor-label${pixelAt(time) - scrollX > visibleAxisWidth - 30 ? ' tl-anchor-label-left' : ''}`}>{index + 1}</span>
+          {visibleAnchors.map(time => <div key={time} className="tl-anchor" style={{ left: pixelAt(time) }} aria-label={`锚点，${formatTime(time)}`}>
+            <span className={`tl-anchor-marker${pixelAt(time) - scrollX > visibleAxisWidth - 12 ? ' tl-anchor-marker-right' : pixelAt(time) - scrollX < 12 ? ' tl-anchor-marker-left' : ''}`} aria-hidden="true" />
           </div>)}
           {hoverTime && <div className={`tl-hover-line${hoverTime.snapped ? ' tl-hover-line-snapped' : ''}`} style={{ left: pixelAt(hoverTime.time) }} aria-hidden="true" />}
           <div className="tl-playhead" style={{ left: progress * axisWidth }}>
-            <div className="tl-playhead-handle" role="slider" tabIndex={0} aria-label="拖动播放光标" aria-valuemin={0} aria-valuemax={project.duration_ms} aria-valuenow={Math.round(displayedTime)} aria-valuetext={formatTime(displayedTime)} onPointerDown={(event) => beginScrub(event, true)} {...scrubPointerHandlers} onKeyDown={(event) => {
+            <div className="tl-playhead-handle" role="slider" tabIndex={0} aria-label="拖动播放光标" aria-valuemin={0} aria-valuemax={project.duration_ms} aria-valuenow={Math.round(displayedTime)} aria-valuetext={formatTime(displayedTime)} onPointerDown={(event) => beginScrub(event, true, selectedBoundary ? currentTime : null)} {...scrubPointerHandlers} onKeyDown={(event) => {
               const target = event.key === 'Home' ? 0 : event.key === 'End' ? project.duration_ms : null;
               if (target !== null) { event.preventDefault(); event.stopPropagation(); if (!scrubRef.current) onSeek(target); }
             }} />
