@@ -45,6 +45,12 @@ def install(app, session, accounts, provider, root):
     def actor(request):
         return request.state.r2_user
 
+    from .upload_bridge import install as install_upload_bridge
+    app.state.upload_bridge = install_upload_bridge(app, router, actor, accounts, uploads)
+    from pathlib import Path
+    from .upload_install import install as install_upload_installer
+    install_upload_installer(app, Path(__file__).resolve().parents[1])
+
     def project(ident, request):
         value = service.load(ident)
         if not service.allowed(actor(request), ident):

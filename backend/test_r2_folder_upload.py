@@ -205,6 +205,24 @@ class HelperWindowTests(unittest.TestCase):
             self.assertEqual(denied.status_code, 403)
             picker.assert_not_called()
 
+    def test_client_initialization_failure_returns_json_and_allows_retry(self):
+        with patch('backend.r2_upload_helper.httpx.Client', side_effect=ImportError('fixture proxy dependency missing')):
+            response = self.encrypted_login()
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(response.headers['content-type'].startswith('application/json'))
+        self.assertIn('requirements.lock.txt', response.json()['detail'])
+        self.assertNotIn('fixture proxy', response.text)
+        self.assertIsNone(self.client.get('/api/status', headers=self.headers).json()['user'])
+        self.assertEqual(self.encrypted_login().status_code, 200)
+
+    def test_installed_dependencies_support_socks_environment(self):
+        # Reproduce the actual failing constructor, without making a network
+        # connection, credentials or a mock transport that bypasses proxy setup.
+        with patch.dict(os.environ, {'ALL_PROXY': 'socks5://127.0.0.1:1'}, clear=True):
+            with httpx.Client(base_url='https://api.example.com', trust_env=True) as client:
+                self.assertFalse(client.is_closed)
+            self.assertTrue(client.is_closed)
+
     def test_native_folder_selection_keeps_paths_out_of_public_calls(self):
         self.assertEqual(self.encrypted_login().status_code, 200)
         video = Path(self.temp.name) / 'video'
@@ -221,6 +239,12 @@ class HelperWindowTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg tools required')
 class FolderUploadRoundTripTests(unittest.TestCase):
     def test_real_compression_cache_modalities_and_independent_human_timeline(self):
+        self.round_trip()
+
+    def test_same_page_agent_compresses_uploads_and_keeps_prediction_separate(self):
+        self.round_trip(use_agent=True)
+
+    def round_trip(self,use_agent=False):
         base = Path(__file__).resolve().parents[1] / '.tmp'
         base.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=base) as temporary:
@@ -262,6 +286,9 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                 return httpx.Response(200)
             class PublicClient:
                 def request(self, method, path, **kwargs):
+                    if path=='/api/r2/helper/identity':
+                        return httpx.Response(200,json=USER)
+                    path=path.replace('/api/r2/helper/transfer/uploads','/api/r2/uploads',1)
                     parts = path.split('/')
                     if path == '/api/r2/uploads':
                         value = uploads.start(USER, kwargs['json'])
@@ -272,14 +299,27 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                     else:
                         value = uploads.plan(parts[4], int(parts[6]), USER)
                     return httpx.Response(200, json=value)
-            remote = RemoteCaptureTarget(PublicClient(), local)
-            manager = FolderUploadManager(remote, root / 'staging')
-            selection = manager.select_folder(USER['id'], root / 'collection')
-            remote.attachments = selection['attachments']
-            job = manager.start(USER, 'lixin', None, None, selection['selection_id'])
-            self.assertEqual(job['prefix'], 'daily/20261015/1015lixin')
+            if use_agent:
+                from backend.upload_agent import AgentEngine
+                engine=AgentEngine(root,PublicClient(),service=local,picker=lambda root,kind:[str(root/'collection')])
+                engine.execute({'id':'select-fixture','action':'select','fields':{}})
+                self.assertFalse(engine.report.get('error'),engine.report)
+                self.assertEqual(len(engine.report['selection']['attachments']),3)
+            else:
+                remote = RemoteCaptureTarget(PublicClient(), local)
+                manager = FolderUploadManager(remote, root / 'staging')
+                selection = manager.select_folder(USER['id'], root / 'collection')
+                remote.attachments = selection['attachments']
+                job = manager.start(USER, 'lixin', None, None, selection['selection_id'])
             with patch('backend.r2_upload.httpx.Client', side_effect=lambda **kwargs: real_client(transport=httpx.MockTransport(direct), **kwargs)):
-                self.assertEqual(manager.finish(job['id'], USER['id'], local, lambda ident: True)['state'], 'ready')
+                if use_agent:
+                    engine.execute({'id':'start-fixture','action':'start','fields':{'collector':'lixin'}})
+                    self.assertFalse(engine.report.get('error'),engine.report)
+                    self.assertEqual(engine.snapshot()['job']['state'],'ready')
+                    job=engine.job
+                else:
+                    self.assertEqual(manager.finish(job['id'], USER['id'], local, lambda ident: True)['state'], 'ready')
+            self.assertEqual(job['prefix'], 'daily/20261015/1015lixin')
             manifest = provider.optional_json(job['prefix'] + '/manifest.json')[0]
             compressed = provider.get(job['prefix'] + '/' + manifest['files'][0]['key'])
             cache = list((root / 'desktop/dataMarkProject/1015lixin').glob('*.normal.mp4'))
