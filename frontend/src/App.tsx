@@ -8,6 +8,7 @@ import {browserVideoUrl, clearBrowserVideoCache} from './browserVideoCache.ts';
 import AdminPanel from './AdminPanel';
 import TaskAccounts from './tasks/TaskAccounts';
 import MockUploadPanel from './MockUploadPanel';
+import S3UploadEntry from './S3UploadEntry';
 import PasswordDialog from './PasswordDialog';
 import HistoryPanel from './HistoryPanel';
 import { Upload, FolderOpen, Download, Save, Play, Pause, SkipBack, SkipForward, X, Trash2, Check, Film, Layers3, Keyboard, Maximize, Minimize, Volume2, VolumeX, Circle, ArrowRight, LoaderCircle, Bookmark, ScanLine, Settings, History } from 'lucide-react';
@@ -923,6 +924,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
     {!mockCatalogAvailable&&<p className="import-error" role="alert">模拟存储目录不可用，请检查本机服务。</p>}
     {importError&&<p className="import-error" role="alert">{importError}</p>}
    </> : <>
+   {activeStorage==='s3'&&user.can_upload&&importMode==='new'&&<S3UploadEntry/>}
    {importMode==='new'&&<div className="project-name-field"><label className="field-label" htmlFor="new-project-name">项目名称</label><input id="new-project-name" className="project-name-input" value={newProjectName} disabled={!!busy} placeholder="留空则使用所选文件夹名" autoComplete="off" aria-describedby="new-project-name-hint" aria-invalid={!!projectNameError(newProjectName,false)} onChange={e=>setNewProjectName(e.target.value)}/><p id="new-project-name-hint" className={projectNameError(newProjectName,false)?'import-error':'input-hint'}>{projectNameError(newProjectName,false)?projectNameError(newProjectName,false):sharedServer||mockMode?'领取完整采集目录，标注文件写回目录中的 timeline/；最多 80 个字符':'选择视频文件时，留空仍按导入时间命名；最多 80 个字符'}</p></div>}
    {importMode!=='new'&&<div className="relink-target"><span>当前项目</span><strong>{project?.name}</strong><small>已有 {project?.videos.length??0} 段视频</small></div>}
    <p>{importMode==='relink'?<>选择最初的原视频目录，验证匹配后迁移已有缓存并清理平台内的视频副本。<br/>标注、撤销记录和当前输入都会保留。</>:<>识别文件名中的录制时间，自动排序。<br/>保留视频之间的真实录制间隔。</>}</p>

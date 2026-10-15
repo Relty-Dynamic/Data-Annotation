@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from .r2_service import capture_prefix
 from .service import document_bytes, now, parse_recording_start
+from .r2_folder import attachment_key, validate_prediction
 
 
 class R2Uploads:
@@ -66,6 +67,22 @@ class R2Uploads:
             names.add(name.casefold())
             parse_recording_start(name)
             item['name'] = name
+        attachments = manifest.get('attachments', [])
+        if not isinstance(attachments, list) or len(attachments) > 4000:
+            raise HTTPException(422, '附属数据文件数量超过限制。')
+        attachment_names = set()
+        for item in attachments:
+            if (not isinstance(item, dict) or not re.fullmatch(r'[a-f0-9]{64}', str(item.get('sha256', '')))
+                    or type(item.get('size')) is not int or not 0 < item['size'] <= 16 * 1024**3):
+                raise HTTPException(422, '附属数据清单无效。')
+            key = attachment_key(item.get('key'))
+            if key.casefold() in attachment_names:
+                raise HTTPException(422, '附属数据文件名称重复。')
+            attachment_names.add(key.casefold())
+            item['name'] = key
+        all_files = files + attachments
+        if sum(item['size'] for item in all_files) > 100 * 1024**3:
+            raise HTTPException(422, '上传数据总量超过 100 GiB。')
         for field in ('collector_name', 'uploader_name'):
             if not isinstance(manifest.get(field), str) or not 1 <= len(manifest[field]) <= 80:
                 raise HTTPException(422, '请填写采集人和上传人。')
@@ -83,10 +100,13 @@ class R2Uploads:
                 raise HTTPException(409, '采集目录已存在，未覆盖。')
             ident = uuid.uuid4().hex
             manifest.update(schema_version=1, uploaded_by=user['id'], uploaded_by_username=user['username'], created_at=now())
-            for item in files:
-                item['key'] = 'FPV/' + item['sha256'] + '-' + item['name']
+            for item in all_files:
+                # Immutable, content-addressed objects prevent concurrent uploads
+                # from overwriting bytes before the manifest is committed.
+                folder, name = item['key'].rsplit('/', 1)
+                item['key'] = folder + '/' + item['sha256'] + '-' + name
             job = {'id': ident, 'owner': user['id'], 'digest': request_digest, 'manifest': manifest,
-                   'state': 'uploading', 'files': [{} for _ in files]}
+                   'state': 'uploading', 'files': [{} for _ in all_files]}
             self.save(job)
             return self.public(job)
 
@@ -94,12 +114,16 @@ class R2Uploads:
     def public(job):
         return {'id': job['id'], 'prefix': job['manifest']['prefix'], 'state': job['state'], 'file_count': len(job['files'])}
 
+    @staticmethod
+    def items(job):
+        return job['manifest']['files'] + job['manifest'].get('attachments', [])
+
     def plan(self, ident, index, user):
         with self.lock:
             job = self.load(ident, user)
             if not 0 <= index < len(job['files']):
                 raise HTTPException(404, '上传文件不存在。')
-            item = job['manifest']['files'][index]
+            item = self.items(job)[index]
             key = job['manifest']['prefix'] + '/' + item['key']
             record = job['files'][index]
             try:
@@ -114,7 +138,8 @@ class R2Uploads:
                 return {'complete': True, 'parts': []}
             for attempt in range(2):
                 if 'upload_id' not in record:
-                    record['upload_id'] = self.provider.call('create_multipart_upload', Key=key, ContentType='video/mp4', Metadata={'sha256': item['sha256']})['UploadId']
+                    content_type = 'video/mp4' if index < len(job['manifest']['files']) else 'application/octet-stream'
+                    record['upload_id'] = self.provider.call('create_multipart_upload', Key=key, ContentType=content_type, Metadata={'sha256': item['sha256']})['UploadId']
                     self.save(job)
                 completed, marker = {}, 0
                 try:
@@ -149,7 +174,7 @@ class R2Uploads:
                 return {'ok': True}
             if not all(part['uploaded'] for part in plan['parts']):
                 raise HTTPException(409, '上传分片尚未齐全。')
-            item = job['manifest']['files'][index]
+            item = self.items(job)[index]
             key = job['manifest']['prefix'] + '/' + item['key']
             upload_id = self.load(ident, user)['files'][index]['upload_id']
             parts, marker = [], 0
@@ -176,6 +201,11 @@ class R2Uploads:
                 info = self.service.probe(destination)
                 if info['codec'] != 'h264' or abs(info['duration_ms'] - item['duration_ms']) > 250:
                     raise HTTPException(422, '仅允许上传经本机压缩且时长校验通过的 H.264 视频。')
+            for item in manifest.get('attachments', []):
+                destination = self.service.local / 'upload-validation' / item['sha256'] / Path(item['key']).name
+                self.provider.download(prefix + '/' + item['key'], destination, item['sha256'], item['size'])
+                if item['name'].startswith('prediction/'):
+                    validate_prediction(destination)
             # Manifest is the publication point. Files from an interrupted or
             # revoked upload are never listed as a usable collection.
             self.provider.put_if_absent(prefix + '/manifest.json', document_bytes(manifest))
