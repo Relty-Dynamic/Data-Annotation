@@ -1,0 +1,12 @@
+**
+!backend/
+!backend/**
+!deploy/
+!deploy/*.py
+!deploy/*.sh
+!requirements.lock.txt
+!launch.py
+**/__pycache__/
+**/*.pyc
+**/.env
+**/.env.*
