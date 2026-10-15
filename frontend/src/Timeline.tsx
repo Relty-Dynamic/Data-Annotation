@@ -6,6 +6,7 @@ import { sessionAssetUrl } from './sessionAssets';
 import { DEFAULT_WINDOW_MS, timelineWheelAction, timelineWindow, visibleTimelineTicks } from './timelineViewport';
 import { recordingScale, zoomRecordingScale, snapDisplayedTime } from './timelineScale';
 import { parseRecordingOrigin, recordingDateTime } from './recordingTime';
+import { durationReferenceLabels } from './durationReference';
 import './timeline.css';
 
 export interface TimelineProps {
@@ -125,6 +126,21 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
   const scale = useMemo(() => recordingScale(duration, gaps, windowMs, visibleAxisWidth), [duration, gaps, windowMs, visibleAxisWidth]);
   const visibleDuration = timelineWindow(scale.duration, windowMs);
   const axisWidth = visibleAxisWidth * scale.duration / visibleDuration;
+  // Recorded spans use this slope; compressed gaps must not shorten the reference.
+  const minuteWidth = 60_000 * axisWidth / scale.duration;
+  const minuteReferenceRef = useRef<HTMLDivElement>(null);
+  const [referenceWidth, setReferenceWidth] = useState(0);
+  useLayoutEffect(() => {
+    const element = minuteReferenceRef.current;
+    if (!element) return;
+    const measure = () => setReferenceWidth(element.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const referenceClipped = minuteWidth > referenceWidth;
+  const referenceLabels = durationReferenceLabels(minuteWidth, referenceWidth - (referenceClipped ? 56 : 0));
   const progress = scale.toDisplay(displayedTime) / scale.duration;
   const pixelAt = (time: number) => scale.toDisplay(time) / scale.duration * axisWidth;
   const position = (start: number, end: number) => positionStyle(scale.toDisplay(start), scale.toDisplay(end), scale.duration);
@@ -574,6 +590,16 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
       <header className="tl-toolbar">
         <div className="tl-heading"><h2>时间轴</h2></div>
         {anchorControls}
+        <div ref={minuteReferenceRef} className="tl-minute-reference" role="img"
+          aria-label={`时长参考：从右向左累计，完整条带为1分钟，每格1秒，每5秒一条分隔线，30秒加粗并区分底色${referenceClipped ? '，空间不足，左侧部分未显示' : ''}`}
+          title="从右向左累计：每格1秒，每5秒一条分隔线，30秒加粗，完整条带60秒。与下方有视频区间的比例一致；空间不足时只裁切左侧，不压缩比例。跨无视频断档的区间不适用。">
+          {(referenceClipped || referenceWidth > minuteWidth + 90) && <span className="tl-minute-caption">{referenceClipped ? '部分显示' : '每格 1 秒'}</span>}
+          {referenceLabels.map(({seconds, right}) => <span key={seconds} className={`tl-duration-label${seconds % 30 === 0 ? ' tl-duration-label-major' : ''}`} style={{right}} aria-hidden="true">{seconds}s</span>)}
+          <div className="tl-minute-strip" style={{ width: minuteWidth }} aria-hidden="true">
+            {Array.from({ length: 60 }, (_, second) => <span key={second} />)}
+            {Array.from({ length: 13 }, (_, index) => <i key={index} className={index % 6 === 0 ? 'tl-reference-mark tl-reference-mark-major' : 'tl-reference-mark'} style={{right: `${index / 12 * 100}%`}} />)}
+          </div>
+        </div>
       </header>
       <div className="tl-body" onMouseMove={showHoverTime} onMouseLeave={() => { setHoverTime(null); setHoveringBoundary(false); }} onPointerDownCapture={(event) => {
         // Capture runs before scrub/segment handlers; toolbar buttons live outside this surface.
