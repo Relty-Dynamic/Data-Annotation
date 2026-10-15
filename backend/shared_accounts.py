@@ -24,6 +24,12 @@ class SessionBody(BaseModel):
     token: str | None = Field(default=None, max_length=200)
 
 
+class PasswordBody(SessionBody):
+    csrf: str = Field(default='', max_length=200)
+    current_password: str = Field(strict=True, max_length=1024)
+    password: str = Field(strict=True, min_length=8, max_length=1024)
+
+
 class AdminAccountBody(SessionBody):
     csrf: str = Field(default='', max_length=200)
     action: str = Field(max_length=30)
@@ -82,8 +88,62 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(403, '只有超级管理员可管理账号。')
         if not body.csrf or not hmac.compare_digest(hashlib.sha256(body.csrf.encode()).hexdigest(), csrf_hash):
             raise HTTPException(403, '页面安全令牌已失效，请刷新页面。')
+        if body.action == 'editor-create':
+            fields = body.body
+            if any(not isinstance(fields.get(key), str) for key in ('username', 'display_name', 'password')):
+                raise HTTPException(422, '请填写账号、姓名和初始密码。')
+            if fields.get('email') is not None and not isinstance(fields['email'], str):
+                raise HTTPException(422, '邮箱无效。')
+            return {'result': auth.create_user(fields['username'], fields['display_name'], fields['password'], email=fields.get('email'))}
         from .tasks.accounts import administer
         return {'result': administer(auth, user, body.action, body.body)}
+
+    @app.post('/v1/password')
+    def password(body: PasswordBody):
+        saved = auth.session(body.token)
+        if not saved:
+            raise HTTPException(401, '请先登录。')
+        user, csrf_hash = saved
+        if not body.csrf or not hmac.compare_digest(hashlib.sha256(body.csrf.encode()).hexdigest(), csrf_hash):
+            raise HTTPException(403, '页面安全令牌已失效，请刷新页面。')
+        auth.change_password(user['id'], body.current_password, body.password)
+        return {'ok': True}
+
+    @app.post('/v1/library-edit')
+    def library_edit(body: dict):
+        saved = auth.session(body.get('token'))
+        if not saved:
+            raise HTTPException(401, '请先登录。')
+        user, csrf_hash = saved
+        csrf = body.get('csrf')
+        if not isinstance(csrf, str) or not hmac.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), csrf_hash):
+            raise HTTPException(403, '页面安全令牌已失效，请刷新页面。')
+        from .track_library import TrackLibrary
+        library = TrackLibrary(auth)
+        data = body.get('body', {})
+        if not isinstance(data, dict):
+            raise HTTPException(422, '时间轴定义无效。')
+        default = body.get('default', False) if body.get('method') == 'DELETE' else data.get('is_default', False)
+        if type(default) is not bool:
+            raise HTTPException(422, '时间轴类型无效。')
+        if (default or body.get('toggle_default')) and user['role'] != 'admin':
+            raise HTTPException(403, '默认时间轴只能由管理员维护。')
+        track_id = body.get('track_id') or data.get('id')
+        if body.get('toggle_default'):
+            result = library.set_default(user['id'], track_id, default)
+        elif body.get('method') == 'DELETE':
+            if data.get('confirmed') is not True:
+                raise HTTPException(422, '请确认删除时间轴。')
+            library.delete(user['id'], track_id, default=default)
+            result = {'ok': True}
+        elif body.get('method') in ('POST', 'PUT'):
+            if data.get('id') != track_id:
+                raise HTTPException(422, '时间轴 JSON 名不能修改。')
+            result = library.save(user['id'], track_id, data.get('name'), data.get('mode', 'state'),
+                                  data.get('labels'), default=default, create=body['method'] == 'POST')
+        else:
+            raise HTTPException(422, '时间轴操作无效。')
+        return {'result': result}
 
     @app.post('/v1/axis-library')
     def axis_library(body: SessionBody):
@@ -94,7 +154,7 @@ def create_app(root: Path | None = None) -> FastAPI:
         from .service import DEFAULT_TRACK_LABELS, AXIS_NAMES
         with auth.connection() as con:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='track_library'").fetchone():
-                return {'axes': [{'id': key, 'name': AXIS_NAMES[key], 'mode':'state', 'labels': labels}
+                return {'axes': [{'id': key, 'name': AXIS_NAMES[key], 'mode':'state', 'labels': labels, 'is_default': True}
                                  for key, labels in DEFAULT_TRACK_LABELS.items() if key in ('scene','posture','category')]}
             rows = con.execute("SELECT * FROM track_library WHERE scope IN (?,?) ORDER BY CASE scope WHEN '*' THEN 0 ELSE 1 END,rowid", ('*', saved[0]['id'])).fetchall()
             return {'axes': [TrackLibrary.track(row) for row in rows]}

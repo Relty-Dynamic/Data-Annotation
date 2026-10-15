@@ -1,0 +1,25 @@
+# Public R2 storage only; never apply this overlay to the NAS deployment.
+services:
+  api:
+    environment:
+      DATAMARK_R2_CONFIG: /run/secrets/r2.json
+      DATAMARK_R2_STATE: /r2-state
+      FFMPEG_PATH: /usr/bin/ffmpeg
+      FFPROBE_PATH: /usr/bin/ffprobe
+    volumes:
+      - type: bind
+        source: ${DATAMARK_R2_CONFIG_FILE:?Protected R2 credential file is required}
+        target: /run/secrets/r2.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_R2_STATE_DIR:?Private public-project state is required}
+        target: /r2-state
+        bind:
+          create_host_path: false
+    networks: [private, storage-egress]
+    healthcheck:
+      test: ["CMD", "/opt/venv/bin/python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=10)); assert d['storage_backend']=='s3' and d['ready'] is True and d['accounts_ready'] is True"]
+networks:
+  storage-egress:
