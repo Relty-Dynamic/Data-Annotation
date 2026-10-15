@@ -140,7 +140,7 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
     return () => observer.disconnect();
   }, []);
   const referenceClipped = minuteWidth > referenceWidth;
-  const referenceLabels = durationReferenceLabels(minuteWidth, referenceWidth - (referenceClipped ? 56 : 0));
+  const referenceLabels = durationReferenceLabels(minuteWidth, referenceWidth);
   const progress = scale.toDisplay(displayedTime) / scale.duration;
   const pixelAt = (time: number) => scale.toDisplay(time) / scale.duration * axisWidth;
   const position = (start: number, end: number) => positionStyle(scale.toDisplay(start), scale.toDisplay(end), scale.duration);
@@ -593,7 +593,6 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
         <div ref={minuteReferenceRef} className="tl-minute-reference" role="img"
           aria-label={`时长参考：从右向左累计，完整条带为1分钟，每格1秒，每5秒一条分隔线，30秒加粗并区分底色${referenceClipped ? '，空间不足，左侧部分未显示' : ''}`}
           title="从右向左累计：每格1秒，每5秒一条分隔线，30秒加粗，完整条带60秒。与下方有视频区间的比例一致；空间不足时只裁切左侧，不压缩比例。跨无视频断档的区间不适用。">
-          {(referenceClipped || referenceWidth > minuteWidth + 90) && <span className="tl-minute-caption">{referenceClipped ? '部分显示' : '每格 1 秒'}</span>}
           {referenceLabels.map(({seconds, right}) => <span key={seconds} className={`tl-duration-label${seconds % 30 === 0 ? ' tl-duration-label-major' : ''}`} style={{right}} aria-hidden="true">{seconds}s</span>)}
           <div className="tl-minute-strip" style={{ width: minuteWidth }} aria-hidden="true">
             {Array.from({ length: 60 }, (_, second) => <span key={second} />)}

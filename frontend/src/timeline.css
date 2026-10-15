@@ -3,7 +3,6 @@
 .tl-toolbar::-webkit-scrollbar { display: none; }
 .tl-toolbar > * { flex-shrink: 0; }
 .tl-toolbar > .tl-minute-reference { flex: 1 1 0; min-width: 0; height: 27px; margin-left: 8px; position: relative; overflow: hidden; }
-.tl-minute-caption { position: absolute; left: 0; top: 0; font-size: 9px; line-height: 11px; color: #a7c8c8; }
 .tl-duration-label { position: absolute; top: 0; width: 26px; text-align: center; font: 9px/11px Consolas, monospace; color: #aac8cc; }
 .tl-duration-label-major { color: #f2d99a; font-weight: 700; }
 .tl-minute-strip { position: absolute; right: 0; bottom: 1px; height: 8px; display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); border-block: 1px solid #7db5b0; }
