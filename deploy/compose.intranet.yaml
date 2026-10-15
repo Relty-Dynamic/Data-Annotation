@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     init: true
     read_only: true
-    cpus: 4.0
+    cpus: ${DATAMARK_WEB_CPUS:-4.0}
     mem_limit: 6g
     pids_limit: 256
     security_opt:
