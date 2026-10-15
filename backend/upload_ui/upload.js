@@ -1,10 +1,11 @@
 'use strict';
+import {readUploadResponse} from './response.mjs';
 const $=id=>document.getElementById(id);
 const token=document.querySelector('meta[name="upload-token"]').content;
 let selected=null,working=false,serverBusy=false;
 async function request(path,body){
  const response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{'X-Upload-Token':token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body)});
- const result=await response.json();if(!response.ok)throw new Error(result.detail||'操作未成功。');return result;
+ return readUploadResponse(response);
 }
 async function encryptLogin(username,password,challenge){
  if(!globalThis.crypto?.subtle)throw new Error('浏览器无法安全加密登录，请使用本机 localhost 窗口。');

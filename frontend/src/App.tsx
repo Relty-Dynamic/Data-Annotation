@@ -534,6 +534,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(!importOpen||pendingClaim)return;
   const dialog=importDialogRef.current;dialog?.focus();
   const key=(event:KeyboardEvent)=>{
+   if(document.querySelector('[data-s3-upload-dialog]'))return;
    if(event.key==='Escape'){event.preventDefault();if(!busyRef.current&&!mockUploading)setImportOpen(false);return;}
    if(event.key!=='Tab'||!dialog)return;
    const controls=Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]'));
@@ -776,6 +777,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  }
  useEffect(()=>{
   const key=(e:KeyboardEvent)=>{
+   if(document.querySelector('[data-s3-upload-dialog]'))return;
    if(!projectRef.current||!sessionEntered||busy||importOpen||prepareOpen||deleteProject||deleting||libraryOpen||selectionOpen||adminOpen||passwordOpen||auditOpen||renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||settingsOpen||cacheLocationOpen||e.isComposing||e.keyCode===229)return;
    const target=e.target instanceof Element?e.target:null;
    if(target?.closest('[data-workspace-menu]'))return;
@@ -805,6 +807,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    }
   };
   const wheel=(e:WheelEvent)=>{
+   if(document.querySelector('[data-s3-upload-dialog]'))return;
    if(e.target instanceof Element&&e.target.closest('[data-workspace-menu]'))return;
    const delta=wheelSeekDelta(e,seekSettings);if(delta===null)return;
    // Capture before timeline zoom, horizontal browsing or native Shift scrolling.

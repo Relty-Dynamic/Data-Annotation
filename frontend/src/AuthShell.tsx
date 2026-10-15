@@ -5,6 +5,8 @@ import App from './App';
 import {encryptLogin,type LoginChallenge} from './loginEncryption';
 import {authFetch, setCsrfToken, type Account} from './auth';
 import {useBrowserLifetime} from './useBrowserLifetime';
+import {S3HelperHandoff} from './S3UploadEntry';
+import type {ReactNode} from 'react';
 
 export default function AuthShell() {
   useBrowserLifetime();
@@ -16,10 +18,12 @@ export default function AuthShell() {
   const [busy, setBusy] = useState(false);
   const [setupDetail, setSetupDetail] = useState('');
   const [tasksAvailable,setTasksAvailable]=useState(false),[tasksOpen,setTasksOpen]=useState(false),[accountsOpen,setAccountsOpen]=useState(false);
+  const [s3Enabled,setS3Enabled]=useState(false);
   useEffect(() => {
     authFetch('/api/health', {cache:'no-store'}).then(async response => {
       if (!response.ok) throw new Error('无法连接标注平台。');
       const health = await response.json();
+      setS3Enabled(health.storage_backend==='s3');
       setTasksAvailable(health.capabilities?.includes('task-management')??false);
       if (health.mode === 'public-setup' && health.storage_ready === false) {
         setSetupDetail(health.detail || 'S3 尚未配置，暂不能上传或标注。');
@@ -52,6 +56,7 @@ export default function AuthShell() {
     setCsrfToken('');
     setUser(null);
   }
+  const content=():ReactNode=>{
   if (checking) return <main className="auth-page"><section className="auth-card">正在检查登录状态…</section></main>;
   if (user && accountsOpen && tasksAvailable && user.role==='admin') return <TaskAccounts onClose={()=>setAccountsOpen(false)}/>;
   if (user && tasksOpen && tasksAvailable) return <TaskPanel user={user} onClose={()=>setTasksOpen(false)} onOpenTask={id=>window.location.assign('?task='+id)}/>;
@@ -69,4 +74,6 @@ export default function AuthShell() {
     {error&&<p role="alert" className="import-error">{error}</p>}
     <button className="primary wide" disabled={busy}>{busy?'正在登录…':'登录'}</button>
   </form></main>;
+  };
+  return <><S3HelperHandoff canUpload={!!user?.can_upload&&s3Enabled}/>{content()}</>;
 }

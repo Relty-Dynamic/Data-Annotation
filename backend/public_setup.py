@@ -99,7 +99,7 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
                     'ready': ready and storage_ready, 'storage_ready': storage_ready, 'accounts_ready': ready, 'browser_lifetime': False,
                     'capabilities': ['source-local-cache', 'compact-local-playback', 'four-axis-annotations',
                         'subaxis-annotations', 'project-naming', 'account-login', 'shared-accounts', 'account-track-library',
-                        'desktop-playback-cache', 's3-catalog', 's3-folder-upload'] + (['task-management'] if task_workspaces else [])}
+                        'desktop-playback-cache', 's3-catalog', 's3-folder-upload', 's3-helper-bridge'] + (['task-management'] if task_workspaces else [])}
         return {"status": "ok", "application": "datamark", "mode": "public-setup",
                 "ready": False, "storage_backend": "unconfigured", "storage_ready": False,
                 "accounts_ready": ready, "browser_lifetime": False,

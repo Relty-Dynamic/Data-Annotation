@@ -98,6 +98,10 @@ def create_app(*, api='https://api-annotate.reltydynamic.com:8443', root=None, p
     def stylesheet():
         return FileResponse(assets / 'upload.css', media_type='text/css')
 
+    @app.get('/response.mjs')
+    def response_reader():
+        return FileResponse(assets / 'response.mjs', media_type='application/javascript')
+
     def idle(state):
         if state.get('busy'):
             raise HTTPException(409, '正在压缩或上传，请等待本次任务完成。')
@@ -124,8 +128,9 @@ def create_app(*, api='https://api-annotate.reltydynamic.com:8443', root=None, p
         state = request.state.upload
         with lock:
             idle(state)
-            client = (client_factory() if client_factory else httpx.Client(base_url=api, timeout=30, trust_env=True))
+            client = None
             try:
+                client = (client_factory() if client_factory else httpx.Client(base_url=api, timeout=30, trust_env=True))
                 health = client.get('/api/health').json()
                 if health.get('mode') != 's3' or health.get('ready') is not True:
                     raise HTTPException(503, '公网 S3 服务尚未就绪。')
@@ -141,9 +146,12 @@ def create_app(*, api='https://api-annotate.reltydynamic.com:8443', root=None, p
                     raise HTTPException(403, '管理员尚未开放此账号的上传权限。')
                 client.headers.update({'Origin': api, 'X-CSRF-Token': value['csrf']})
             except Exception as error:
-                client.close()
+                if client is not None:
+                    client.close()
                 if isinstance(error, HTTPException):
                     raise
+                if isinstance(error, ImportError):
+                    raise HTTPException(503, '上传助手缺少网络依赖，请在项目虚拟环境安装 requirements.lock.txt 后重启助手。') from None
                 raise HTTPException(503, '无法连接公网服务，请检查网络。') from None
             if state.get('client'):
                 state['client'].close()
