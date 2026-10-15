@@ -14,11 +14,14 @@ from .mock_s3 import MockUploadManager
 from .native_picker import choose_local_paths
 from .public_setup import public_origin
 from .service import ProjectService
+from .r2_folder import FolderUploadManager, attachment_manifest
 
 
 class RemoteCaptureTarget:
-    def __init__(self, client, service):
+    def __init__(self, client, service, *, attachments=(), progress=None):
         self.client, self.service = client, service
+        self.attachments = attachments
+        self.progress = progress or (lambda value: None)
 
     def request(self, method, path, **kwargs):
         response = self.client.request(method, path, **kwargs)
@@ -27,7 +30,7 @@ class RemoteCaptureTarget:
                 message = response.json().get('detail', '上传未完成。')
             except ValueError:
                 message = '上传接口暂时不可用。'
-            raise RuntimeError(message)
+            raise HTTPException(response.status_code, message if isinstance(message, str) else '上传接口暂时不可用。')
         return response.json()
 
     def capture_exists(self, prefix):
@@ -39,9 +42,14 @@ class RemoteCaptureTarget:
             item['duration_ms'] = service.probe(prepared / item['key'])['duration_ms']
         # Stable request metadata permits restart/resume without storing tokens.
         manifest.pop('created_at', None)
+        if self.attachments:
+            manifest['attachments'] = attachment_manifest(self.attachments)
+        items = manifest['files'] + manifest.get('attachments', [])
         job = self.request('POST', '/api/r2/uploads', json=manifest)
-        for index, item in enumerate(manifest['files']):
-            source = prepared / item['key']
+        for index, item in enumerate(items):
+            record = self.attachments[index - len(manifest['files'])] if index >= len(manifest['files']) else None
+            source = MockUploadManager._check_local_source(record) if record else prepared / item['key']
+            self.progress(f"正在上传 {index + 1}/{len(items)}：{item['key']}")
             for attempt in range(3):
                 plan = self.request('GET', f"/api/r2/uploads/{job['id']}/files/{index}")
                 if plan['complete']:
@@ -62,6 +70,8 @@ class RemoteCaptureTarget:
                     if attempt == 2:
                         raise RuntimeError('分片上传中断，可重新运行上传工具续传。') from None
                     time.sleep(1)
+            if record:
+                MockUploadManager._check_local_source(record)
         self.request('POST', f"/api/r2/uploads/{job['id']}/finish")
 
 
@@ -82,10 +92,9 @@ def main():
     tools = SimpleNamespace(root=root)
     service.tool = lambda name: ProjectService.tool(tools, name)
     try:
-        paths = ([str(path) for path in args.video_dir.iterdir() if path.is_file() and path.suffix.lower() == '.avi'] if args.video_dir
-                 else choose_local_paths(root, 'capture_avi'))
-        if not paths:
-            raise RuntimeError('没有选择 AVI 视频。')
+        folders = [str(args.video_dir)] if args.video_dir else choose_local_paths(root, 'directory')
+        if not folders:
+            raise RuntimeError('没有选择采集文件夹。')
         username = args.username or input('内网/公网通用账号：').strip()
         password = getpass.getpass('密码（不回显、不保存）：')
         collector = args.collector or input('采集人姓名：').strip()
@@ -100,8 +109,9 @@ def main():
             if not user.get('can_upload'):
                 raise RuntimeError('此账号尚未获得上传权限。')
             target = RemoteCaptureTarget(client, service)
-            manager = MockUploadManager(target, local / 'staging')
-            selection = manager.select_local(user['id'], paths)
+            manager = FolderUploadManager(target, local / 'staging')
+            selection = manager.select_folder(user['id'], folders[0])
+            target.attachments = selection['attachments']
             job = manager.start(user, collector, None, None, selection['selection_id'])
             def permitted(ident):
                 return target.request('GET', '/api/auth/me').get('can_upload') is True
