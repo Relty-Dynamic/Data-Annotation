@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import hmac
 from pathlib import Path
 
 import httpx
@@ -13,13 +15,19 @@ from .auth import AuthStore
 
 
 class LoginBody(BaseModel):
-    username: str = Field(strict=True, max_length=120)
+    username: str = Field(strict=True, max_length=254)
     password: str = Field(strict=True, max_length=1024)
     client: str = Field(strict=True, max_length=200)
 
 
 class SessionBody(BaseModel):
     token: str | None = Field(default=None, max_length=200)
+
+
+class AdminAccountBody(SessionBody):
+    csrf: str = Field(default='', max_length=200)
+    action: str = Field(max_length=30)
+    body: dict = Field(default_factory=dict)
 
 
 def create_app(root: Path | None = None) -> FastAPI:
@@ -55,6 +63,42 @@ def create_app(root: Path | None = None) -> FastAPI:
         auth.logout(body.token)
         return {"ok": True}
 
+    @app.post('/v1/users')
+    def directory(body: SessionBody):
+        if not auth.session(body.token):
+            raise HTTPException(401, '请先登录。')
+        # Fixed private bridge. The task host additionally checks manager roles;
+        # no passwords, email addresses or session records leave this endpoint.
+        return {'users': [{key: item.get(key) for key in ('id','display_name','role','active','can_upload')}
+                          for item in auth.list_users(include_deleted=True)]}
+
+    @app.post('/v1/admin/accounts')
+    def admin_accounts(body: AdminAccountBody):
+        saved = auth.session(body.token)
+        if not saved:
+            raise HTTPException(401, '请先登录。')
+        user, csrf_hash = saved
+        if user['role'] != 'admin':
+            raise HTTPException(403, '只有超级管理员可管理账号。')
+        if not body.csrf or not hmac.compare_digest(hashlib.sha256(body.csrf.encode()).hexdigest(), csrf_hash):
+            raise HTTPException(403, '页面安全令牌已失效，请刷新页面。')
+        from .tasks.accounts import administer
+        return {'result': administer(auth, user, body.action, body.body)}
+
+    @app.post('/v1/axis-library')
+    def axis_library(body: SessionBody):
+        saved = auth.session(body.token)
+        if not saved:
+            raise HTTPException(401, '请先登录。')
+        from .track_library import TrackLibrary
+        from .service import DEFAULT_TRACK_LABELS, AXIS_NAMES
+        with auth.connection() as con:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='track_library'").fetchone():
+                return {'axes': [{'id': key, 'name': AXIS_NAMES[key], 'mode':'state', 'labels': labels}
+                                 for key, labels in DEFAULT_TRACK_LABELS.items() if key in ('scene','posture','category')]}
+            rows = con.execute("SELECT * FROM track_library WHERE scope IN (?,?) ORDER BY CASE scope WHEN '*' THEN 0 ELSE 1 END,rowid", ('*', saved[0]['id'])).fetchall()
+            return {'axes': [TrackLibrary.track(row) for row in rows]}
+
     return app
 
 
@@ -71,9 +115,9 @@ class AccountClient:
             raise HTTPException(503, "共享账号服务暂时不可用，请稍后重试。") from error
         if response.status_code != 200:
             detail = "共享账号服务暂时不可用，请稍后重试。"
-            if response.status_code in {401, 403, 429}:
+            if response.status_code in {401, 403, 409, 422, 429}:
                 detail = response.json().get("detail", detail)
-            raise HTTPException(response.status_code if response.status_code in {401, 403, 429} else 503, detail)
+            raise HTTPException(response.status_code if response.status_code in {401, 403, 409, 422, 429} else 503, detail)
         return response.json()
 
     def close(self):

@@ -14,6 +14,24 @@ from backend.shared_accounts import AccountClient, create_app as account_app
 
 
 class SharedAccountTests(unittest.TestCase):
+    def test_private_account_admin_requires_admin_session_and_csrf(self):
+        with TestClient(account_app(self.root), base_url='http://accounts:8766') as bridge:
+            worker = bridge.post('/v1/login', json={'username': 'worker',
+                'password': 'another long safe password', 'client': 'fixture-worker'}).json()
+            response = bridge.post('/v1/admin/accounts', json={'token': worker['token'],
+                'csrf': worker['csrf'], 'action': 'list'})
+            self.assertEqual(403, response.status_code)
+            admin = bridge.post('/v1/login', json={'username': 'admin',
+                'password': 'correct horse battery staple', 'client': 'fixture-admin'}).json()
+            request = {'token': admin['token'], 'action': 'list'}
+            self.assertEqual(403, bridge.post('/v1/admin/accounts', json=request).status_code)
+            response = bridge.post('/v1/admin/accounts', json={**request, 'csrf': admin['csrf']})
+            self.assertEqual(200, response.status_code)
+            self.assertTrue(response.json()['result'])
+            self.assertNotIn('password_hash', response.json()['result'][0])
+            bridge.post('/v1/logout', json={'token': admin['token']})
+            self.assertEqual(401, bridge.post('/v1/admin/accounts', json={**request, 'csrf': admin['csrf']}).status_code)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='shared-accounts-')
         self.addCleanup(self.temp.cleanup)

@@ -80,6 +80,10 @@ class AuthStore:
                     user_id TEXT NOT NULL REFERENCES users(id), track_id TEXT NOT NULL,
                     PRIMARY KEY(user_id, track_id)
                 );
+                CREATE TABLE IF NOT EXISTS deleted_accounts (
+                    user_id TEXT PRIMARY KEY REFERENCES users(id),
+                    deleted_at INTEGER NOT NULL, deleted_by TEXT NOT NULL REFERENCES users(id)
+                );
             """)
             if "can_upload" not in {row[1] for row in con.execute("PRAGMA table_info(users)")}:
                 con.execute("ALTER TABLE users ADD COLUMN can_upload INTEGER NOT NULL DEFAULT 0")
@@ -109,10 +113,11 @@ class AuthStore:
             return con.execute("SELECT 1 FROM users WHERE role='admin' AND active=1 LIMIT 1").fetchone() is not None
 
     def create_user(self, username: str, display_name: str, password: str, role: str = "annotator",
-                    email: str | None = None) -> dict:
+                    email: str | None = None, *, email_login: bool = False) -> dict:
         username, display_name = username.strip(), display_name.strip()
         email = email.strip().lower() if email else None
-        if (not USERNAME.fullmatch(username) or not 1 <= len(display_name) <= 80 or role not in {"admin", "annotator"}
+        valid_username = (username == email and len(username) <= 254 and EMAIL.fullmatch(username)) if email_login else USERNAME.fullmatch(username)
+        if (not valid_username or not 1 <= len(display_name) <= 80 or role not in {"admin", "annotator"}
                 or (email is not None and (len(email) > 254 or not EMAIL.fullmatch(email)))):
             raise HTTPException(422, "账号、姓名或角色格式不正确。")
         try:
@@ -122,6 +127,8 @@ class AuthStore:
         ident = uuid.uuid4().hex
         with self.connection() as con:
             try:
+                if email_login and con.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE OR email=? COLLATE NOCASE", (email, email)).fetchone():
+                    raise HTTPException(409, "账号或邮箱已存在。")
                 con.execute("INSERT INTO users (id,username,display_name,email,role,password_hash,active,can_upload) VALUES (?,?,?,?,?,?,1,0)",
                             (ident, username, display_name, email, role, encoded))
             except sqlite3.IntegrityError as error:
@@ -129,13 +136,41 @@ class AuthStore:
         return {"id": ident, "username": username, "display_name": display_name, "email": email, "role": role,
                 "active": True, "can_upload": role == "admin"}
 
-    def list_users(self) -> list[dict]:
+    def list_users(self, *, include_deleted: bool = False) -> list[dict]:
         with self.connection() as con:
-            rows = con.execute("SELECT id,username,display_name,email,role,active,can_upload FROM users ORDER BY username").fetchall()
+            query = "SELECT id,username,display_name,email,role,active,can_upload FROM users"
+            if not include_deleted:
+                query += " WHERE id NOT IN (SELECT user_id FROM deleted_accounts)"
+            rows = con.execute(query + " ORDER BY username").fetchall()
         return [{**dict(row), "can_upload": bool(row["can_upload"]) or row["role"] == "admin"} for row in rows]
+
+    def delete_user(self, user_id: str, actor_id: str) -> None:
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            actor = con.execute("SELECT role,active FROM users WHERE id=?", (actor_id,)).fetchone()
+            if not actor or actor['role'] != 'admin' or not actor['active']:
+                raise HTTPException(403, "只有超级管理员可删除账号。")
+            row = con.execute("SELECT role,active FROM users WHERE id=?", (user_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "账号不存在。")
+            if user_id == actor_id:
+                raise HTTPException(409, "不能删除当前登录账号。")
+            if con.execute("SELECT 1 FROM deleted_accounts WHERE user_id=?", (user_id,)).fetchone():
+                return
+            if row['role'] == 'admin' and row['active'] and con.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1").fetchone()[0] <= 1:
+                raise HTTPException(409, "不能删除最后一个管理员。")
+            con.execute("INSERT INTO deleted_accounts VALUES (?,?,?)", (user_id, int(time.time()), actor_id))
+            con.execute("UPDATE users SET active=0,can_upload=0 WHERE id=?", (user_id,))
+            con.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            con.execute("DELETE FROM editing_sessions WHERE user_id=?", (user_id,))
+
+    def _require_not_deleted(self, con, user_id):
+        if con.execute("SELECT 1 FROM deleted_accounts WHERE user_id=?", (user_id,)).fetchone():
+            raise HTTPException(409, "账号已删除，不能修改或重新启用。")
 
     def set_upload_permission(self, user_id: str, allowed: bool) -> None:
         with self.connection() as con:
+            self._require_not_deleted(con, user_id)
             row = con.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "账号不存在。")
@@ -198,6 +233,7 @@ class AuthStore:
 
     def set_active(self, user_id: str, active: bool) -> None:
         with self.connection() as con:
+            self._require_not_deleted(con, user_id)
             row = con.execute("SELECT role,active FROM users WHERE id=?", (user_id,)).fetchone()
             if not row:
                 raise HTTPException(404, "账号不存在。")
@@ -214,6 +250,7 @@ class AuthStore:
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
         with self.connection() as con:
+            self._require_not_deleted(con, user_id)
             if not con.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
                 raise HTTPException(404, "账号不存在。")
             con.execute("UPDATE users SET password_hash=? WHERE id=?", (encoded, user_id))

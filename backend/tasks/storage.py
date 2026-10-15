@@ -1,0 +1,115 @@
+"""Verified immutable result storage and existing-media adapters."""
+from __future__ import annotations
+import hashlib
+import os
+import re
+from pathlib import Path
+from fastapi import HTTPException
+
+
+def safe_key(key):
+    if not isinstance(key, str) or len(key) > 1024 or not re.fullmatch(r'[A-Za-z0-9_.\-/]+', key) or any(p in ('', '.', '..') for p in key.split('/')):
+        raise HTTPException(422, '任务文件编号无效。')
+    return key
+
+
+class FileArtifacts:
+    def __init__(self, root):
+        self.root = Path(root).absolute()
+        if any(p.is_symlink() for p in (self.root, *self.root.parents)):
+            raise ValueError('Task storage must not contain symlinks')
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def path(self, key):
+        path = self.root / safe_key(key)
+        if any(p.is_symlink() for p in (path, *path.parents)) or not path.resolve().is_relative_to(self.root.resolve()):
+            raise HTTPException(409, '任务存储路径不安全。')
+        return path
+
+    def put(self, key, payload):
+        path = self.path(key)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            with path.open('xb') as stream:
+                os.chmod(path, 0o600)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            if self.get(key) != payload:
+                raise HTTPException(409, '已有任务版本不能覆盖。')
+        if self.get(key) != payload:
+            raise HTTPException(503, '任务文件读回校验失败。')
+        return hashlib.sha256(payload).hexdigest()
+
+    def get(self, key):
+        return self.path(key).read_bytes()
+
+
+class ObjectArtifacts:
+    """S3/provider contract. The provider must implement conditional create."""
+    def __init__(self, provider, prefix='tasks'):
+        self.provider, self.prefix = provider, safe_key(prefix)
+
+    def put(self, key, payload):
+        object_key = self.prefix + '/' + safe_key(key)
+        self.provider.put_if_absent(object_key, payload)
+        if self.get(key) != payload:
+            raise HTTPException(503, '任务对象读回校验失败。')
+        return hashlib.sha256(payload).hexdigest()
+
+    def get(self, key):
+        return self.provider.get(self.prefix + '/' + safe_key(key))
+
+
+class ProjectMedia:
+    """Read media through the current NAS/mock service; never expose paths."""
+    def __init__(self, service, backend, authorized):
+        self.service, self.backend, self.authorized = service, backend, authorized
+
+    def reference(self, actor, body):
+        if not isinstance(body, dict) or not isinstance(body.get('source'), dict):
+            raise HTTPException(422, '素材登记格式不正确。')
+        source = body.get('source', {})
+        if source.get('backend') != self.backend:
+            raise HTTPException(422, '素材来源与当前存储不一致。')
+        match = re.fullmatch(r'([0-9a-f]{32})/(v[0-9]{4})', str(source.get('key', '')))
+        if not match or not self.authorized(actor, match[1]):
+            raise HTTPException(403, '不能登记未获授权的项目视频。')
+        project = self.service.load(match[1])
+        video = next((v for v in project['videos'] if v['id'] == match[2]), None)
+        if not video or body.get('duration_ms') != video['duration_ms']:
+            raise HTTPException(422, '视频时长或编号与素材不一致。')
+        self.service.media_source(project, video['id'])
+        return body
+
+    def catalog(self, actor):
+        if not actor.get('can_upload'):
+            raise HTTPException(403, '管理员尚未开放上传权限。')
+        return [{'id': project['id'] + '/' + video['id'], 'name': video['name'],
+                 'collection': project['name'], 'duration_ms': video['duration_ms'],
+                 'source': {'backend': self.backend, 'key': project['id'] + '/' + video['id']}}
+                for project in self.service.projects() if self.authorized(actor, project['id'])
+                for video in project['videos']]
+
+    def resolve(self, source):
+        if source.get('backend') != self.backend:
+            raise HTTPException(422, '任务素材存储不匹配。')
+        match = re.fullmatch(r'([0-9a-f]{32})/(v[0-9]{4})', str(source.get('key', '')))
+        if not match:
+            raise HTTPException(422, '任务素材编号无效。')
+        project = self.service.load(match[1])
+        video = next((v for v in project['videos'] if v['id'] == match[2]), None)
+        if not video:
+            raise HTTPException(404, '任务视频不存在。')
+        path, metadata = self.service.media_source(project, video['id'])
+        return path, metadata, video
+
+
+class UnavailableMedia:
+    def catalog(self, actor):
+        raise HTTPException(503, '真实 S3 素材尚未接入，暂时没有可登记的视频。')
+    def reference(self, actor, body):
+        raise HTTPException(503, '真实 S3 素材尚未接入，不能登记或标注视频。')
+    def resolve(self, source):
+        raise HTTPException(503, '真实 S3 素材尚未接入，不能标注视频。')

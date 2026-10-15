@@ -1,0 +1,18 @@
+# Optional future NAS activation. Do not include in the current intranet deployment.
+services:
+  web:
+    environment:
+      DATAMARK_TASKS_ENABLED: "1"
+      DATAMARK_TASKS_STATE: /task-state
+      DATAMARK_TASKS_ARTIFACTS: /task-artifacts
+    volumes:
+      - type: bind
+        source: ${DATAMARK_TASK_STATE_DIR:?Existing intranet task state directory is required}
+        target: /task-state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_TASK_ARTIFACT_DIR:?Existing intranet task artifact directory is required}
+        target: /task-artifacts
+        bind:
+          create_host_path: false

@@ -19,7 +19,7 @@ STORAGE_MESSAGE = "已连接共享账号；S3 尚未配置，暂不能上传或�
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(strict=True, max_length=120)
+    username: str = Field(strict=True, max_length=254)
     password: str = Field(strict=True, max_length=1024)
 
 
@@ -42,6 +42,8 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
         raise ValueError("Public frontend and API must use separate hostnames")
     shared = os.getenv("DATAMARK_SHARED_ACCOUNTS", "0") == "1"
     accounts = accounts or (AccountClient() if shared else None)
+    from .tasks.routes import enabled as tasks_enabled, install as install_tasks
+    task_workspaces = None
     @asynccontextmanager
     async def lifespan(app):
         try:
@@ -49,11 +51,15 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
         finally:
             if accounts:
                 accounts.close()
+            if task_workspaces:
+                task_workspaces.close()
     app = FastAPI(title="DataMark public setup", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(api).hostname, "127.0.0.1", "localhost"])
 
     @app.middleware("http")
     async def headers(request: Request, call_next):
+        if request.url.path.startswith('/api/tasks/') and not tasks_enabled():
+            return JSONResponse(status_code=404, content={'detail': '任务管理未启用。'})
         if request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("origin") not in {frontend, api}:
             response = JSONResponse(status_code=403, content={"detail": "仅允许已配置的标注页面访问。"})
         else:
@@ -73,7 +79,7 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
         return {"status": "ok", "application": "datamark", "mode": "public-setup",
                 "ready": False, "storage_backend": "unconfigured", "storage_ready": False,
                 "accounts_ready": ready, "browser_lifetime": False,
-                "capabilities": ["public-api-setup", "browser-connection"] + (["account-login", "shared-accounts"] if ready else []),
+                "capabilities": ["public-api-setup", "browser-connection"] + (["account-login", "shared-accounts"] if ready else []) + (['task-management'] if task_workspaces else []),
                 "detail": STORAGE_MESSAGE if ready else MESSAGE}
 
     def account_service():
@@ -124,6 +130,16 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
                 await websocket.receive_text()
         except WebSocketDisconnect:
             pass
+
+    if tasks_enabled():
+        if not accounts:
+            raise ValueError('Tasks require shared accounts on the public host')
+        from .tasks.accounts import RemoteAccounts
+        task_workspaces = install_tasks(app, session, lambda request: account_service().request(
+            'POST', '/v1/users', json={'token': request.cookies.get('datamark_session')})['users'],
+            axis_library=lambda user, request: account_service().request(
+                'POST', '/v1/axis-library', json={'token': request.cookies.get('datamark_session')})['axes'],
+            accounts=RemoteAccounts(accounts))
 
     @app.api_route("/api/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
     def unavailable(path: str):

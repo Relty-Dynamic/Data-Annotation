@@ -1,3 +1,4 @@
+import {taskFromSearch,taskRequestUrl} from './tasks/transport.ts';
 import {apiUrl, separateApiOrigin} from './apiOrigin.ts';
 
 export type Account = {id:string; username:string; display_name:string; email:string|null; role:'admin'|'annotator'; can_upload:boolean};
@@ -16,6 +17,6 @@ export function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Pro
     const token = csrfToken || (!separateApiOrigin ? csrfCookie() : '');
     if (token) headers.set('X-CSRF-Token', token);
   }
-  return fetch(typeof input === 'string' ? apiUrl(input) : input,
+  return fetch(typeof input === 'string' ? apiUrl(taskRequestUrl(input,typeof window==='undefined'?null:taskFromSearch(window.location.search))) : input,
     {...init, headers, credentials: separateApiOrigin ? 'include' : 'same-origin'});
 }
