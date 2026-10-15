@@ -138,13 +138,6 @@
 .tl-scroll::-webkit-scrollbar-track { background: #111a24; border-top: 1px solid #334457; }
 .tl-scroll::-webkit-scrollbar-thumb { border: 3px solid #111a24; border-radius: 8px; background: #647d94; }
 .tl-scroll::-webkit-scrollbar-thumb:hover { background: #82a0b9; }
-
-
-.tl-browse-controls { display: flex; align-items: center; gap: 3px; flex-shrink: 0; margin-left: auto; }
-.tl-browse-controls button { height: 20px; min-width: 21px; padding: 0 4px; border: 1px solid #34475a; border-radius: 4px; background: #1d2b3c; color: #a6bfd1; font-size: 15px; line-height: 1; }
-.tl-browse-controls button:disabled { opacity: .35; cursor: default; }
-.tl-browse-controls .tl-return-cursor, .tl-browse-controls .tl-reset-zoom { padding: 0 6px; font-size: 9px; white-space: nowrap; }
-.tl-screen-duration { flex-shrink: 0; color: #7e9aaf; font-size: 9px; white-space: nowrap; }
 @media (max-width: 380px) { .tl-heading-icon { display: none; }   }
 
 
@@ -201,6 +194,4 @@
 .tl-segment { border-radius: 5px; box-shadow: inset 0 1px #ffffff1a; }
 .tl-segment-selected { outline-color: #e0f8f2; }
 .tl-empty-track { color: #9aacba; }
-.tl-browse-controls button { background: #263b48; border-color: #4b6573; color: #c6dce5; }
-.tl-browse-controls button:hover:not(:disabled) { background: #355361; border-color: #85bdb9; }
 .tl-hover-tooltip { background: #172832f5; border-color: #52707b; box-shadow: 0 10px 24px #04090db3; }

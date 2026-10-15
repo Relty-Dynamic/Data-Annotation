@@ -11,11 +11,11 @@ test('plain wheel scrolls vertically, Alt pans horizontally, Ctrl zooms', () => 
   assert.equal(timelineWheelAction(true, false), 'zoom');
 });
 
-test('initial scale is one hour or the entire short project; zoom has a five-minute floor', () => {
+test('initial scale is one hour or the entire short project; zoom has a one-minute floor', () => {
   assert.equal(timelineWindow(8 * HOUR), HOUR);
   assert.equal(timelineWindow(20 * 60_000), 20 * 60_000);
   assert.equal(timelineWindow(8 * HOUR, 1), MIN_WINDOW_MS);
-  assert.equal(timelineWindow(2 * 60_000, 1), 2 * 60_000);
+  assert.equal(timelineWindow(2 * 60_000, 1), 60_000);
   assert.equal(timelineWindow(8 * HOUR, 100 * HOUR), 8 * HOUR);
 });
 
@@ -26,7 +26,7 @@ test('zoom preserves the exact time beneath the mouse across consecutive changes
   let windowMs = HOUR;
   let scrollLeft = 3.25 * width;
   const original = (scrollLeft + pointer) / width * windowMs;
-  for (const target of [40 * 60_000, 25 * 60_000, 5 * 60_000, 90 * 60_000, HOUR]) {
+  for (const target of [40 * 60_000, 25 * 60_000, 5 * 60_000, 60_000, 90 * 60_000, HOUR]) {
     const result = scaleTimelineWindow(duration, windowMs, target, width, scrollLeft, pointer);
     near((result.scrollLeft + pointer) / result.axisWidth * duration, original);
     windowMs = result.windowMs;
@@ -48,17 +48,17 @@ test('zoom limits clamp scroll at the beginning and end without overshooting', (
 });
 
 test('short recordings and out-of-plot mouse positions remain bounded', () => {
-  const short = scaleTimelineWindow(90_000, HOUR, MIN_WINDOW_MS, 500, 999, -100);
-  assert.deepEqual(short, { windowMs: 90_000, scrollLeft: 0, axisWidth: 500 });
+  const short = scaleTimelineWindow(30_000, HOUR, MIN_WINDOW_MS, 500, 999, -100);
+  assert.deepEqual(short, { windowMs: 30_000, scrollLeft: 0, axisWidth: 500 });
   const left = scaleTimelineWindow(5 * HOUR, HOUR, HOUR / 2, 500, 500, -100);
   const right = scaleTimelineWindow(5 * HOUR, HOUR, HOUR / 2, 500, 500, 800);
   assert.equal(left.scrollLeft, 1000);
   assert.equal(right.scrollLeft, 1500);
 });
 
-test('a week-long recording only renders the ticks around its five-minute viewport', () => {
+test('a week-long recording only renders the ticks around its one-minute viewport', () => {
   const ticks = visibleTimelineTicks(100 * HOUR, 100 * HOUR + MIN_WINDOW_MS, 30_000, 168 * HOUR);
-  assert.equal(ticks.length, 13);
+  assert.equal(ticks.length, 5);
   assert.equal(ticks[0], 100 * HOUR - 30_000);
   assert.equal(ticks.at(-1), 100 * HOUR + MIN_WINDOW_MS + 30_000);
   assert.deepEqual(visibleTimelineTicks(0, 60_000, 30_000, 60_000), [0, 30_000, 60_000]);

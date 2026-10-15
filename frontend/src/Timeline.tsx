@@ -5,6 +5,7 @@ import HoverPreview from './HoverPreview';
 import { sessionAssetUrl } from './sessionAssets';
 import { DEFAULT_WINDOW_MS, timelineWheelAction, timelineWindow, visibleTimelineTicks } from './timelineViewport';
 import { recordingScale, zoomRecordingScale, snapDisplayedTime } from './timelineScale';
+import { parseRecordingOrigin, recordingDateTime } from './recordingTime';
 import './timeline.css';
 
 export interface TimelineProps {
@@ -27,17 +28,10 @@ export interface TimelineProps {
   onBoundaryDismiss?: () => void;
 }
 
-const HOUR_MS = DEFAULT_WINDOW_MS;
 const LANE_HEIGHT = 34;
 const NO_ANCHORS: number[] = [];
 const HOVER_WIDTH = 280;
 const HOVER_HEIGHT = 226;
-const recordingClock = new Intl.DateTimeFormat('en-GB', {
-  timeZone: 'Asia/Shanghai', numberingSystem: 'latn',
-  year: 'numeric', month: '2-digit', day: '2-digit',
-  hour: '2-digit', minute: '2-digit', second: '2-digit',
-  fractionalSecondDigits: 3, hourCycle: 'h23',
-});
 
 interface ScrubSession {
   pointerId: number;
@@ -65,18 +59,6 @@ interface HoverTime {
   height: number;
   noVideo: boolean;
   snapped: boolean;
-}
-
-function recordingDateTime(origin: number | null, offset: number): string | null {
-  if (origin === null) return null;
-  const parts = recordingClock.formatToParts(origin + offset);
-  const part = (name: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === name)?.value ?? '';
-  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}.${part('fractionalSecond')}`;
-}
-
-function rulerTime(ms: number): string {
-  const text = formatTime(ms).split('.')[0];
-  return ms >= 3_600_000 ? text : text.slice(3);
 }
 
 function tickInterval(duration: number, axisWidth: number): number {
@@ -114,13 +96,8 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
   callbacksRef.current = { onSeek, onScrubStart, onScrubEnd };
   const projectIdRef = useRef(project.id);
   projectIdRef.current = project.id;
-  const recordingOrigin = useMemo(() => {
-    if (!project.recording_start) return null;
-    const value = project.recording_start.trim().replace(' ', 'T');
-    const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}+08:00`;
-    const parsed = Date.parse(zoned);
-    return Number.isFinite(parsed) ? parsed : null;
-  }, [project.recording_start]);
+  const recordingOrigin = useMemo(() => parseRecordingOrigin(project.recording_start), [project.recording_start]);
+  const annotationTime = (ms: number) => recordingDateTime(recordingOrigin, ms)?.slice(11) ?? formatTime(ms);
   const scrollRef = useRef<HTMLDivElement>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
   const duration = Math.max(project.duration_ms, 1);
@@ -153,7 +130,6 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
   const position = (start: number, end: number) => positionStyle(scale.toDisplay(start), scale.toDisplay(end), scale.duration);
   const contentWidth = axisWidth + GUTTER;
   const scrollbarWidth = Math.max(0, viewportWidth - plotViewportWidth);
-  const maxScroll = Math.max(0, axisWidth - visibleAxisWidth);
   const visibleStart = scale.toTime(Math.max(0, scrollX / axisWidth * scale.duration));
   const visibleEnd = scale.toTime((scrollX + visibleAxisWidth) / axisWidth * scale.duration);
   const tickStep = tickInterval(scale.duration, axisWidth);
@@ -172,7 +148,7 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
     let previous = -Infinity;
     return new Set(ticks.filter(tick => {
       const x = scale.toDisplay(tick) / scale.duration * axisWidth - scrollX;
-      if (!(tick === 0 ? scrollX < 1 : x >= 30 && x <= visibleAxisWidth - 30) || x - previous < 70) return false;
+      if (!(tick === 0 ? scrollX < 1 : x >= 40 && x <= visibleAxisWidth - 40) || x - previous < 90) return false;
       previous = x;
       return true;
     }));
@@ -510,21 +486,6 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
     setHoverTime({ ...pointed, left, top, width, height, noVideo: !hoverVideoAt(pointed.time) });
   }
 
-  function centerOnCursor() {
-    const scroller = scrollRef.current;
-    if (!scroller) return;
-    setHoverTime(null);
-    scroller.scrollLeft = Math.max(0, progress * axisWidth - visibleAxisWidth / 2);
-    syncHorizontalScroll(scroller.scrollLeft);
-  }
-
-  function panHalfScreen(direction: -1 | 1) {
-    const scroller = scrollRef.current;
-    if (!scroller) return;
-    setHoverTime(null);
-    scroller.scrollLeft += direction * visibleAxisWidth / 2;
-    syncHorizontalScroll(scroller.scrollLeft);
-  }
   function renderGaps(variant: 'ruler' | 'video' | 'track') {
     return gaps.map((gap) => {
       const skipped = project.skipped_videos?.filter(video => video.start_ms < gap.end_ms && video.end_ms > gap.start_ms) ?? [];
@@ -532,7 +493,7 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
       key={`${gap.start_ms}-${gap.end_ms}`}
       className={`tl-gap tl-gap-${variant}`}
       style={position(gap.start_ms, gap.end_ms)}
-      title={`${skipped.length ? '已跳过：' + skipped.map(video => video.name).join('、') : '无视频'} · ${formatTime(gap.start_ms)} → ${formatTime(gap.end_ms)}`}
+      title={`${skipped.length ? '已跳过：' + skipped.map(video => video.name).join('、') : '无视频'} · ${annotationTime(gap.start_ms)} → ${annotationTime(gap.end_ms)}`}
       aria-hidden="true"
     ><span className="tl-gap-break">//</span>{variant === 'video' && pixelAt(gap.end_ms) - pixelAt(gap.start_ms) > 65 && <span className="tl-gap-label">{skipped.length ? '已跳过' : '无视频'}</span>}</span>;
     });
@@ -552,8 +513,8 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
         type="button"
         className={`tl-segment tl-segment-${customTrack(project,track)?'custom':track}${selected ? ' tl-segment-selected' : ''}${segment.end_ms === null ? ' tl-segment-open' : ''}${point ? ' tl-segment-point' : ''}`}
         style={{ ...position(segment.start_ms, point ? segment.start_ms : end), top }}
-        title={`${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${point ? `${segment.label} · ${formatTime(segment.start_ms)}` : `${segment.label} · ${formatTime(segment.start_ms)} → ${segment.end_ms === null ? '标注中' : formatTime(segment.end_ms)}`}`}
-        aria-label={point ? `${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，${formatTime(segment.start_ms)}` : `${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，从 ${formatTime(segment.start_ms)}${segment.end_ms === null ? '，标注中' : ` 到 ${formatTime(segment.end_ms)}`}`}
+        title={`${lane === 0 ? '主轴' : `子轴 ${lane}`} · ${point ? `${segment.label} · ${annotationTime(segment.start_ms)}` : `${segment.label} · ${annotationTime(segment.start_ms)} → ${segment.end_ms === null ? '标注中' : annotationTime(segment.end_ms)}`}`}
+        aria-label={point ? `${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，${annotationTime(segment.start_ms)}` : `${trackName(project,track)}${lane === 0 ? '主轴' : `子轴 ${lane}`}：${segment.label}，从 ${annotationTime(segment.start_ms)}${segment.end_ms === null ? '，标注中' : ` 到 ${annotationTime(segment.end_ms)}`}`}
         aria-pressed={selected}
         onClick={(event) => {
           event.stopPropagation();
@@ -575,9 +536,9 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
           className={`tl-boundary-handle tl-boundary-${edge}${narrow ? ' tl-boundary-narrow' : ''}${point ? ' tl-boundary-point' : ''}${boundarySelected ? ' tl-boundary-selected' : ''}`}
           style={{left: `${scale.toDisplay(edgeTime) / scale.duration * 100}%`, top: narrow ? top + (edge === 'start' ? -6 : 12) : top - 3}}
           data-boundary={edge}
-          aria-label={`${segment.label}：${edgeName}，${formatTime(edgeTime)}`}
+          aria-label={`${segment.label}：${edgeName}，${annotationTime(edgeTime)}`}
           aria-pressed={boundarySelected}
-          title={`${edgeName} ${formatTime(edgeTime)} · 拖动或使用进度快捷键调整`}
+          title={`${edgeName} ${annotationTime(edgeTime)} · 拖动或使用进度快捷键调整`}
           onPointerDown={event => {
             if (event.button !== 0 || !event.isPrimary || scrubRef.current) return;
             event.preventDefault(); event.stopPropagation();
@@ -613,13 +574,6 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
       <header className="tl-toolbar">
         <div className="tl-heading"><h2>时间轴</h2></div>
         {anchorControls}
-        <div className="tl-browse-controls" aria-label="浏览时间轴">
-          <button type="button" aria-label="向左浏览半屏" title="向左浏览半屏" disabled={scrollX <= 1} onClick={() => panHalfScreen(-1)}>‹</button>
-          <button type="button" aria-label="向右浏览半屏" title="向右浏览半屏" disabled={scrollX >= maxScroll - 1} onClick={() => panHalfScreen(1)}>›</button>
-          <button type="button" className="tl-return-cursor" aria-label="回到光标" title={`回到播放光标 ${formatTime(currentTime)}`} onClick={centerOnCursor}>回到光标</button>
-          <button type="button" className="tl-reset-zoom" aria-label="重置时间轴为每屏1小时" title="重置为每屏1小时；不足1小时则显示全程" onClick={() => changeWindow(DEFAULT_WINDOW_MS)}>1小时</button>
-        </div>
-        <span className="tl-screen-duration" title={`无视频间隔已压缩，悬停查看实际起止时间；每屏录制时间约 ${formatTime(visibleDuration)}；普通滚轮上下滚动，Alt + 滚轮左右浏览，Ctrl + 滚轮缩放`}>录制 {Math.abs(visibleDuration - HOUR_MS) < 1 ? '1小时' : rulerTime(visibleDuration)}</span>
       </header>
       <div className="tl-body" onMouseMove={showHoverTime} onMouseLeave={() => { setHoverTime(null); setHoveringBoundary(false); }} onPointerDownCapture={(event) => {
         // Capture runs before scrub/segment handlers; toolbar buttons live outside this surface.
@@ -630,8 +584,8 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
         <div className="tl-content" style={{ width: contentWidth + scrollbarWidth, '--tl-gutter': `${GUTTER}px` } as CSSProperties}>
           <div className="tl-fixed-tracks" style={{ width: contentWidth }}>
           <div className="tl-row tl-ruler-row">
-            <div className="tl-gutter tl-ruler-gutter">全局时间</div>
-            <div className="tl-ruler tl-seek-surface" ref={rulerRef} onPointerDown={(event) => beginScrub(event)} {...scrubPointerHandlers} role="slider" aria-label="跳转全局视频时间" aria-valuemin={0} aria-valuemax={project.duration_ms} aria-valuenow={Math.round(displayedTime)} aria-valuetext={formatTime(displayedTime)} tabIndex={0} onKeyDown={(event) => {
+            <div className="tl-gutter tl-ruler-gutter" title={recordingOrigin === null ? "录制起点未设置，显示相对时间" : "视频真实时间（北京时间）"}>{recordingOrigin === null ? "相对时间" : "视频时间"}</div>
+            <div className="tl-ruler tl-seek-surface" ref={rulerRef} onPointerDown={(event) => beginScrub(event)} {...scrubPointerHandlers} role="slider" aria-label="跳转全局视频时间" aria-valuemin={0} aria-valuemax={project.duration_ms} aria-valuenow={Math.round(displayedTime)} aria-valuetext={recordingDateTime(recordingOrigin, displayedTime) ?? formatTime(displayedTime)} tabIndex={0} onKeyDown={(event) => {
               let value: number | undefined;
               if (event.key === 'Home') value = 0;
               if (event.key === 'End') value = project.duration_ms;
@@ -640,8 +594,9 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
               {renderGaps('ruler')}
               {ticks.map((tick) => {
                 const labelVisible = labeledTicks.has(tick);
+                const realTime = recordingDateTime(recordingOrigin, tick);
                 return <span key={tick} className={`tl-tick${tick === 0 ? ' tl-tick-first' : ''}`} style={{ left: `${scale.toDisplay(tick) / scale.duration * 100}%` }}>
-                  {labelVisible && <span>{tickStep < 1000 ? formatTime(tick).slice(6) : rulerTime(tick)}</span>}
+                  {labelVisible && <span title={realTime ? `${realTime} 北京时间` : undefined}>{(realTime?.slice(11) ?? formatTime(tick)).slice(0, tickStep < 1000 ? 12 : 8)}</span>}
                 </span>;
               })}
             </div>
@@ -702,16 +657,16 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
       </div>
           <div className="tl-overlays" ref={overlaysRef} style={{ left: GUTTER, width: visibleAxisWidth }}>
           <div className="tl-overlays-content" ref={overlayContentRef} style={{ transform: `translateX(${-scrollX}px)` }}>
-          {rangeEnd > rangeStart && <div className="tl-range-overlay" aria-label={`锚点选区 ${formatTime(rangeStart)} 到 ${formatTime(rangeEnd)}`} style={{
+          {rangeEnd > rangeStart && <div className="tl-range-overlay" aria-label={`锚点选区 ${annotationTime(rangeStart)} 到 ${annotationTime(rangeEnd)}`} style={{
             left: pixelAt(rangeStart),
             width: pixelAt(rangeEnd) - pixelAt(rangeStart),
           }} />}
-          {visibleAnchors.map(time => <div key={time} className="tl-anchor" style={{ left: pixelAt(time) }} aria-label={`锚点，${formatTime(time)}`}>
+          {visibleAnchors.map(time => <div key={time} className="tl-anchor" style={{ left: pixelAt(time) }} aria-label={`锚点，${annotationTime(time)}`}>
             <span className={`tl-anchor-marker${pixelAt(time) - scrollX > visibleAxisWidth - 12 ? ' tl-anchor-marker-right' : pixelAt(time) - scrollX < 12 ? ' tl-anchor-marker-left' : ''}`} aria-hidden="true" />
           </div>)}
           {hoverTime && <div className={`tl-hover-line${hoverTime.snapped ? ' tl-hover-line-snapped' : ''}`} style={{ left: pixelAt(hoverTime.time) }} aria-hidden="true" />}
           <div className="tl-playhead" style={{ left: progress * axisWidth }}>
-            <div className="tl-playhead-handle" role="slider" tabIndex={0} aria-label="拖动播放光标" aria-valuemin={0} aria-valuemax={project.duration_ms} aria-valuenow={Math.round(displayedTime)} aria-valuetext={formatTime(displayedTime)} onPointerDown={(event) => beginScrub(event, true, selectedBoundary ? currentTime : null)} {...scrubPointerHandlers} onKeyDown={(event) => {
+            <div className="tl-playhead-handle" role="slider" tabIndex={0} aria-label="拖动播放光标" aria-valuemin={0} aria-valuemax={project.duration_ms} aria-valuenow={Math.round(displayedTime)} aria-valuetext={recordingDateTime(recordingOrigin, displayedTime) ?? formatTime(displayedTime)} onPointerDown={(event) => beginScrub(event, true, selectedBoundary ? currentTime : null)} {...scrubPointerHandlers} onKeyDown={(event) => {
               const target = event.key === 'Home' ? 0 : event.key === 'End' ? project.duration_ms : null;
               if (target !== null) { event.preventDefault(); event.stopPropagation(); if (!scrubRef.current) onSeek(target); }
             }} />
@@ -725,7 +680,7 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
         style={{ left: hoverTime.left, top: hoverTime.top, width: hoverTime.width, height: hoverTime.height }}
       >
         <HoverPreview projectId={project.id} video={hoverVideoAt(hoverTime.time)} time={hoverTime.time} />
-        <div className="tl-hover-main"><span>{hoverTime.snapped ? '已吸附' : '时间轴'}</span><strong>{formatTime(hoverTime.time)}</strong>{hoverTime.noVideo && <em>无视频</em>}</div>
+        <div className="tl-hover-main"><span>{hoverTime.snapped ? '已吸附' : '时间轴'}</span><strong>{annotationTime(hoverTime.time)}</strong>{hoverTime.noVideo && <em>无视频</em>}</div>
         <div className="tl-hover-clock">{recordingDateTime(recordingOrigin, hoverTime.time) ?? '录制起点未设置'}{recordingOrigin !== null && <span>北京时间</span>}</div>
       </div>, document.body)}
     </section>
