@@ -75,6 +75,32 @@ class CollectionTaskTests(unittest.TestCase):
         with self.assertRaises(TaskError):self.create(legacy_request)
         with self.assertRaises(HTTPException):self.media.task_collection(self.records[:1])
 
+    def test_custom_rule_workspace_keeps_fixed_labels_separate_and_repairs_previous_cache(self):
+        axes = [
+            {'id':'posture','name':'姿势','mode':'state','labels':['站']},
+            {'id':'food','name':'饮食','mode':'state','labels':['喝水']},
+            {'id':'scene','name':'场景','mode':'state','labels':['室内']},
+        ]
+        rule=self.store.publish_rule(self.admin,{'name':'自定义规则','task_type':'custom','axes':axes})
+        task=self.create({**self.body,'rule_id':rule['id']})
+        project=self.workspace.public(self.a,task['id'])
+        self.assertEqual(project['fixed_tracks'],['scene','posture'])
+        self.assertEqual(set(project['track_labels']),{'scene','posture','category','habit'})
+        self.assertEqual(project['custom_tracks'][0]['labels'],['喝水'])
+        segment={'id':'drink','label':'喝水','start_ms':0,'end_ms':500,'lane':0,'kind':'interval'}
+        draft={'annotations':{'food':[segment]}}
+        self.mutate('save_draft',self.a,task,**draft)
+        stored=self.workspace.service.load(project['id'])
+        stored['track_labels']['food']=['喝水']
+        stored['fixed_tracks']=['posture','scene']
+        self.workspace.service.save(stored)
+        reopened=self.workspace.public(self.a,task['id'])
+        self.assertEqual(reopened['annotations']['food'],[segment])
+        self.assertEqual(reopened['fixed_tracks'],['scene','posture'])
+        self.assertNotIn('food',reopened['track_labels'])
+        self.assertEqual(reopened['custom_tracks'][0]['labels'],['喝水'])
+        self.assertNotIn('food',self.workspace.service.load(project['id'])['track_labels'])
+
     def test_all_members_quality_is_required_and_later_revocation_blocks_submission(self):
         self.store.set_quality(self.admin,self.records[1]['id'],'failed')
         with self.assertRaises(TaskError):self.create()
