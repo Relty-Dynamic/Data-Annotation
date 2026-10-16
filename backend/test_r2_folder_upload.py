@@ -53,6 +53,21 @@ class FolderSelectionTests(unittest.TestCase):
             self.assertEqual((self.root / key).read_bytes(), value)
         self.assertEqual(len(scan_collection(self.root / 'video')['videos']), 1)
 
+    def test_scan_numbered_imu_folder_with_txt_and_wplay(self):
+        folder = self.root / 'IMU' / '134546'
+        folder.mkdir(parents=True)
+        payloads = {'20261014134546.txt': b'time,x,y,z\n0,1,2,3',
+                    'WT901BLE67(F9_07_E6_4C_66_D3).wplay': b'\x00\xffsensor-playback',
+                    'WT901BLE68(F0_46_23_95_C9_F0).WPLAY': b'other-device'}
+        for name, content in payloads.items():
+            (folder / name).write_bytes(content)
+        selected = scan_collection(self.root)
+        self.assertEqual(len(selected['videos']), 1)
+        self.assertEqual({item['output'] for item in selected['attachments']},
+                         {'IMU/134546/' + name for name in payloads})
+        for name, content in payloads.items():
+            self.assertEqual((folder / name).read_bytes(), content)
+
     def test_reject_link_duplicate_output_and_invalid_prediction(self):
         (self.root / 'IMU').mkdir()
         (self.root / 'IMU/link.csv').symlink_to(self.root / 'video' / NAME.replace('.mp4', '.avi'))
@@ -132,8 +147,23 @@ class MultipartModalitiesTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             self.uploads.start(OTHER, self.manifest)
 
+    def test_wplay_upload_preserves_bytes_and_relative_name(self):
+        key = 'IMU/134546/WT901BLE67(F9_07_E6_4C_66_D3).wplay'
+        self.payloads[1] = b'\x00\xfforiginal-wplay\r\n'
+        self.manifest['attachments'][0] = {'key': key, **self.record(self.payloads[1])}
+        job = self.uploads.start(USER, self.manifest)
+        for index in range(len(self.payloads)):
+            self.complete(job, index)
+        self.uploads.finish(job['id'], USER)
+        published = self.provider.optional_json(PREFIX + '/manifest.json')[0]
+        attachment = published['attachments'][0]
+        self.assertEqual(attachment['name'], key)
+        self.assertTrue(attachment['key'].startswith('IMU/134546/'))
+        self.assertEqual(self.provider.get(PREFIX + '/' + attachment['key']), self.payloads[1])
+        self.assertTrue(all(path.name.endswith('.mp4') for path in self.probes))
+
     def test_no_timeline_overwrite_no_paths_no_unsupported_files(self):
-        for key in ['timeline/posture.timeline.json', 'IMU/../secret.txt', 'HEART/a.exe', 'prediction/a.csv', 'IMU/a\\b.csv']:
+        for key in ['timeline/posture.timeline.json', 'IMU/../secret.txt', 'HEART/a.exe', 'prediction/a.csv', 'IMU/a\\b.csv', 'HEART/a.wplay', 'prediction/a.wplay', 'IMU/a.exe']:
             manifest = json.loads(json.dumps(self.manifest))
             manifest['attachments'][0]['key'] = key
             with self.subTest(key=key), self.assertRaises(HTTPException):

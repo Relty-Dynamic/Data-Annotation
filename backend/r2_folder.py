@@ -13,6 +13,7 @@ from .service import parse_recording_start
 from .source_cache import is_reparse
 
 DATA_EXTENSIONS = {'.csv', '.tsv', '.txt', '.json', '.bin', '.dat', '.npy', '.npz', '.parquet'}
+IMU_EXTENSIONS = DATA_EXTENSIONS | {'.wplay'}
 
 
 def attachment_key(value):
@@ -23,7 +24,8 @@ def attachment_key(value):
             or any(not part or part in {'.', '..'} or len(part) > 120
                    or part != part.strip(' .')
                    or any(ord(c) < 32 or c in '\\:<>"|?*' for c in part) for part in parts)
-            or PurePosixPath(value).suffix.lower() not in ({'.json'} if parts[0] == 'prediction' else DATA_EXTENSIONS)):
+            or PurePosixPath(value).suffix.lower() not in (
+                {'.json'} if parts[0] == 'prediction' else IMU_EXTENSIONS if parts[0] == 'IMU' else DATA_EXTENSIONS)):
         raise HTTPException(422, '仅接受 IMU、HEART 数据文件及 prediction 中的 JSON；timeline 由平台写回。')
     return value
 
