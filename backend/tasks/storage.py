@@ -107,6 +107,14 @@ class ProjectMedia:
         path, metadata = self.service.media_source(project, video['id'])
         return path, metadata, video
 
+    def prediction(self, source):
+        # The source was resolved against the frozen task membership first.
+        match = re.fullmatch(r'([0-9a-f]{32})/(v[0-9]{4})', str(source.get('key', '')))
+        if not match or source.get('backend') != self.backend:
+            raise HTTPException(422, '任务预标注来源无效。')
+        project = self.service.load(match[1])
+        return self.service.read_prediction(project)
+
     def task_collection(self, records):
         """Freeze the complete source timeline; filenames are not summed end to end."""
         first = records[0]

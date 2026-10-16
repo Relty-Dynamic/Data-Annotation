@@ -84,6 +84,7 @@ class Workspaces:
             if changed:
                 self.service.save(project)
         project = copy.deepcopy(project)
+        task = self.initialize_prediction(actor, task, project, members)
         own_submission = task.get('current_submissions', {}).get(actor['id'])
         annotations = (task.get('draft') or {}).get('annotations')
         if annotations is None:
@@ -93,6 +94,7 @@ class Workspaces:
         project['task_readonly'] = actor['id'] not in task['annotator_ids'] or bool(own_submission) or task['status'] not in ('annotating', 'rework')
         project['task_rule'] = task['rule']
         project['task_output_sync'] = task.get('output_sync')
+        project['prediction_import'] = (task.get('draft') or {}).get('prediction_import', project.get('prediction_import'))
         project['task_feedback'] = [{key: issue[key] for key in ('id', 'axis', 'segment_id', 'start_ms', 'end_ms', 'reason') if key in issue}
                                     for issue in task.get('issues', []) if task['status'] == 'rework' and issue['id'].startswith('review:')]
         project['updated_at'] = task.get('updated_at', project['updated_at'])
@@ -109,6 +111,41 @@ class Workspaces:
         result['task_output_sync'] = project['task_output_sync']
         result['task_feedback'] = project['task_feedback']
         return self.urls(result, task_id, project['id'])
+
+    def initialize_prediction(self, actor, task, project, members):
+        if (project.get('_prediction_checked') or task.get('draft') is not None
+                or actor['id'] not in task['annotator_ids'] or task['status'] != 'annotating'
+                or actor['id'] in task.get('current_submissions', {})
+                or not hasattr(self.media, 'prediction') or 'posture' not in project['selected_tracks']):
+            return task
+        from ..prediction_import import convert
+        from .store import TaskError
+        with self.lock:
+            task = self.store.get_task(actor, task['id'])
+            if (task.get('draft') is not None or actor['id'] in task.get('current_submissions', {})
+                    or actor['id'] not in task['annotator_ids'] or task['status'] != 'annotating'):
+                return task
+            try:
+                raw = self.media.prediction(members[0]['source'])
+                if raw is not None:
+                    rows, metadata = convert(raw, project)
+                    task = self.store.initialize_prediction(actor, task['id'], {
+                        'expected_revision': task['revision'], 'annotations': {'posture': rows},
+                        'prediction_import': metadata})
+                    project['prediction_import'] = metadata
+            except TaskError as error:
+                if error.status == 409:
+                    # A simultaneous human save or another participant's task
+                    # mutation wins. Read it afresh; never replace that draft.
+                    return self.store.get_task(actor, task['id'])
+                if error.status != 422:
+                    raise
+                project['prediction_import'] = {'state': 'rejected', 'detail': '预标注不符合当前任务规则，草稿保持空白。'}
+            except (ValueError, OSError, TypeError, KeyError, HTTPException):
+                project['prediction_import'] = {'state': 'rejected', 'detail': '预标注无法读取或与任务素材、标签不一致，未自动导入。'}
+            project['_prediction_checked'] = True
+            self.service.save(project)
+        return task
 
     def direct_session(self, project):
         return self.media.direct_session(project) if hasattr(self.media, 'direct_session') else None

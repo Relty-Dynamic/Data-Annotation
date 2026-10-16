@@ -23,7 +23,7 @@ class RemoteCaptureTarget:
         self.attachments = attachments
         self.progress = progress or (lambda value: None)
 
-    def request(self, method, path, **kwargs):
+    def response(self, method, path, **kwargs):
         response = self.client.request(method, path, **kwargs)
         if not response.is_success:
             try:
@@ -31,7 +31,10 @@ class RemoteCaptureTarget:
             except ValueError:
                 message = '上传接口暂时不可用。'
             raise HTTPException(response.status_code, message if isinstance(message, str) else '上传接口暂时不可用。')
-        return response.json()
+        return response
+
+    def request(self, method, path, **kwargs):
+        return self.response(method, path, **kwargs).json()
 
     def capture_exists(self, prefix):
         # The server performs the authoritative conditional-publication check.
@@ -99,6 +102,9 @@ def main():
     parser.add_argument('--video-dir', type=Path)
     parser.add_argument('--collector')
     parser.add_argument('--username')
+    parser.add_argument('--predict', action='store_true', help='Generate posture prediction before compression')
+    parser.add_argument('--chest-device')
+    parser.add_argument('--thigh-device')
     args = parser.parse_args()
     public_origin(args.api, api=True)
     root = Path(__file__).resolve().parents[1]
@@ -130,7 +136,9 @@ def main():
             manager = FolderUploadManager(target, local / 'staging')
             selection = manager.select_folder(user['id'], folders[0])
             target.attachments = selection['attachments']
-            job = manager.start(user, collector, None, None, selection['selection_id'])
+            job = manager.start(user, collector, None, None, selection['selection_id'], prediction={
+                'prediction': 'generate' if args.predict else 'keep',
+                'chest_device': args.chest_device, 'thigh_device': args.thigh_device})
             def permitted(ident):
                 return target.request('GET', '/api/auth/me').get('can_upload') is True
             manager.finish(job['id'], user['id'], service, permitted)

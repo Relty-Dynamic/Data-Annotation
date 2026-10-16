@@ -93,7 +93,7 @@ class UploadBridge:
         fields = body.get('fields', {})
         if action not in {'select', 'start'} or not isinstance(fields, dict):
             raise HTTPException(422, '上传操作无效。')
-        if set(fields)-{'collector','uploader','note'} or any(not isinstance(v,str) or len(v)>500 for v in fields.values()):
+        if set(fields)-{'collector','uploader','note','prediction','chest_device','thigh_device'} or any(not isinstance(v,str) or len(v)>500 for v in fields.values()):
             raise HTTPException(422, '只允许采集信息，不允许远程指定本机路径或命令。')
         with self.lock:
             if self.clock()-value['seen'] >= 15:

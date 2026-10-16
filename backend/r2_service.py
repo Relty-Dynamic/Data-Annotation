@@ -58,6 +58,27 @@ class R2ProjectService(ProjectService):
     def allowed(self, actor, ident):
         return actor.get('role') == 'admin' or self.load(ident).get('_r2_owner') == actor['id']
 
+    def read_prediction(self, project):
+        from .prediction_import import MAX_BYTES, verify_inputs
+        items = [item for item in project.get('_r2_manifest', {}).get('attachments', [])
+                 if item.get('name', '').casefold() == 'prediction/posture.json']
+        if not items:
+            return None
+        if len(items) != 1 or type(items[0].get('size')) is not int or not 0 < items[0]['size'] <= MAX_BYTES:
+            raise ValueError('S3 姿势预标注清单无效。')
+        item = items[0]
+        key = object_key(item['key'])
+        if not key.startswith('prediction/'):
+            raise ValueError('S3 姿势预标注路径无效。')
+        destination = self.local / 'r2-predictions' / project['_r2_capture_sha256'] / 'posture.json'
+        self.provider.download(project['_r2_prefix'] + '/' + key, destination, item['sha256'], item['size'])
+        raw = destination.read_bytes()
+        if len(raw) != item['size'] or hashlib.sha256(raw).hexdigest() != item['sha256']:
+            raise ValueError('S3 姿势预标注内容与发布清单不一致。')
+        attachments = {row.get('name', '').casefold(): row for row in project['_r2_manifest'].get('attachments', [])}
+        verify_inputs(raw, lambda path: attachments.get(path.casefold(), {}).get('sha256'))
+        return raw
+
     def browse(self, prefix=''):
         prefix = prefix or ''
         if prefix and (prefix.startswith('/') or '..' in prefix.split('/') or len(prefix.split('/')) > 3):
