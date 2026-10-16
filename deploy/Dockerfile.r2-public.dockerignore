@@ -5,6 +5,7 @@
 !deploy/*.py
 !deploy/*.sh
 !requirements.lock.txt
+!requirements.uploader.lock.txt
 !launch.py
 **/__pycache__/
 **/*.pyc
