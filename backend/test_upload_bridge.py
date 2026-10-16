@@ -195,15 +195,25 @@ class PublicBridgeRouteTests(unittest.TestCase):
                         provider.put(PREFIX+'/'+item['key'],data,create=True)
                         self.assertEqual(browser.post(path+'/finish?background=1',headers={'Origin':origin}).status_code,403)
                         with patch.object(browser.app.state.r2_service,'probe',return_value=dict(codec='h264',duration_ms=1000)):
-                            response=agent.post('/api/r2/helper/transfer/uploads/'+job['id']+'/finish?background=1',headers=headers)
+                            response=agent.post('/api/r2/helper/transfer/uploads/'+job['id']+'/finish?background=1&prepare=1',headers=headers)
                             self.assertEqual(response.status_code,200,response.text)
                             deadline=time.monotonic()+5
                             while True:
                                 state=browser.get(path).json()
-                                if state['state'] in ('ready','validation_error'):break
+                                if state['state'] in ('verified','validation_error'):break
                                 self.assertLess(time.monotonic(),deadline)
                                 time.sleep(.01)
-                            self.assertEqual(state['state'],'ready',state)
+                            self.assertEqual(state['state'],'verified',state)
+                            self.assertIsNone(provider.optional_json(PREFIX+'/manifest.json')[0])
+                            deadline=time.monotonic()+5
+                            while True:
+                                response=browser.post(path+'/finish?background=1',headers=csrf)
+                                self.assertEqual(response.status_code,200,response.text)
+                                state=browser.get(path).json()
+                                if state['state']=='ready':break
+                                self.assertLess(time.monotonic(),deadline)
+                                time.sleep(.01)
+
                         self.assertIsNotNone(provider.optional_json(PREFIX+'/manifest.json')[0])
                         auth.set_upload_permission(user['id'],False)
                         self.assertEqual(agent.get('/api/r2/helper/prediction/capabilities',headers=headers).status_code,403)

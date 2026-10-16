@@ -388,7 +388,7 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                     if path == '/api/r2/uploads':
                         value = uploads.start(USER, kwargs['json'])
                     elif parts[-1] == 'finish':
-                        value = uploads.begin_finish(parts[4], USER, lambda: USER) if use_agent else uploads.finish(parts[4], USER)
+                        value = uploads.begin_finish(parts[4], USER, lambda: USER,prepare='prepare=1' in path) if use_agent else uploads.finish(parts[4], USER)
                     elif len(parts) == 5 and method == 'GET':
                         value = uploads.status(parts[4], USER)
                     elif parts[-1] == 'complete':
@@ -399,6 +399,7 @@ class FolderUploadRoundTripTests(unittest.TestCase):
             if use_agent:
                 from backend.upload_agent import AgentEngine
                 engine=AgentEngine(root,PublicClient(),service=local,picker=lambda root,kind:[str(root/'collection')])
+                engine.target.pipeline_enabled=True
                 engine.execute({'id':'select-fixture','action':'select','fields':{}})
                 self.assertFalse(engine.report.get('error'),engine.report)
                 self.assertEqual(len(engine.report['selection']['attachments']),3)
@@ -417,6 +418,14 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                 else:
                     self.assertEqual(manager.finish(job['id'], USER['id'], local, lambda ident: True)['state'], 'ready')
             self.assertEqual(job['prefix'], 'daily/20261015/1015lixin')
+            if use_agent:
+                before=dict(provider.objects)
+                engine.execute({'id':'select-retry','action':'select','fields':{}})
+                with patch.object(engine.manager,'_compress_video',side_effect=AssertionError('retry must reuse desktop cache')),patch('backend.upload_pipeline.build',side_effect=AssertionError('retry must reuse derivatives')):
+                    engine.execute({'id':'start-retry','action':'start','fields':{'collector':'lixin'}})
+                self.assertFalse(engine.report.get('error'),engine.report)
+                self.assertEqual(engine.manager.status(engine.job['id'],USER['id'])['state'],'ready')
+                self.assertEqual(provider.objects,before)
             manifest = provider.optional_json(job['prefix'] + '/manifest.json')[0]
             compressed = provider.get(job['prefix'] + '/' + manifest['files'][0]['key'])
             self.assertEqual({item['kind'] for item in manifest['cache_files']}, {'fast', 'thumbnail', 'sheet'})
@@ -446,14 +455,13 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                  patch('backend.session_cache.render_local_thumbnail', side_effect=AssertionError('server must not render jpg')), \
                  patch.object(StoryboardCache, 'render', side_effect=AssertionError('server must not render sheets')):
                 for svc, project in ((public, opened), (workspace.service, task_project)):
-                    svc.start_session(project['id'])
-                    deadline=time.monotonic()+15
-                    while time.monotonic()<deadline:
-                        state=svc.sessions.status(project['id'])
-                        if state['state'] in ('ready','partial','error'):break
-                        time.sleep(.02)
+                    if svc is public:
+                        state=public.start_session(project['id'])
+                        download=public.session_manifest(project['id'])
+                    else:
+                        state=workspace.session_status(project,start=True)
+                        download=workspace.session_manifest(project,task['id'])
                     self.assertEqual(state['state'],'ready',state)
-                    download = public.media_manifest(svc,svc.sessions.manifest(project['id']))
                     self.assertTrue(all('/'+job['prefix']+'/' in asset['url'] for asset in download['assets']))
             self.assertFalse(any(key.startswith('media/') for key in provider.objects))
             # A fresh server must reject a missing/corrupt uploaded derivative,
@@ -469,14 +477,9 @@ class FolderUploadRoundTripTests(unittest.TestCase):
             try:
                 with patch.object(SessionCache,'_render_compact',side_effect=AssertionError('no server fallback')), \
                      patch.object(StoryboardCache,'render',side_effect=AssertionError('no server image fallback')):
-                    broken.start_session(damaged['id'])
-                    deadline=time.monotonic()+15
-                    while time.monotonic()<deadline:
-                        state=broken.sessions.status(damaged['id'])
-                        if state['state'] in ('ready','partial','error'):break
-                        time.sleep(.02)
-                    self.assertEqual(state['state'],'partial',state)
-                    self.assertNotIn('no server',str(state))
+                    source=broken.load(damaged['id'])['_sources'][damaged['videos'][0]['id']]
+                    with self.assertRaises(HTTPException):
+                        broken.uploaded_playback(source,root/'forced-legacy-hydration','fixture-key')
             finally:
                 provider.objects[cache_key]=saved_object
             for item in manifest['attachments']:

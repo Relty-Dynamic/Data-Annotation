@@ -14,6 +14,7 @@ from .storyboards import StoryboardCache
 
 def build(service, prepared, manifest, progress):
     records = []
+    retained = {}
     stop = threading.Event()
     stories = StoryboardCache(prepared / '.upload-storyboards')
     for number, video in enumerate(manifest['files'], 1):
@@ -40,8 +41,9 @@ def build(service, prepared, manifest, progress):
                             'sha256': sha256_file(path)})
             if service.desktop_cache.enabled:
                 label = f'storyboard-{index:03d}' if kind == 'sheet' else kind
-                service.desktop_cache.retain_upload(manifest['prefix'], name, path, kind=label)
+                retained[path.relative_to(prepared).as_posix()] = service.desktop_cache.retain_upload(manifest['prefix'], name, path, kind=label)
     manifest.update(cache_profile=PROFILE, cache_files=records)
+    return retained
 
 
 def validate(manifest):

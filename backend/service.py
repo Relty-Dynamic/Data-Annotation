@@ -1054,7 +1054,7 @@ class ProjectService:
         except OSError:
             raise HTTPException(422, f"无法读取视频：{path.name}，请检查路径和共享目录权限。")
 
-    def create(self, paths: list[Path], name: str, source_dir: Path | None, ident: str | None = None, imported_at: str | None = None, *, existing: dict | None = None, default_fixed_tracks: list[str] | None = None) -> dict:
+    def create(self, paths: list[Path], name: str, source_dir: Path | None, ident: str | None = None, imported_at: str | None = None, *, existing: dict | None = None, default_fixed_tracks: list[str] | None = None, metadata_by_name: dict | None = None) -> dict:
         imported_at = imported_at or now()
         if not paths:
             raise HTTPException(422, "目录中没有找到支持的视频。请选择采集根目录、FPV 目录，或直接选择原视频文件。")
@@ -1078,8 +1078,8 @@ class ProjectService:
                 stamp = metadata["stamp"]
                 relative = old_video["relative_path"]
             else:
-                metadata = self.probe(path)
-                stamp = self.source_stamp(path)
+                metadata = copy.deepcopy(metadata_by_name[path.name]) if metadata_by_name is not None else self.probe(path)
+                stamp = metadata.pop("stamp") if metadata_by_name is not None else self.source_stamp(path)
                 while f"v{next_id:04d}" in used_ids:
                     next_id += 1
                 video_id = f"v{next_id:04d}"
@@ -1121,6 +1121,8 @@ class ProjectService:
             sources[video_id] = dict(metadata) if old_video else {"path": str(path.resolve()), "stamp": stamp, **metadata}
         fingerprint = digest(document_bytes([{**video, "id": f"v{index + 1:04d}", "url": None, "thumbnail_url": None, "stamp": sources[video["id"]]["stamp"]} for index, video in enumerate(videos)]))
         project = {"id": ident, "name": import_name(imported_at), "imported_at": imported_at, "import_time_estimated": False, "_storage_version": 2, "source_dir": str(source_dir) if source_dir else None, "duration_ms": cursor, "recording_start": origin.isoformat(timespec="milliseconds"), "gaps": gaps, "videos": videos, "annotations": empty_annotations(), "fixed_tracks": validate_fixed_tracks(default_fixed_tracks if default_fixed_tracks is not None else list(AXES)), "revision": 0, "updated_at": now(), "source_fingerprint": fingerprint, "draft_dirty": False, "warnings": alignment_warnings(videos), "_sources": sources, "_source_key": os.path.normcase(str(source_dir)) if source_dir else None, "_external_hashes": {axis: None for axis in AXES}}
+        if metadata_by_name is not None:
+            project["_r2_metadata_only"] = True
         # Low-level legacy import/worker callers keep their established schema.
         project["track_labels"] = copy.deepcopy(DEFAULT_TRACK_LABELS if default_fixed_tracks is not None else LEGACY_TRACK_LABELS)
         if default_fixed_tracks is not None:
@@ -1533,28 +1535,32 @@ class ProjectService:
         return project
 
     def open_path(self, raw_path: str, name: str | None = None, *, allowed_project_ids: set[str] | None = None,
-                  claim_mode: str | None = None, claim_hashes: dict | None = None) -> dict:
+                  claim_mode: str | None = None, claim_hashes: dict | None = None, _metadata: dict | None = None) -> dict:
         if claim_mode not in (None, "keep", "continue", "restart"):
             raise HTTPException(422, "领取方式无效。")
         name = validate_project_name(name, allow_empty=True)
         if not raw_path or not raw_path.strip():
             raise HTTPException(422, "请输入服务器可访问的原视频目录或共享目录路径。")
         path = Path(raw_path.strip().strip('"')).expanduser()
-        try:
-            path = path.resolve(strict=True)
-            if not path.is_dir():
-                raise HTTPException(422, "请选择目录，而不是单个文件。")
-            if self.is_managed_copy(path) or CACHE_FOLDER in path.parts:
-                raise HTTPException(422, "请选择原视频目录，不要选择平台导入副本或缓存目录。")
-            if path.name.casefold() == "fpv":
-                source_dir, video_dir = path.parent, path
-            else:
-                source_dir = path
-                fpv = next((child for child in path.iterdir() if child.is_dir() and child.name.casefold() == "fpv"), None)
-                video_dir = fpv or path
-            paths = [item for item in video_dir.iterdir() if item.is_file() and item.suffix.casefold() in VIDEO_EXTENSIONS]
-        except OSError:
-            raise HTTPException(422, "无法访问目录。请检查服务器路径、网络及共享目录权限。")
+        if _metadata is not None:
+            source_dir = path.absolute()
+            paths = [source_dir / 'FPV' / filename for filename in _metadata]
+        else:
+            try:
+                path = path.resolve(strict=True)
+                if not path.is_dir():
+                    raise HTTPException(422, "请选择目录，而不是单个文件。")
+                if self.is_managed_copy(path) or CACHE_FOLDER in path.parts:
+                    raise HTTPException(422, "请选择原视频目录，不要选择平台导入副本或缓存目录。")
+                if path.name.casefold() == "fpv":
+                    source_dir, video_dir = path.parent, path
+                else:
+                    source_dir = path
+                    fpv = next((child for child in path.iterdir() if child.is_dir() and child.name.casefold() == "fpv"), None)
+                    video_dir = fpv or path
+                paths = [item for item in video_dir.iterdir() if item.is_file() and item.suffix.casefold() in VIDEO_EXTENSIONS]
+            except OSError:
+                raise HTTPException(422, "无法访问目录。请检查服务器路径、网络及共享目录权限。")
         with self.lock:
             source_key = os.path.normcase(str(source_dir))
             with self.connection() as con:
@@ -1575,7 +1581,8 @@ class ProjectService:
                 fresh = previous
             else:
                 fresh = self.create(paths, source_dir.name, source_dir, previous["id"] if previous else None,
-                                    default_fixed_tracks=["scene", "posture", "category"])
+                                    default_fixed_tracks=["scene", "posture", "category"],
+                                    existing=previous if _metadata is not None else None, metadata_by_name=_metadata)
                 if previous and fresh["source_fingerprint"] not in {previous["source_fingerprint"], *previous.get("_source_fingerprint_aliases", [])}:
                     moved = self.relocated_fpv_project(previous, fresh)
                     if moved is None:
@@ -1645,7 +1652,8 @@ class ProjectService:
             fresh['_prediction_eligible'] = imported is None and claim_mode != 'restart'
             if claim_mode == "restart":
                 fresh["draft_dirty"] = True
-            self.attach_source_caches(fresh)
+            if not fresh.get("_r2_metadata_only"):
+                self.attach_source_caches(fresh)
             self.save(fresh)
             result = self.public(fresh)
             if claim_mode == "restart" and backup_id:

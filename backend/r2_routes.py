@@ -220,7 +220,7 @@ def install(app, session, accounts, provider, root):
     @router.get('/projects/{ident}/session')
     def status(ident: str, request: Request):
         project(ident, request)
-        return service.sessions.status(ident)
+        return service.session_status(ident)
 
     @router.post('/projects/{ident}/session/prepare')
     def prepare(ident: str, request: Request, body: PreparationRequest | None = None):
@@ -243,20 +243,20 @@ def install(app, session, accounts, provider, root):
     @router.get('/projects/{ident}/session/manifest')
     def manifest(ident: str, request: Request):
         project(ident, request)
-        return service.media_manifest(service, service.sessions.manifest(ident))
+        return service.session_manifest(ident)
 
     @router.post('/projects/{ident}/session/browser-ready')
     def browser_ready(ident: str, request: Request):
         project(ident, request)
-        return service.sessions.browser_ready(ident)
+        return service.browser_ready(ident)
 
     @router.get('/previews/{ident}/{video}')
     def preview(ident: str, video: str, request: Request, fast: bool = False):
         project(ident, request)
-        state = service.sessions.status(ident)
+        state = service.session_status(ident)
         if state['state'] != 'ready':
             return {'state': state['state'], 'progress': state.get('progress'), 'detail': state.get('detail'), 'url': None}
-        value = service.media_manifest(service, service.sessions.manifest(ident))
+        value = service.session_manifest(ident)
         found = next((item for item in value['videos'] if item['id'] == video), None)
         if found is None:
             raise HTTPException(404, '视频不存在。')
@@ -309,10 +309,10 @@ def install(app, session, accounts, provider, root):
         return uploads.complete_file(ident, index, actor(request))
 
     @router.post('/r2/uploads/{ident}/finish')
-    def upload_finish(ident: str, request: Request, background: bool = False):
+    def upload_finish(ident: str, request: Request, background: bool = False, prepare: bool = False):
         if background:
-            return uploads.begin_finish(ident, actor(request), lambda: session(request))
-        return uploads.finish(ident, actor(request), authorize=lambda: session(request))
+            return uploads.begin_finish(ident, actor(request), lambda: session(request), prepare=prepare)
+        return uploads.finish(ident, actor(request), authorize=lambda: session(request), prepare=prepare)
 
     app.include_router(router)
     app.state.r2_service, app.state.r2_uploads = service, uploads

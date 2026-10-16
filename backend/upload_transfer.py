@@ -40,7 +40,7 @@ class TransferProgress:
                 f'{sent / 1024**2:.1f}/{self.total / 1024**2:.1f} MiB · {speed / 1024**2:.2f} MiB/s')
 
 
-def transfer_files(target, job, prepared, manifest):
+def transfer_files(target, job, prepared, manifest, *, completed_keys=None):
     items = manifest['files'] + manifest.get('attachments', []) + manifest.get('cache_files', [])
     tracker = TransferProgress(target, items)
     # Three simultaneous requests at most; files and multipart chunks share the same pool.
@@ -75,6 +75,9 @@ def transfer_files(target, job, prepared, manifest):
             tracker.update(index, number, length)
         def upload(index):
             item = items[index]
+            if (item['key'],item.get('sha256')) in (completed_keys or set()):
+                tracker.update(index,0,item.get('size',0),done=True,force=True)
+                return
             offset = index - len(manifest['files'])
             record = target.attachments[offset] if 0 <= offset < len(target.attachments) else None
             source = MockUploadManager._check_local_source(record) if record else prepared / item['key']

@@ -76,7 +76,7 @@ test('missing authorization and malformed manifests never silently use private b
 test('a truncated download fails readiness but completed files survive retry',async t=>{
   const {requests}=await setup(t),{manifest}=fixture(),signal=new AbortController().signal;
   manifest.assets[1]={...manifest.assets[1],size:8};await assert.rejects(prepareBrowserVideos('project_1',manifest,signal,()=>{}),/不匹配/);
-  assert.equal(requests(),2);assert.equal(desktopAssetFile('project_1',manifest.videos[0].url),undefined);
+  assert.equal(requests(),3,'three in-flight files may start before one fails');assert.equal(desktopAssetFile('project_1',manifest.videos[0].url),undefined);
   const complete=fixture().manifest;await prepareBrowserVideos('project_1',complete,signal,()=>{});assert.equal(requests(),5,'first completed file is reused');
 });
 test('matching files without application ownership survive explicit cleanup',async t=>{
@@ -116,4 +116,27 @@ test('cache hash cancellation is respected before and after native digest',async
  const later=new AbortController();
  t.mock.method(crypto.subtle,'digest',async()=>{later.abort();return new ArrayBuffer(32);});
  await assert.rejects(fileSha256(new Blob(['data']),later.signal),{name:'AbortError'});
+});
+
+test('browser preparation overlaps requests but never exceeds three downloads',async t=>{
+ const {root}=await setup(t),{manifest,bytes}=fixture();let active=0,peak=0,count=0;
+ t.mock.method(globalThis,'fetch',async url=>{active++;peak=Math.max(peak,active);count++;try{await new Promise(resolve=>setTimeout(resolve,10));return new Response(bytes,{headers:{'content-type':url.includes('thumbnail')||url.includes('storyboard')?'image/jpeg':'video/mp4'}});}finally{active--;}});
+ const progress=[];await prepareBrowserVideos('project_1',manifest,new AbortController().signal,(ready,total)=>progress.push([ready,total]));
+ assert.equal(count,4);assert.equal(peak,3);assert.deepEqual(progress.at(-1),[4,4]);
+ assert.ok(manifest.assets.every(item=>root.directories.get(manifest.collection_name).files.has(item.file_name)));
+});
+
+test('cancelling parallel preparation settles all requests and never marks the project ready',async t=>{
+ const {root}=await setup(t),{manifest}=fixture(),controller=new AbortController();let entered=0,settled=0,notify;
+ const started=new Promise(resolve=>{notify=resolve;});
+ t.mock.method(globalThis,'fetch',async(url,options)=>new Promise((resolve,reject)=>{
+  entered++;if(entered===3)notify();
+  const abort=()=>{settled++;reject(options.signal.reason);};
+  if(options.signal.aborted)abort();else options.signal.addEventListener('abort',abort,{once:true});
+ }));
+ const pending=prepareBrowserVideos('project_1',manifest,controller.signal,()=>{});
+ await started;controller.abort();await assert.rejects(pending,{name:'AbortError'});
+ assert.equal(entered,3);assert.equal(settled,3);assert.equal(desktopAssetFile('project_1',manifest.videos[0].url),undefined);
+ const directory=root.directories.get(manifest.collection_name);
+ for(const[name,bytes]of directory.files)if(name.startsWith('.datamark-ref.'))assert.equal(JSON.parse(bytes.toString()).state,'downloading');
 });

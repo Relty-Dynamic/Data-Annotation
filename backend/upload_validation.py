@@ -1,6 +1,7 @@
 """Resumable, bounded publication checks. Only verified collections are published."""
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import copy
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -8,9 +9,10 @@ from fastapi import HTTPException
 from .r2_folder import validate_prediction
 from .service import document_bytes
 from .upload_playback import validate as validate_playback
+from .upload_proofs import policy
 
 
-def validate_upload(uploads, ident, user, authorize=None):
+def validate_upload(uploads, ident, user, authorize=None, *, prepare=False):
     # A slow validation blocks only this collection, never another upload.
     with uploads.job_lock(ident, 'validation'):
         job = uploads.load(ident, user)
@@ -46,10 +48,20 @@ def validate_upload(uploads, ident, user, authorize=None):
                 raise HTTPException(409, '上传文件大小或摘要信息与清单不一致。')
             etag = before.get('ETag')
             with uploads.job_lock(ident):
-                checkpoint = uploads.load(ident, user).get('verified', {}).get(str(index))
+                saved=uploads.load(ident,user)
+                checkpoint = saved.get('verified', {}).get(str(index))
             read_progress(index, 0, reset=True)
-            if etag and checkpoint == etag:
+            contract = policy(manifest, index)
+            proof = uploads.proofs.get(key, etag, contract)
+            media_info=(proof or {}).get('info') or saved.get('media_infos',{}).get(str(index))
+            if etag and (checkpoint == etag or proof) and (index >= len(manifest['files']) or media_info):
                 read_progress(index, item['size'])
+                with uploads.job_lock(ident):
+                    current = uploads.load(ident, user)
+                    current.setdefault('verified', {})[str(index)] = etag
+                    if index < len(manifest['files']):
+                        current.setdefault('media_infos',{})[str(index)]=media_info
+                    uploads.save(current)
                 return
             version = hashlib.sha256(str(etag).encode()).hexdigest()[:16]
             destination = uploads.service.local / 'upload-validation' / item['sha256'] / version / Path(item['key']).name
@@ -59,6 +71,7 @@ def validate_upload(uploads, ident, user, authorize=None):
             else:
                 uploads.provider.download(key, destination, item['sha256'], item['size'])
                 read_progress(index, item['size'])
+            info = None
             if index < len(manifest['files']):
                 info = uploads.service.probe(destination)
                 if info['codec'] != 'h264' or abs(info['duration_ms'] - item['duration_ms']) > 250:
@@ -76,17 +89,25 @@ def validate_upload(uploads, ident, user, authorize=None):
             after = uploads.provider.head(key)
             if after.get('ETag') != etag or after['ContentLength'] != item['size']:
                 raise HTTPException(409, '核验期间对象版本发生变化，请重试。')
+            uploads.proofs.save(key, etag, contract, destination, info)
             with uploads.job_lock(ident):
                 current = uploads.load(ident, user)
                 current.setdefault('verified', {})[str(index)] = etag
+                if index < len(manifest['files']):
+                    current.setdefault('media_infos',{})[str(index)]=info
                 uploads.save(current)
         try:
             with ThreadPoolExecutor(max_workers=3) as pool:
                 # Consume every result, including errors; publication never races unfinished checks.
                 list(pool.map(verify, range(len(items))))
             permitted()
-            uploads.provider.put_if_absent(manifest['prefix'] + '/manifest.json', document_bytes(manifest))
-            return uploads.public(update(state='ready', validation_error=''))
+            if prepare:
+                return uploads.public(update(state='verified', validation_error=''))
+            checked=uploads.load(ident,user)
+            published=copy.deepcopy(manifest)
+            published['media_metadata']={item['name']:checked['media_infos'][str(i)] for i,item in enumerate(manifest['files'])}
+            uploads.provider.put_if_absent(manifest['prefix'] + '/manifest.json', document_bytes(published))
+            return uploads.public(update(state='ready', validation_error='',manifest=published))
         except Exception as error:
             detail = (error.detail if isinstance(error, HTTPException) and isinstance(error.detail, str)
                       else '采集目录核验未完成，可重试继续；已上传内容保留。')

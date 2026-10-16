@@ -109,7 +109,9 @@ def create_app(*, api='https://api-annotate.reltydynamic.com:8443', root=None, p
     def target(state):
         if not state.get('client'):
             raise HTTPException(401, '请先登录公网上传账号。')
-        return RemoteCaptureTarget(state['client'], service)
+        remote = RemoteCaptureTarget(state['client'], service)
+        remote.pipeline_enabled = state.get('pipeline_enabled',False)
+        return remote
 
     def authorized(state):
         remote = target(state)
@@ -155,7 +157,8 @@ def create_app(*, api='https://api-annotate.reltydynamic.com:8443', root=None, p
                 raise HTTPException(503, '无法连接公网服务，请检查网络。') from None
             if state.get('client'):
                 state['client'].close()
-            state.update(client=client, user=value['user'], selection=None, manager=None, job=None)
+            state.update(client=client, user=value['user'], selection=None, manager=None, job=None,
+                         pipeline_enabled='s3-upload-pipeline-v1' in health.get('capabilities',[]))
         return {'user': value['user']}
 
     install_login_encryption(app, login)
