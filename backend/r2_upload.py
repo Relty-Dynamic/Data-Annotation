@@ -137,7 +137,7 @@ def main():
         username = args.username or input('内网/公网通用账号：').strip()
         password = getpass.getpass('密码（不回显、不保存）：')
         collector = args.collector or input('采集人姓名：').strip()
-        with httpx.Client(base_url=args.api, timeout=180, trust_env=True) as client:
+        with httpx.Client(base_url=args.api, timeout=180, trust_env=False) as client:
             response = client.post('/api/auth/login', json={'username': username, 'password': password}, headers={'Origin': args.api})
             password = None
             if response.status_code != 200:

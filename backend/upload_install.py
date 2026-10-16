@@ -121,7 +121,7 @@ if [ -f "$archive.part" ]; then
 fi
 if [ ! -f "$archive" ] || [ "$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" != "$checksum" ]; then
  echo '正在从 DataMark 下载完整安装包，无需 VPN…'
- curl --fail --location --show-error --retry 3 --continue-at - '{api}/api/r2/uploader/packages/'"$name" -o "$archive.part"
+ curl --noproxy '*' --fail --location --show-error --retry 3 --continue-at - '{api}/api/r2/uploader/packages/'"$name" -o "$archive.part"
  if [ "$(shasum -a 256 "$archive.part" | cut -d ' ' -f 1)" != "$checksum" ]; then rm -f "$archive.part"; echo '安装包校验失败，请重新运行命令。'; exit 1; fi
  mv "$archive.part" "$archive"
 fi
@@ -151,7 +151,7 @@ if (Test-Path ($archive+'.part')) {{
 }}
 if (-not (Test-Path $archive) -or (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $checksum) {{
  Write-Host '正在从 DataMark 下载完整安装包，无需 VPN…'
- & curl.exe --fail --location --show-error --retry 3 --continue-at - ("{api}/api/r2/uploader/packages/$name") -o ($archive+'.part')
+ & curl.exe --noproxy '*' --fail --location --show-error --retry 3 --continue-at - ("{api}/api/r2/uploader/packages/$name") -o ($archive+'.part')
  if ($LASTEXITCODE -ne 0) {{ throw '安装包下载未完成，请再次运行同一命令继续。' }}
  if ((Get-FileHash ($archive+'.part') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $checksum) {{ Remove-Item ($archive+'.part'); throw '安装包校验失败，请重试。' }}
  Move-Item -Force ($archive+'.part') $archive

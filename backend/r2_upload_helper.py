@@ -132,7 +132,7 @@ def create_app(*, api='https://api-annotate.reltydynamic.com:8443', root=None, p
             idle(state)
             client = None
             try:
-                client = (client_factory() if client_factory else httpx.Client(base_url=api, timeout=30, trust_env=True))
+                client = (client_factory() if client_factory else httpx.Client(base_url=api, timeout=30, trust_env=False))
                 health = client.get('/api/health').json()
                 if health.get('mode') != 's3' or health.get('ready') is not True:
                     raise HTTPException(503, '公网 S3 服务尚未就绪。')

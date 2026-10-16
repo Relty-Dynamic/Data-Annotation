@@ -17,7 +17,8 @@ from pathlib import Path
 
 def download(url):
     request=urllib.request.Request(url,headers={'User-Agent':'DataMark-Uploader/1.0'})
-    with urllib.request.urlopen(request,timeout=120) as response:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request,timeout=120) as response:
         return response.read()
 
 

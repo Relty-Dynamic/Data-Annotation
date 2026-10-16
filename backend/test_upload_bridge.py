@@ -129,6 +129,24 @@ class InstallerTests(unittest.TestCase):
 
 
 class AgentTests(unittest.TestCase):
+    def test_selection_failure_keeps_previous_result_and_redacts_network_diagnosis(self):
+        import httpx
+        with tempfile.TemporaryDirectory() as raw:
+            service=SimpleNamespace(local=Path(raw))
+            engine=AgentEngine(Path(raw),None,service=service)
+            engine.job={'id':'previous','owner':USER['id']}
+            previous={'state':'ready','detail':'already published'}
+            engine.manager.jobs['previous']=previous
+            secret='https://storage.example.com/object?token=never-record-this'
+            with patch.object(engine.target,'request',side_effect=httpx.ReadTimeout(secret)),patch('builtins.print'):
+                engine.execute({'id':'select-command','action':'select'})
+            self.assertEqual(previous,{'state':'ready','detail':'already published'})
+            self.assertIn('网络连接或传输超时',engine.report['error'])
+            record=(Path(raw)/'upload-errors.jsonl').read_text()
+            self.assertNotIn('never-record-this',record)
+            self.assertEqual(json.loads(record)['error_type'],'ReadTimeout')
+            self.assertFalse(engine.report['busy'])
+
     def test_duplicate_command_does_not_reopen_native_picker(self):
         with tempfile.TemporaryDirectory() as raw:
             service=SimpleNamespace(local=Path(raw),sessions=SimpleNamespace(close=lambda:None),previews=SimpleNamespace(close=lambda:None))

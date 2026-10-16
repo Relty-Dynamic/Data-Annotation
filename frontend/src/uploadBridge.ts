@@ -2,7 +2,7 @@ import {authFetch} from './auth.ts';
 import {apiOrigin} from './apiOrigin.ts';
 
 export const helperStorageKey='datamark.public-upload.helper.'+apiOrigin;
-export type UploadReport={busy?:boolean;error?:string;selection?:{name:string;capture_date:string;videos:string[];attachments:string[];ignored:string[]};job?:{id?:string;state:string;prefix:string;progress:number;detail:string;prediction?:{sha256:string;segments:number;needs_alignment_review:boolean}}};
+export type UploadReport={busy?:boolean;error?:string;selection?:{name:string;capture_date:string;videos:string[];attachments:string[];ignored:string[]};job?:{id?:string;state:string;prefix:string;progress:number;detail:string;clips_total?:number;clips_verified?:number;prediction_detail?:string;prediction?:{sha256:string;segments:number;needs_alignment_review:boolean}}};
 export type HelperStatus={id:string;online:boolean;update_available?:boolean;platform:string;command:{id:string;action:string}|null;report:UploadReport};
 export async function bridgeRequest<T>(path:string,body?:unknown):Promise<T>{
  const response=await authFetch('/api/r2/'+path,{method:body===undefined?'GET':'POST',headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -22,7 +22,7 @@ export function installCommands(origin:string,userAgent=''){
  const browser=uploadBrowser(userAgent),query=browser?'?browser='+browser:'';
  const url=new URL(origin);
  if(url.protocol!=='https:'||url.origin!==origin||url.username||url.password||!/^[-a-z0-9.]+$/.test(url.hostname))throw new Error('安装地址必须是平台的 HTTPS 地址。');
- return {mac:`curl -fsSL '${origin}/api/r2/uploader/install.sh${query}' | sh`,windows:`irm '${origin}/api/r2/uploader/install.ps1${query}' | iex`};
+ return {mac:`curl --noproxy '*' -fsSL '${origin}/api/r2/uploader/install.sh${query}' | sh`,windows:`$dataMarkInstallScript = & curl.exe --noproxy '*' -fsSL '${origin}/api/r2/uploader/install.ps1${query}'; if ($LASTEXITCODE -ne 0) { throw '安装脚本下载失败，请检查直连网络。' }; & ([scriptblock]::Create(($dataMarkInstallScript -join [Environment]::NewLine)))`};
 }
 export function takeHelperHandoff(location:{hash:string;pathname:string;search:string},replace:(url:string)=>void){
  if(!location.hash.startsWith('#datamark-upload='))return null;

@@ -115,9 +115,9 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
         raise HTTPException(409, '采集目录已有姿势预测，请保留上传原预测，或明确归档后重新生成。')
     for index in job['missing_inputs']:
         source = MockUploadManager._check_local_source(inputs[index])
-        progress(f'正在提交 IMU {index + 1}/{len(inputs)}')
-        with source.open('rb') as stream:
-            target.request('PUT', prefix + f'/inputs/{index}', content=stream, headers={'Content-Length': str(inputs[index]['size'])}, timeout=180)
+        from .prediction_stream import submit_input
+        submit_input(target, prefix + f'/inputs/{index}', source, inputs[index]['size'],
+                     f'正在提交 IMU {index + 1}/{len(inputs)}', progress, cancel)
         MockUploadManager._check_local_source(inputs[index])
     if job['state'] in ('collecting_inputs', 'failed'):
         job = target.request('POST', prefix + '/start')

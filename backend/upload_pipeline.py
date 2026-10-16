@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from .mock_s3 import file_sha256
 from .upload_playback import build
+from .upload_errors import failure_detail
 from . import upload_pipeline_cache as recovery
 
 
@@ -30,16 +31,26 @@ def run(manager, job, user_id, service, can_upload):
     def guarded(function,*args):
         try:return function(*args)
         except Exception as error:
-            with gate:failures.append(error)
+            with gate:
+                first = not failures
+                failures.append(error)
             stop.set()
+            if first:
+                stage = {'predict':'姿势预标注','stage':'视频上传或核验','cache':'播放缓存生成','compress':'视频压缩'}.get(function.__name__, '本机处理')
+                with manager.lock:
+                    job.update(state='error',detail=failure_detail(error, stage))
             raise
     def update(**values):
-        with manager.lock:job.update(values)
+        with manager.lock:
+            if not stop.is_set():job.update(values)
+    def prediction_progress(text):
+        update(prediction_detail=text)
+        if not stop.is_set():target.progress('预标注 · '+text)
     def predict():
         from .prediction_prepare import prepare_prediction
         current,result=prepare_prediction(target,service,selection['root'],selection['folder'],
             {role:options[role+'_device'].strip() for role in ('chest','thigh')},
-            progress=lambda text:target.progress('预标注 · '+text),cancel=check)
+            progress=prediction_progress,cancel=check)
         selection['folder']=current
         update(prediction_result=result)
         return current['attachments']
@@ -52,7 +63,8 @@ def run(manager, job, user_id, service, can_upload):
         with manager.lock:
             if job['state'] not in {'ready_to_compress','error'}:
                 raise HTTPException(409,'上传任务已在处理。')
-            job.update(state='compressing',detail='预标注、压缩与上传正在并行处理。')
+            job.update(state='compressing',progress=0,clips_total=len(job['records']),clips_verified=0,
+                       prediction_detail='',detail='预标注、压缩与上传正在并行处理。')
         prepared.mkdir(parents=True,exist_ok=True)
         # One encoder, one cache builder, one transfer group; the slowest group
         # does not stop earlier groups from preparing the next clip.
@@ -60,7 +72,9 @@ def run(manager, job, user_id, service, can_upload):
             prediction_job=prediction.submit(guarded,predict) if options.get('prediction')=='generate' else None
             def stage(index,bundle):
                 check()
-                remote=type(target)(target.client,service,attachments=initial_attachments if index==0 else [],progress=target.progress)
+                def progress(text):
+                    if not stop.is_set():target.progress(text)
+                remote=type(target)(target.client,service,attachments=initial_attachments if index==0 else [],progress=progress)
                 remote.transfer_progress=target.transfer_progress
                 remote.source_digest=target.source_digest
                 remote.publish_ready(job['prefix'],prepared,bundle,service,prepare=True)
@@ -68,7 +82,8 @@ def run(manager, job, user_id, service, can_upload):
                     completed.update((i['key'],i['sha256']) for i in bundle['files']+bundle.get('attachments',[])+bundle['cache_files'])
                     staged.add(index)
                     count=len(staged)
-                update(detail=f'已有 {count}/{len(job["records"])} 段完成上传核验，继续准备采集。')
+                update(clips_verified=count,progress=round(count/len(job['records'])*95,1),
+                       detail=f'已有 {count}/{len(job["records"])} 段完成上传核验，继续准备采集。')
             def cache(index,item):
                 check()
                 bundle={**copy.deepcopy(metadata),'files':[item]}
@@ -93,7 +108,7 @@ def run(manager, job, user_id, service, can_upload):
                     destination=prepared/record['output'];destination.parent.mkdir(parents=True,exist_ok=True)
                     def progress(percent,number=index+1):
                         if stop.is_set():check()
-                        manager._progress(job,number,percent)
+                        update(detail=f'正在压缩第 {number}/{len(job["records"])} 段视频：{percent:.0f}%。')
                     manager._compress_video(service,source,destination,progress)
                     manager._check_local_source(record)
                     if service.desktop_cache.enabled:
@@ -106,7 +121,7 @@ def run(manager, job, user_id, service, can_upload):
                 for future in cached:future.result()
             for future in sent:future.result()
             if prediction_job and not prediction_job.done():
-                update(state='preparing_prediction',progress=0,detail='视频和缓存已上传核验，正在等待姿势预标注完成。')
+                update(state='preparing_prediction',detail='视频和缓存已上传核验，正在等待姿势预标注完成。')
             target.attachments=prediction_job.result() if prediction_job else initial_attachments
         check()
         manifest={**metadata,'files':[bundles[i]['files'][0] for i in range(len(bundles))],
@@ -118,8 +133,8 @@ def run(manager, job, user_id, service, can_upload):
     except Exception as error:
         stop.set()
         with gate:actual=failures[0] if failures else error
-        detail=actual.detail if isinstance(actual,HTTPException) else '处理未完成，已生成的桌面缓存和已上传内容保留。'
-        update(state='error',detail=detail)
+        with manager.lock:
+            if job['state'] != 'error':job.update(state='error',detail=failure_detail(actual))
         raise actual
     finally:
         shutil.rmtree(workspace,ignore_errors=True)
