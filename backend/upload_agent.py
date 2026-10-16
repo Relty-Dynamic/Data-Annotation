@@ -6,7 +6,7 @@ import os
 import sys
 import threading
 import time
-import webbrowser
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -122,10 +122,39 @@ class AgentEngine:
         self.service.previews.close()
 
 
+def open_handoff(url, browser):
+    """Use only the browser selected by the originating page; never the default."""
+    if not browser:
+        return False
+    try:
+        if sys.platform == 'darwin':
+            apps = {'chrome': 'Google Chrome', 'edge': 'Microsoft Edge',
+                    'firefox': 'Firefox', 'safari': 'Safari'}
+            subprocess.run(['open', '-a', apps[browser], url], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        if sys.platform == 'win32':
+            paths = {'chrome': 'Google/Chrome/Application/chrome.exe',
+                     'edge': 'Microsoft/Edge/Application/msedge.exe',
+                     'firefox': 'Mozilla Firefox/firefox.exe'}
+            relative = paths.get(browser)
+            if relative:
+                for key in ('LOCALAPPDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)'):
+                    base = os.environ.get(key)
+                    executable = Path(base) / relative if base else None
+                    if executable and executable.is_file():
+                        subprocess.Popen([str(executable), url])
+                        return True
+    except (OSError, subprocess.CalledProcessError, KeyError):
+        pass
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--api',default='https://api-annotate.reltydynamic.com:8443')
     parser.add_argument('--frontend',default='https://datamark.reltydynamic.com')
+    parser.add_argument('--browser',choices=['','chrome','edge','firefox','safari'],default='')
     args = parser.parse_args()
     public_origin(args.api,api=True)
     public_origin(args.frontend)
@@ -146,7 +175,10 @@ def main():
             client.headers.update({'Authorization':'Bearer '+registered['token'],'X-Upload-Agent':registered['id']})
             # Single-use association stays out of shell history and server URLs.
             # The website removes the fragment before starting normal requests.
-            webbrowser.open(args.frontend+'/#datamark-upload='+registered['id']+':'+registered['claim'])
+            handoff = args.frontend+'/#datamark-upload='+registered['id']+':'+registered['claim']
+            if not open_handoff(handoff, args.browser):
+                print('请在原来已登录的浏览器中打开以下一次性关联地址（请勿分享）：')
+                print(handoff)
             print('本机组件已就绪，请回到 DataMark 原页面关联并上传。无需再次输入密码。')
             print('请保持此终端开启；按 Ctrl+C 停止组件。')
             while True:

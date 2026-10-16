@@ -8,6 +8,7 @@ import os
 import zipfile
 from pathlib import Path
 
+from fastapi import HTTPException
 from fastapi.responses import Response
 
 MAC_TOOLS = {
@@ -29,7 +30,14 @@ def bundle(root):
     return buffer.getvalue()
 
 
-def shell(api,frontend):
+def browser_argument(browser):
+    if browser not in {'', 'chrome', 'edge', 'firefox', 'safari'}:
+        raise HTTPException(422, '浏览器参数无效。')
+    return " --browser '" + browser + "'" if browser else ''
+
+
+def shell(api,frontend,browser=''):
+    argument = browser_argument(browser)
     return f'''#!/bin/sh
 set -eu
 root="$HOME/Desktop/DataMarkUploader"
@@ -47,11 +55,12 @@ if [ ! -x "$root/.venv/bin/python" ]; then
 fi
 "$root/.tools/uv/uv" --no-config pip install --python "$root/.venv/bin/python" --index-url https://pypi.tuna.tsinghua.edu.cn/simple 'pip==26.2.1'
 curl --fail --location --show-error '{api}/api/r2/uploader/bootstrap.py' -o "$root/.tmp/bootstrap.py"
-exec "$root/.venv/bin/python" "$root/.tmp/bootstrap.py" --root "$root" --api '{api}' --frontend '{frontend}'
+exec "$root/.venv/bin/python" "$root/.tmp/bootstrap.py" --root "$root" --api '{api}' --frontend '{frontend}'{argument}
 '''
 
 
-def powershell(api,frontend):
+def powershell(api,frontend,browser=''):
+    argument = browser_argument(browser)
     return f'''$ErrorActionPreference = 'Stop'
 $root = Join-Path ([Environment]::GetFolderPath('Desktop')) 'DataMarkUploader'
 $names = @('UV_INSTALL_DIR','UV_NO_MODIFY_PATH','UV_NO_CONFIG','UV_PYTHON_INSTALL_DIR','UV_PYTHON_BIN_DIR','UV_CACHE_DIR','PYTHONNOUSERSITE','PIP_REQUIRE_VIRTUALENV','PIP_CACHE_DIR','TEMP','TMP')
@@ -71,7 +80,7 @@ try {{
  if ($LASTEXITCODE -ne 0) {{ throw 'pip installation failed' }}
  $bootstrap=Join-Path $root '.tmp/bootstrap.py'
  Invoke-WebRequest -UseBasicParsing '{api}/api/r2/uploader/bootstrap.py' -OutFile $bootstrap
- & $python $bootstrap --root $root --api '{api}' --frontend '{frontend}'
+ & $python $bootstrap --root $root --api '{api}' --frontend '{frontend}'{argument}
  if ($LASTEXITCODE -ne 0) {{ throw 'DataMark uploader installation or startup failed' }}
 }} finally {{ foreach ($name in $names) {{ [Environment]::SetEnvironmentVariable($name,$saved[$name],'Process') }} }}
 '''
@@ -92,12 +101,12 @@ def install(app,root):
         return Response(package,media_type='application/zip')
 
     @app.get('/api/r2/uploader/install.sh')
-    def mac_installer():
-        return Response(shell(api,frontend),media_type='text/plain')
+    def mac_installer(browser: str = ''):
+        return Response(shell(api,frontend,browser),media_type='text/plain')
 
     @app.get('/api/r2/uploader/install.ps1')
-    def windows_installer():
-        return Response(powershell(api,frontend),media_type='text/plain')
+    def windows_installer(browser: str = ''):
+        return Response(powershell(api,frontend,browser),media_type='text/plain')
 
     @app.get('/api/r2/uploader/bootstrap.py')
     def bootstrap():

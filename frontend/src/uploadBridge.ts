@@ -11,10 +11,18 @@ export async function bridgeRequest<T>(path:string,body?:unknown):Promise<T>{
  if(!response.ok)throw new Error(typeof value?.detail==='string'?value.detail:'上传服务暂不可用。');
  return value as T;
 }
-export function installCommands(origin:string){
+export function uploadBrowser(userAgent:string){
+ if(/Edg\//.test(userAgent))return 'edge';
+ if(/Chrome\//.test(userAgent))return 'chrome';
+ if(/Firefox\//.test(userAgent))return 'firefox';
+ if(/Safari\//.test(userAgent))return 'safari';
+ return '';
+}
+export function installCommands(origin:string,userAgent=''){
+ const browser=uploadBrowser(userAgent),query=browser?'?browser='+browser:'';
  const url=new URL(origin);
  if(url.protocol!=='https:'||url.origin!==origin||url.username||url.password||!/^[-a-z0-9.]+$/.test(url.hostname))throw new Error('安装地址必须是平台的 HTTPS 地址。');
- return {mac:`curl -fsSL '${origin}/api/r2/uploader/install.sh' | sh`,windows:`irm '${origin}/api/r2/uploader/install.ps1' | iex`};
+ return {mac:`curl -fsSL '${origin}/api/r2/uploader/install.sh${query}' | sh`,windows:`irm '${origin}/api/r2/uploader/install.ps1${query}' | iex`};
 }
 export function takeHelperHandoff(location:{hash:string;pathname:string;search:string},replace:(url:string)=>void){
  if(!location.hash.startsWith('#datamark-upload='))return null;
