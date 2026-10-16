@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import uuid
 from contextlib import closing, contextmanager
@@ -168,8 +169,8 @@ class TaskStore:
                     raise TaskError(422, '交通工具规则不正确')
                 if isinstance(axis.get('minimum_ms', 0), bool) or not isinstance(axis.get('minimum_ms', 0), (int, float)) or not math.isfinite(axis.get('minimum_ms', 0)) or axis.get('minimum_ms', 0) < 0:
                     raise TaskError(422, '最短片段时长不正确')
-            tolerance = body.get('boundary_tolerance_ms', 0)
-            if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not math.isfinite(tolerance) or tolerance < 0:
+            tolerance = body.get('boundary_tolerance_ms')
+            if tolerance is not None and (isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not math.isfinite(tolerance) or tolerance < 0):
                 raise TaskError(422, '边界容差不正确')
             obj = {**body, 'name': clean_name(body['name']), 'axes': axes, 'id': uid(), 'published_at': stamp(), 'published_by': actor['id'], 'boundary_tolerance_ms': tolerance}
             self._save(db, 'rules', obj, True)
@@ -263,7 +264,7 @@ class TaskStore:
             for key in ('final_annotations', 'contributors', 'final_version_id', 'resolutions'):
                 obj.pop(key, None)
         obj['rule'] = self._read(db, 'rules', task['rule_id'])
-        obj['video'] = self._read(db, 'videos', task['video_id'])
+        obj['video'] = self._task_video(db, task)
         return obj
 
     def list_tasks(self, actor, *, include_deleted=False):
@@ -310,11 +311,64 @@ class TaskStore:
             if account.get('role') != 'admin':
                 raise TaskError(422, '仅超级管理员可以复核自己的标注')
 
-    def create_task(self, actor, body, *, participants=None):
+    @staticmethod
+    def _collection_key(video):
+        source = video['source']
+        ident = video.get('collection_id')
+        if not ident:
+            match = re.fullmatch(r'([0-9a-f]{32})/v[0-9]{4}', source['key'])
+            ident = match[1] if match else None
+        return (source['backend'], ident) if ident else None
+
+    def _task_materials(self, db, body):
+        if body.get('video_id'):
+            first = self._read(db, 'videos', body['video_id'])
+            key = self._collection_key(first)
+            if key is None:
+                return [first], None
+        else:
+            key = (body.get('storage_backend'), body.get('collection_id'))
+            if not all(isinstance(value, str) and value for value in key):
+                raise TaskError(422, '请选择完整采集文件夹')
+        members = [value for row in db.execute('SELECT body FROM videos')
+                   if self._collection_key(value := json.loads(row[0])) == key]
+        if not members:
+            raise TaskError(404, '采集文件夹尚未登记')
+        return members, key
+
+    def task_materials(self, actor, body):
+        with self.db() as db:
+            self._require(db, actor, 'leader')
+            return self._task_materials(db, body)
+
+    def _task_video(self, db, task):
+        if not task.get('collection'):
+            return self._read(db, 'videos', task['video_id'])
+        capture = task['collection']
+        members = [self._read(db, 'videos', item['id']) for item in capture['videos']]
+        return {**members[0], 'id': task['video_id'], 'collection_id': capture['id'],
+                'collection_name': capture['name'], 'video_name': capture['name'],
+                'duration_ms': capture['duration_ms'], 'recording_start': capture['recording_start'],
+                'video_count': len(members), 'videos': capture['videos'],
+                'quality': 'passed' if all(item['quality'] == 'passed' for item in members) else 'unknown'}
+
+    def create_task(self, actor, body, *, participants=None, collection_layout=None):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._require(db, actor, 'leader')
-            video = self._read(db, 'videos', body.get('video_id'))
+            members, collection_key = self._task_materials(db, body)
+            video = members[0]
+            if collection_key:
+                layout = collection_layout
+                if (not isinstance(layout, dict) or layout.get('id') != collection_key[1]
+                        or layout.get('backend') != collection_key[0]
+                        or {item['id'] for item in layout.get('videos', [])} != {item['id'] for item in members}):
+                    raise TaskError(409, '采集素材已变化，请刷新后按完整采集创建任务')
+                current = {item['id']: item for item in members}
+                if any(current[item['id']]['source'] != item['source'] or current[item['id']]['duration_ms'] != item['duration_ms'] for item in layout['videos']):
+                    raise TaskError(409, '采集素材信息已变化，请重新创建任务')
+                members = [current[item['id']] for item in layout['videos']]
+                video = members[0]
             rule = self._read(db, 'rules', body.get('rule_id'))
             if db.execute('SELECT 1 FROM deleted_rules WHERE id=?', (rule['id'],)).fetchone():
                 raise TaskError(409, '规则已删除，请选择其他已发布规则')
@@ -328,16 +382,19 @@ class TaskStore:
             except (KeyError, ValueError, AttributeError):
                 raise TaskError(422, '请填写有效截止时间')
             if annotators:
-                if video['quality'] != 'passed' or not reviewer:
+                if any(item['quality'] != 'passed' for item in members) or not reviewer:
                     raise TaskError(409, '视频必须质检合格，并指定复核员')
                 for person, role in [(u, 'annotator') for u in annotators] + [(reviewer, 'reviewer')]:
                     participant = (participants or {}).get(person, actor if person == actor['id'] else {'id': person})
                     self._require(db, participant, role)
             for row in db.execute('SELECT body FROM tasks'):
                 old = json.loads(row[0])
-                if old['status'] != 'deleted' and old['video_id'] == video['id'] and old['task_type'] == rule['task_type']:
-                    raise TaskError(409, '该视频已有相同类型任务')
+                old_members = old.get('video_ids', [old['video_id']])
+                if old['status'] != 'deleted' and set(old_members).intersection(item['id'] for item in members) and old['task_type'] == rule['task_type']:
+                    raise TaskError(409, '该采集已有相同类型任务，或包含尚未删除的旧逐段任务')
             task = {'id': uid(), 'video_id': video['id'], 'rule_id': rule['id'], 'task_type': rule['task_type'], 'annotator_ids': annotators, 'reviewer_id': reviewer, 'deadline': body['deadline'], 'status': 'annotating' if annotators else 'pending', 'revision': 0, 'current_submissions': {}, 'issues': [], 'created_by': actor['id'], 'created_at': stamp()}
+            if collection_key:
+                task.update(collection=collection_layout, video_ids=[item['id'] for item in members])
             self._save(db, 'tasks', task, True)
             self._audit(db, actor, 'create_task', task['id'])
             return self._view(db, actor, task)
@@ -406,18 +463,18 @@ class TaskStore:
             annotations = body.get('annotations')
             if not isinstance(annotations, dict):
                 raise TaskError(422, '请提供标注内容')
-            errors = validate_annotations(annotations, self._read(db, 'rules', task['rule_id']), self._read(db, 'videos', task['video_id'])['duration_ms'], draft=True)
+            errors = validate_annotations(annotations, self._read(db, 'rules', task['rule_id']), self._task_video(db, task)['duration_ms'], draft=True, recording_runs=task.get('collection', {}).get('recording_runs'))
             if errors:
                 raise TaskError(422, {'errors': errors})
             db.execute('INSERT INTO drafts VALUES (?,?,?) ON CONFLICT(task_id,user_id) DO UPDATE SET body=excluded.body', (id, actor['id'], json.dumps({'annotations': annotations}, ensure_ascii=False)))
             return self._finish(db, actor, task, 'save_draft')
 
     def _quality(self, db, task):
-        if self._read(db, 'videos', task['video_id'])['quality'] != 'passed':
+        if self._task_video(db, task)['quality'] != 'passed':
             raise TaskError(409, '视频尚未质检合格')
 
     def _annotations(self, db, task, annotations):
-        errors = validate_annotations(annotations, self._read(db, 'rules', task['rule_id']), self._read(db, 'videos', task['video_id'])['duration_ms'])
+        errors = validate_annotations(annotations, self._read(db, 'rules', task['rule_id']), self._task_video(db, task)['duration_ms'], recording_runs=task.get('collection', {}).get('recording_runs'))
         if errors:
             raise TaskError(422, {'errors': errors})
         for axis in self._read(db, 'rules', task['rule_id'])['axes']:
@@ -484,7 +541,8 @@ class TaskStore:
                 raise TaskError(409, '任务尚未完成提交')
             task['status'] = 'reviewing'
             current = [self._read(db, 'submissions', task['current_submissions'][u])['annotations'] for u in task['annotator_ids']]
-            issues = differences(current[0], current[1], self._read(db, 'rules', task['rule_id'])['boundary_tolerance_ms']) if len(current) == 2 else []
+            tolerance = self._read(db, 'rules', task['rule_id']).get('boundary_tolerance_ms', 0)
+            issues = differences(current[0], current[1], tolerance) if len(current) == 2 and tolerance is not None else []
             for u, annotations in zip(task['annotator_ids'], current):
                 for axis, segments in annotations.items():
                     for segment in segments:
@@ -516,7 +574,7 @@ class TaskStore:
             if not isinstance(issues, list) or not isinstance(notes, list) or any(not isinstance(i, dict) or not isinstance(i.get('reason'), str) or not i['reason'].strip() or len(i['reason']) > 2000 or not i.get('axis') or not (i.get('segment_id') or ('start_ms' in i and 'end_ms' in i)) for i in issues + notes):
                 raise TaskError(422, '复核意见必须包含原因及片段或时间范围')
             rule_axes = {a['id'] for a in self._read(db, 'rules', task['rule_id'])['axes']}
-            duration = self._read(db, 'videos', task['video_id'])['duration_ms']
+            duration = self._task_video(db, task)['duration_ms']
             for issue in issues + notes:
                 if issue['axis'] not in rule_axes:
                     raise TaskError(422, '复核意见的时间轴不存在')
@@ -638,14 +696,19 @@ class TaskStore:
                 if actor['id'] in task['annotator_ids'] or task['status'] != 'accepted' or revisions.get(task['id']) != task['revision']:
                     raise TaskError(409, '仅可交付版本一致且已验收的任务')
             fields = ['video_id','collector_id','uploader_id','final_version_id','task_type','rule_id','axis','segment_id','lane','start_seconds','end_seconds','start_ms','end_ms','label','transport_type','annotators','reviewer','adjudicator']
+            fields += ['collection_id','collection_name','video_ids','recording_start']
             stream = io.StringIO(newline='')
             writer = csv.DictWriter(stream, fieldnames=fields)
             writer.writeheader()
             for task in tasks:
-                video = self._read(db, 'videos', task['video_id'])
+                video = self._task_video(db, task)
                 for axis, segments in task['final_annotations'].items():
                     for s in segments:
-                        writer.writerow({'video_id': task['video_id'], 'collector_id': video['collector_id'], 'uploader_id': video['uploader_id'], 'final_version_id': task['final_version_id'], 'task_type': task['task_type'], 'rule_id': task['rule_id'], 'axis': axis, 'segment_id': s['id'], 'lane': s.get('lane',0), 'start_seconds': f'{s["start_ms"]/1000:.1f}', 'end_seconds': f'{s["end_ms"]/1000:.1f}', 'start_ms': s['start_ms'], 'end_ms': s['end_ms'], 'label': s['label'], 'transport_type': s.get('transport_type',''), 'annotators': '|'.join(task['contributors'][axis+':'+s['id']]), 'reviewer': task.get('reviewed_by',task['reviewer_id']), 'adjudicator': task.get('adjudicated_by','')})
+                        writer.writerow({'video_id': task['video_id'], 'collector_id': video['collector_id'], 'uploader_id': video['uploader_id'], 'final_version_id': task['final_version_id'], 'task_type': task['task_type'], 'rule_id': task['rule_id'], 'axis': axis, 'segment_id': s['id'], 'lane': s.get('lane',0), 'start_seconds': f'{s["start_ms"]/1000:.1f}', 'end_seconds': f'{s["end_ms"]/1000:.1f}', 'start_ms': s['start_ms'], 'end_ms': s['end_ms'], 'label': s['label'], 'transport_type': s.get('transport_type',''), 'annotators': '|'.join(task['contributors'][axis+':'+s['id']]), 'reviewer': task.get('reviewed_by',task['reviewer_id']), 'adjudicator': task.get('adjudicated_by',''),
+                                         'collection_id':task.get('collection',{}).get('id',''),
+                                         'collection_name':task.get('collection',{}).get('name',''),
+                                         'video_ids':'|'.join(task.get('video_ids',[task['video_id']])),
+                                         'recording_start':task.get('collection',{}).get('recording_start','')})
             did = uid()
             key = f'deliveries/{did}.csv'
             content = stream.getvalue().encode('utf-8-sig')

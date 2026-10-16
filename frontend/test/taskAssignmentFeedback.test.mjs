@@ -14,7 +14,7 @@ test('partial failures preserve progress and stop before later requests',async()
  const calls=[];
  await assert.rejects(createTaskBatch(['a','b','c'],false,async id=>{
   calls.push(id);if(id==='b')throw new Error('该视频已有相同类型任务');
- }),/已分配 1\/3 个任务；视频 b 未成功：该视频已有相同类型任务/);
+ }),/已分配 1\/3 个任务；采集 b 未成功：该视频已有相同类型任务/);
  assert.deepEqual(calls,['a','b']);
- await assert.rejects(createTaskBatch([],false,async()=>assert.fail()),/请先选择合格视频/);
+ await assert.rejects(createTaskBatch([],false,async()=>assert.fail()),/请先选择完整且质检合格的采集文件夹/);
 });

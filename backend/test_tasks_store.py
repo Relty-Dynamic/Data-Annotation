@@ -36,7 +36,8 @@ class TasksTests(unittest.TestCase):
         self.reviewer = {'id':'reviewer','role':'annotator'}
         for actor, roles in ((self.lead,['leader']), (self.a,['annotator']), (self.b,['annotator']), (self.reviewer,['reviewer'])):
             self.store.set_roles(self.admin, actor['id'], roles)
-        self.rule = self.store.publish_rule(self.lead, {'name':'rule','task_type':'posture','axes':[{'id':'posture','name':'Posture','mode':'state','labels':['sit','bus'],'transport_labels':['bus'],'transport_types':['car']}]})
+        # Existing comparison tests explicitly retain the former strict rule.
+        self.rule = self.store.publish_rule(self.lead, {'name':'rule','task_type':'posture','boundary_tolerance_ms':0,'axes':[{'id':'posture','name':'Posture','mode':'state','labels':['sit','bus'],'transport_labels':['bus'],'transport_types':['car']}]})
         self.store.register_video(self.admin, {'video_id':'v','collector_id':'collector','date':'2026-10-15','scene':'inside','duration_ms':10000,'source':{'backend':'nas','key':'v'},'quality':'passed'})
 
     def test_collection_registration_is_atomic_and_preserves_existing_metadata(self):
@@ -260,6 +261,30 @@ class TasksTests(unittest.TestCase):
         shifted={'a':[{'id':'x','label':'sit','start_ms':1,'end_ms':1001,'lane':1}]}
         self.assertEqual([],differences(one,shifted,2))
         self.assertTrue(differences(one,shifted))
+
+    def test_new_rule_defaults_to_manual_review_and_preserves_flags(self):
+        body={'name':'manual','task_type':'manual','axes':self.rule['axes']}
+        self.rule=self.store.publish_rule(self.lead,body)
+        self.assertIsNone(self.rule['boundary_tolerance_ms'])
+        task=self.task(True)
+        annotations=self.annotations()
+        annotations['posture'][0].update(needs_review=True,review_reason='请人工确认')
+        task=self.mutate('submit',self.a,task,annotations=annotations)
+        task=self.mutate('submit',self.b,task,annotations={})
+        task=self.mutate('start_review',self.reviewer,task)
+        self.assertEqual(task['status'],'reviewing')
+        self.assertTrue(any(issue['id'].startswith('flag:') for issue in task['issues']))
+        self.assertFalse(any(issue['id'].startswith('difference:') for issue in task['issues']))
+
+    def test_explicit_tolerance_and_invalid_values_remain_checked(self):
+        body={'name':'tolerance','task_type':'tolerance','axes':self.rule['axes']}
+        for value in (0,500,None):
+            with self.subTest(value=value):
+                rule=self.store.publish_rule(self.lead,{**body,'boundary_tolerance_ms':value})
+                self.assertEqual(rule['boundary_tolerance_ms'],value)
+        for value in (-1,True,'none',float('nan'),float('inf')):
+            with self.subTest(value=value):
+                self.expect(422,lambda:self.store.publish_rule(self.lead,{**body,'boundary_tolerance_ms':value}))
 
     def test_minimum_unclosed_and_final_artifact_failure(self):
         rule=self.store.publish_rule(self.lead,{'name':'short','task_type':'short','axes':[{'id':'a','name':'a','mode':'event','labels':['x'],'minimum_ms':1000}]})

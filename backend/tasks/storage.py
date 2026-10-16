@@ -82,7 +82,7 @@ class ProjectMedia:
         if not video or body.get('duration_ms') != video['duration_ms']:
             raise HTTPException(422, '视频时长或编号与素材不一致。')
         self.service.media_source(project, video['id'])
-        return {**body, 'collection_id': project['id'], 'collection_name': collection_name(project), 'video_name': video['name']}
+        return {**body, 'collection_id': project['id'], 'collection_name': collection_name(project), 'collection_video_count': len(project['videos']), 'video_name': video['name']}
 
     def catalog(self, actor):
         if not actor.get('can_upload'):
@@ -106,6 +106,35 @@ class ProjectMedia:
             raise HTTPException(404, '任务视频不存在。')
         path, metadata = self.service.media_source(project, video['id'])
         return path, metadata, video
+
+    def task_collection(self, records):
+        """Freeze the complete source timeline; filenames are not summed end to end."""
+        first = records[0]
+        match = re.fullmatch(r'([0-9a-f]{32})/(v[0-9]{4})', first['source']['key'])
+        if not match:
+            raise HTTPException(422, '采集素材必须来自已导入的完整项目')
+        project = self.service.load(match[1])
+        by_source = {item['source']['key']: item for item in records}
+        expected = {project['id']+'/'+video['id'] for video in project['videos']}
+        if set(by_source) != expected or any(item['source']['backend'] != self.backend for item in records):
+            raise HTTPException(409, '采集文件夹的视频尚未全部登记，请先完成整个文件夹的登记')
+        members = []
+        runs = []
+        for video in sorted(project['videos'], key=lambda item: (item['start_ms'],item['id'])):
+            record = by_source[project['id']+'/'+video['id']]
+            _, metadata = self.service.media_source(project,video['id'])
+            if video['duration_ms'] != record['duration_ms']:
+                raise HTTPException(409, '登记的视频时长与当前素材不一致')
+            members.append({**record,'start_ms':video['start_ms'],'end_ms':video['end_ms'],
+                            'recording_start':video['recording_start']})
+            if runs and runs[-1]['end_ms'] == video['start_ms']:
+                runs[-1]['end_ms'] = video['end_ms']
+            else:
+                runs.append({'start_ms':video['start_ms'],'end_ms':video['end_ms']})
+        return {'id':project['id'],'backend':self.backend,'name':collection_name(project),
+                'duration_ms':project['duration_ms'],'recording_start':project['recording_start'],
+                'source_fingerprint':project['source_fingerprint'],'videos':members,'recording_runs':runs,
+                'gaps':project.get('gaps',[])}
 
 
 class UnavailableMedia:

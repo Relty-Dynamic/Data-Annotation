@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {sourceCollections,registeredCollections} from '../src/tasks/collections.ts';
+import {sourceCollections,registeredCollections,assignmentCollections} from '../src/tasks/collections.ts';
 const source=(project,video,backend='s3')=>({id:`${project}/${video}`,name:`${video}.mp4`,collection:'1001lixin',collection_id:project,duration_ms:1000,source:{backend,key:`${project}/${video}`}});
 const video=(source,fields={})=>({id:source.id,source:source.source,quality:'passed',...fields});
+test('assignment eligibility requires every clip registered and passed, never a qualified subset',()=>{
+ const sources=[source('a','v1'),source('a','v2')];
+ assert.equal(assignmentCollections([video(sources[0])],sources)[0].eligible,false);
+ assert.equal(assignmentCollections([video(sources[0]),video(sources[1],{quality:'failed'})],sources)[0].eligible,false);
+ const complete=assignmentCollections(sources.map(s=>video(s)),sources);
+ assert.equal(complete.length,1);assert.equal(complete[0].eligible,true);assert.equal(complete[0].videos.length,2);
+});
 test('collection carries uploaded collector without guessing names for legacy or NAS sources',()=>{
  const sources=[{...source('a','v1'),collector_name:'李鑫'},{...source('a','v2'),collector_name:'李鑫'},source('b','v1','nas')];
  const groups=sourceCollections(sources,[]);

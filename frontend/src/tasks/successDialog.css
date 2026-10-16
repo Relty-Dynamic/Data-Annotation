@@ -1,0 +1,12 @@
+.task-success-dialog{position:fixed;box-sizing:border-box;width:min(440px,calc(100vw - 32px));max-height:calc(100dvh - 40px);margin:auto;padding:32px 28px 24px;overflow:auto;color:#dde8ed;background:linear-gradient(145deg,#202e35,#182128 68%);border:1px solid #40565b;border-radius:18px;box-shadow:0 24px 90px #0009;font-family:inherit;text-align:center;overflow-wrap:anywhere}
+.task-success-dialog::backdrop{background:#070e15bb;backdrop-filter:blur(5px)}
+.task-success-dialog button.task-success-close{position:absolute;top:12px;right:12px;display:grid;place-items:center;width:30px;height:30px;margin:0;padding:0;border:0;border-radius:8px;background:transparent;color:#91a6ae;cursor:pointer}
+.task-success-dialog button.task-success-close:hover{color:#e1f2f0;background:#ffffff0b}
+.task-success-symbol{display:grid;place-items:center;width:60px;height:60px;margin:0 auto 20px;color:#8fe2c6;background:#2a685b35;border:1px solid #4fa38b66;border-radius:50%;box-shadow:0 0 0 7px #65d3b007}
+.task-success-dialog .task-success-copy h3{margin:0;color:#ecf5f4;font-size:20px;font-weight:600;letter-spacing:.02em}
+.task-success-dialog .task-success-copy p{margin:12px 0 0;color:#a9bec5;font-size:14px;line-height:1.8;white-space:pre-line}
+.task-success-actions{display:flex;justify-content:center;margin-top:26px;padding-top:20px;border-top:1px solid #ffffff0c}
+.task-success-dialog button.task-success-confirm{min-width:136px;margin:0;padding:10px 24px;border:1px solid #76cdb4;border-radius:9px;color:#102e26;background:#85d8bd;font:inherit;font-size:14px;font-weight:600;cursor:pointer}
+.task-success-dialog button.task-success-confirm:hover{background:#9ce5ce;border-color:#9ce5ce}
+.task-success-dialog button:focus-visible{outline:2px solid #a0e3d0;outline-offset:4px}
+@media(max-width:480px){.task-success-dialog{padding:30px 20px 20px;border-radius:14px}.task-success-actions>button{width:100%}}

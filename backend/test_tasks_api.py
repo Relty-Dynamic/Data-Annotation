@@ -685,6 +685,40 @@ class TaskHostTests(unittest.TestCase):
             self.request(client, 'POST', '/sources/import', {'paths': [str(video)]}, headers, 409)
 
 
+    def test_complete_collection_api_opens_all_clips_and_rejects_partial_registration(self):
+        app,client=self.host()
+        initial=self.initialize(app,client)
+        admin=self.login(client,'admin')
+        self.request(client,'DELETE','/items/'+initial['id'],{'expected_revision':initial['revision']},admin)
+        project=app.state.service.load(self.project['id'])
+        path=self.root/'nas'/'second.mp4';path.write_bytes(b'isolated-second-video-fixture')
+        project['videos'].append({**project['videos'][0],'id':'v0002','name':'second.mp4',
+            'relative_path':'second.mp4','duration_ms':1000,'start_ms':12000,'end_ms':13000,
+            'recording_start':'2026-10-15T00:00:12+08:00'})
+        project['_sources']['v0002']={'path':str(path),'stamp':{'size':path.stat().st_size,'mtime_ns':path.stat().st_mtime_ns}}
+        project.update(duration_ms=13000,gaps=[{'start_ms':10000,'end_ms':12000}])
+        app.state.service.save(project)
+        body={'collection_id':project['id'],'storage_backend':'nas','rule_id':initial['rule_id'],
+              'annotator_ids':[self.users['a']['id']],'reviewer_id':self.users['reviewer']['id'],'deadline':'2026-10-26'}
+        lead=self.login(client,'lead')
+        self.request(client,'POST','/items',body,lead,409)
+        admin=self.login(client,'admin')
+        self.request(client,'POST','/videos',{**self.video,'video_id':'second','duration_ms':1000,
+            'source':{'backend':'nas','key':project['id']+'/v0002'}},admin)
+        lead=self.login(client,'lead')
+        task=self.request(client,'POST','/items',body,lead)
+        self.assertEqual(task['video']['video_count'],2)
+        self.assertEqual(len(self.request(client,'GET','/items')),1)
+        annotator=self.login(client,'a')
+        endpoint='/items/'+task['id']+'/workspace/project'
+        workspace=self.request(client,'GET',endpoint)
+        self.assertEqual([(v['start_ms'],v['end_ms']) for v in workspace['videos']],[(0,10000),(12000,13000)])
+        anns={'posture':[{'id':'last','label':'坐','start_ms':12000,'end_ms':13000}]}
+        self.request(client,'PUT',endpoint+'/draft',{'expected_revision':task['revision'],'annotations':anns},annotator)
+        self.assertEqual(self.request(client,'GET',endpoint)['annotations']['posture'],anns['posture'])
+        self.assertEqual(self.request(client,'GET','/items/'+task['id']+'/workspace/previews/v0002')['state'],'queued')
+
+
 class ArtifactContractTests(unittest.TestCase):
     def test_file_artifacts_immutable_safe_keys_and_readback(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -19,7 +19,19 @@ class Workspaces:
 
     def project(self, actor, task_id):
         task = self.store.get_task(actor, task_id)
-        path, metadata, original = self.media.resolve(task['video']['source'])
+        capture = task.get('collection')
+        members = capture['videos'] if capture else [task['video']]
+        resolved = []
+        for index, member in enumerate(members):
+            path, metadata, original = self.media.resolve(member['source'])
+            if original['duration_ms'] != member['duration_ms']:
+                raise HTTPException(409, '任务素材时长已变化，无法恢复原标注坐标')
+            start = member['start_ms'] if capture else 0
+            end = member['end_ms'] if capture else member['duration_ms']
+            if capture and (original['start_ms'] != start or original['end_ms'] != end):
+                raise HTTPException(409, '采集素材录制时间已变化，请核对任务素材')
+            video_id = f'v{index + 1:04d}'
+            resolved.append((video_id, member, path, metadata, original, start, end))
         ident = hashlib.sha256((task_id + ':' + actor['id']).encode()).hexdigest()[:32]
         with self.lock:
             try:
@@ -27,29 +39,38 @@ class Workspaces:
             except HTTPException as error:
                 if error.status_code != 404:
                     raise
-                video = {**original, 'id': 'v0001', 'start_ms': 0, 'end_ms': task['video']['duration_ms'],
-                         'relative_path': path.name, 'url': f'/api/media/{ident}/v0001',
-                         'thumbnail_url': f'/api/thumbnails/{ident}/v0001'}
-                source = {**metadata, 'path': str(path)}
-                source.pop('cache_directory', None)
+                videos, sources = [], {}
+                for video_id, member, path, metadata, original, start, end in resolved:
+                    videos.append({**original, 'id': video_id, 'start_ms': start, 'end_ms': end,
+                        'relative_path': path.name, 'url': f'/api/media/{ident}/{video_id}',
+                        'thumbnail_url': f'/api/thumbnails/{ident}/{video_id}'})
+                    source = {**metadata, 'path': str(path)}
+                    source.pop('cache_directory', None)
+                    sources[video_id] = source
                 axes = task['rule']['axes']
-                project = {'id': ident, 'name': task['video']['id'] + ' · ' + task['task_type'],
-                    'duration_ms': video['duration_ms'], 'recording_start': video['recording_start'], 'gaps': [],
-                    'source_dir': None, 'source_fingerprint': digest(document_bytes([video, source['stamp']])),
-                    'videos': [video], '_sources': {'v0001': source}, '_external_hashes': {a: None for a in AXES},
+                project = {'id': ident, 'name': task['video'].get('collection_name',task['video']['id']) + ' · ' + task['task_type'],
+                    'duration_ms': task['video']['duration_ms'],
+                    'recording_start': capture['recording_start'] if capture else videos[0]['recording_start'],
+                    'gaps': capture.get('gaps',[]) if capture else [],
+                    'source_dir': None, 'source_fingerprint': digest(document_bytes([videos, sources])),
+                    'videos': videos, '_sources': sources, '_external_hashes': {a: None for a in AXES},
                     'annotations': empty_annotations(), 'fixed_tracks': [a['id'] for a in axes if a['id'] in AXES],
                     'selected_tracks': [a['id'] for a in axes],
                     'custom_tracks': [{k: a[k] for k in ('id','name','mode','labels')} for a in axes if a['id'] not in AXES],
-                    'track_labels': {**copy.deepcopy(DEFAULT_TRACK_LABELS), **{a['id']: a['labels'] for a in axes if a['id'] in AXES}},
-                    'track_names': {a['id']: a['name'] for a in axes if a['id'] in AXES},
+                    'track_labels': {**copy.deepcopy(DEFAULT_TRACK_LABELS), **{a['id']: a['labels'] for a in axes}},
+                    'track_names': {a['id']: a['name'] for a in axes},
                     'revision': 0, 'updated_at': now(), 'draft_dirty': False, '_task_id': task_id,
-                    'collection_folder_name': 'task-' + task_id, '_task_actor': actor['id']}
+                    'collection_folder_name': capture['name'] if capture else 'task-' + task_id, '_task_actor': actor['id']}
                 for axis in project['custom_tracks']:
                     project['annotations'][axis['id']] = []
                 self.service.save(project)
-        if metadata.get('r2_playback') and project['_sources']['v0001'].get('r2_playback') != metadata['r2_playback']:
-            project['_sources']['v0001']['r2_playback'] = copy.deepcopy(metadata['r2_playback'])
-            self.service.save(project)
+            changed = False
+            for video_id, member, path, metadata, original, start, end in resolved:
+                if metadata.get('r2_playback') and project['_sources'][video_id].get('r2_playback') != metadata['r2_playback']:
+                    project['_sources'][video_id]['r2_playback'] = copy.deepcopy(metadata['r2_playback'])
+                    changed = True
+            if changed:
+                self.service.save(project)
         project = copy.deepcopy(project)
         own_submission = task.get('current_submissions', {}).get(actor['id'])
         annotations = (task.get('draft') or {}).get('annotations')
