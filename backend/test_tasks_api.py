@@ -1,5 +1,6 @@
 """Optional task hosts share accounts and the editor without touching NAS drafts."""
 import hashlib
+import json
 import subprocess
 import os
 import shutil
@@ -765,6 +766,68 @@ class TaskHostTests(unittest.TestCase):
             headers = self.login(client, 'admin')
             self.request(client, 'POST', '/sources/import', {'paths': [str(video)]}, headers, 409)
 
+
+    def test_collection_camera_seam_saves_and_submits_for_new_and_legacy_tasks(self):
+        app, client = self.host()
+        initial = self.initialize(app, client)
+        admin = self.login(client, 'admin')
+        self.request(client, 'DELETE', '/items/'+initial['id'], {'expected_revision':initial['revision']}, admin)
+        project = app.state.service.load(self.project['id'])
+        project['videos'][0]['name'] = 'A09999_20261015000000_0000.mp4'
+        for index, (start, duration, stamp) in enumerate([
+            (10066, 10000, '000010'), (22066, 1000, '000022')], 2):
+            path = self.root/'nas'/f'clip{index}.mp4'
+            path.write_bytes(f'isolated camera fixture {index}'.encode())
+            ident = f'v{index:04d}'
+            project['videos'].append({**project['videos'][0], 'id':ident,
+                'name':f'A09999_20261015{stamp}_{index-1:04d}.mp4', 'relative_path':path.name,
+                'duration_ms':duration, 'start_ms':start, 'end_ms':start+duration,
+                'recording_start':f'2026-10-15T00:00:{stamp[-2:]}.066+08:00', 'alignment_offset_ms':66})
+            project['_sources'][ident] = {'path':str(path),
+                'stamp':{'size':path.stat().st_size, 'mtime_ns':path.stat().st_mtime_ns}}
+        project.update(duration_ms=23066, gaps=[{'start_ms':10000,'end_ms':10066},
+                                              {'start_ms':20066,'end_ms':22066}])
+        app.state.service.save(project)
+        for index, duration in [(2, 10000), (3, 1000)]:
+            self.request(client, 'POST', '/videos', {**self.video, 'video_id':f'clip{index}',
+                'duration_ms':duration, 'source':{'backend':'nas','key':project['id']+f'/v{index:04d}'}}, admin)
+        lead = self.login(client, 'lead')
+        task = self.request(client, 'POST', '/items', {'collection_id':project['id'], 'storage_backend':'nas',
+            'rule_id':initial['rule_id'], 'annotator_ids':[self.users['a']['id']],
+            'reviewer_id':self.users['reviewer']['id'], 'deadline':'2026-10-26'}, lead)
+        self.assertEqual([(r['start_ms'],r['end_ms']) for r in task['collection']['recording_runs']],
+                         [(0,20066),(22066,23066)])
+        annotator = self.login(client, 'a')
+        endpoint = '/items/'+task['id']+'/workspace/project'
+        workspace = self.request(client, 'GET', endpoint)
+        self.assertEqual([(r['start_ms'],r['end_ms']) for r in workspace['recording_runs']], [(0,20066),(22066,23066)])
+        annotations = {'posture':[{'id':'seam','label':'坐','start_ms':0,'end_ms':20066,'lane':0}]}
+        saved = self.request(client, 'PUT', endpoint+'/draft', {
+            'expected_revision':workspace['revision'], 'annotations':annotations}, annotator)
+        self.assertEqual(saved['annotations']['posture'], annotations['posture'])
+        # Recreate the old persisted snapshot: split at every positive seam,
+        # lacking the source name and alignment offset added by this fix.
+        with app.state.tasks.db() as db:
+            old = json.loads(db.execute('SELECT body FROM tasks WHERE id=?',(task['id'],)).fetchone()[0])
+            for member in old['collection']['videos']:
+                member['video_name'] = member.pop('name')
+                member.pop('alignment_offset_ms', None)
+            old['collection']['recording_runs'] = [{'start_ms':v['start_ms'],'end_ms':v['end_ms']}
+                                                  for v in old['collection']['videos']]
+            db.execute('UPDATE tasks SET body=? WHERE id=?', (json.dumps(old), task['id']))
+        restored = self.request(client, 'GET', '/items/'+task['id'])
+        self.assertEqual([(r['start_ms'],r['end_ms']) for r in restored['collection']['recording_runs']], [(0,20066),(22066,23066)])
+        bad = {'posture':[{'id':'real-gap','label':'坐','start_ms':0,'end_ms':23066}]}
+        for method, path in [('PUT',endpoint+'/draft'), ('POST','/items/'+task['id']+'/submit')]:
+            error = self.request(client, method, path, {'expected_revision':saved['revision'],
+                'annotations':bad}, annotator, 422)
+            self.assertIn('真实断档', json.dumps(error, ensure_ascii=False))
+        saved = self.request(client, 'PUT', endpoint+'/draft', {
+            'expected_revision':saved['revision'], 'annotations':annotations}, annotator)
+        submitted = self.request(client, 'POST', '/items/'+task['id']+'/submit', {
+            'expected_revision':saved['revision']}, annotator)
+        self.assertEqual(submitted['status'], 'submitted')
+        self.assertEqual(submitted['submissions'][0]['annotations']['posture'], annotations['posture'])
 
     def test_complete_collection_api_opens_all_clips_and_rejects_partial_registration(self):
         app,client=self.host()

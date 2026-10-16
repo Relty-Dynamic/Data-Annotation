@@ -12,6 +12,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from .validation import validate_annotations
+from .recording import with_recording_layout
 from .diff import differences
 from ..service import AXES, valid_custom_axis
 
@@ -69,6 +70,8 @@ class TaskStore:
         if not row:
             raise TaskError(404, '记录不存在')
         result = json.loads(row[0])
+        if table == 'tasks':
+            result = with_recording_layout(result)
         if table == 'submissions':
             if result.get('type') == 'final':
                 payload = {k:v for k,v in result.items() if k != 'artifact_key'}
@@ -252,6 +255,7 @@ class TaskStore:
             raise TaskError(403, '无权访问此任务')
 
     def _view(self, db, actor, task):
+        task = with_recording_layout(task)
         self._visible(db, actor, task)
         self._verify_final(db, task)
         obj = dict(task)

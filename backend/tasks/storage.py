@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from fastapi import HTTPException
 from ..desktop_cache import collection_name
+from .recording import with_recording_layout
 
 
 def safe_key(key):
@@ -127,22 +128,18 @@ class ProjectMedia:
         if set(by_source) != expected or any(item['source']['backend'] != self.backend for item in records):
             raise HTTPException(409, '采集文件夹的视频尚未全部登记，请先完成整个文件夹的登记')
         members = []
-        runs = []
         for video in sorted(project['videos'], key=lambda item: (item['start_ms'],item['id'])):
             record = by_source[project['id']+'/'+video['id']]
             _, metadata = self.service.media_source(project,video['id'])
             if video['duration_ms'] != record['duration_ms']:
                 raise HTTPException(409, '登记的视频时长与当前素材不一致')
             members.append({**record,'start_ms':video['start_ms'],'end_ms':video['end_ms'],
-                            'recording_start':video['recording_start']})
-            if runs and runs[-1]['end_ms'] == video['start_ms']:
-                runs[-1]['end_ms'] = video['end_ms']
-            else:
-                runs.append({'start_ms':video['start_ms'],'end_ms':video['end_ms']})
-        return {'id':project['id'],'backend':self.backend,'name':collection_name(project),
+                            'recording_start':video['recording_start'], 'name':video['name'],
+                            'alignment_offset_ms':video.get('alignment_offset_ms', 0)})
+        collection = {'id':project['id'],'backend':self.backend,'name':collection_name(project),
                 'duration_ms':project['duration_ms'],'recording_start':project['recording_start'],
-                'source_fingerprint':project['source_fingerprint'],'videos':members,'recording_runs':runs,
-                'gaps':project.get('gaps',[])}
+                'source_fingerprint':project['source_fingerprint'],'videos':members}
+        return with_recording_layout({'collection': collection})['collection']
 
 
 class UnavailableMedia:
