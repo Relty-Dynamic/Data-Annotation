@@ -19,6 +19,7 @@ from urllib.parse import quote
 from fastapi import HTTPException
 
 from .previews import run_ffmpeg
+from .encoding import compact_command
 from .service import AXES, VIDEO_EXTENSIONS, ProjectService, alignment_warnings, digest, filename_for_axis, now, parse_recording_start
 
 
@@ -489,14 +490,7 @@ class MockUploadManager:
             raise HTTPException(503, "缺少 FFmpeg，无法上传压缩视频。")
         original = service.probe(source)
         duration = original["duration_ms"]
-        filters = ("setpts=PTS-STARTPTS,scale=480:270:force_original_aspect_ratio=decrease:reset_sar=1,"
-                   "pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
-        args = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-progress", "pipe:1",
-                "-nostats", "-stats_period", "0.5", "-i", str(source), "-map", "0:v:0", "-map", "0:a?",
-                "-vf", filters, "-c:v", "libx264", "-preset", "veryfast", "-b:v", "256k",
-                "-maxrate", "320k", "-bufsize", "512k", "-g", "15", "-keyint_min", "15",
-                "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-c:a", "aac", "-b:a", "32k",
-                "-movflags", "+faststart", str(target)]
+        args = compact_command(ffmpeg, source, target, duration, original.get('media_start_seconds', 0))
         try:
             run_ffmpeg(args, duration, target.with_suffix(".ffmpeg.log"), update, threading.Event())
             rendered = service.probe(target)

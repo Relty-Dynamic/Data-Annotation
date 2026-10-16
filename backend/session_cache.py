@@ -21,7 +21,7 @@ from .local_playback import render_local_fast, render_local_thumbnail
 from .storyboards import StoryboardCache
 from .project_storage import PROJECT_ID, checked_tree
 from .source_cache import is_reparse, local_nas_cache_root
-from .encoding import encoder_threads, preparation_parallelism
+from .encoding import preparation_parallelism, compact_command
 from .desktop_cache import DesktopCache, collection_name, sha256_file, safe_name
 from .video_selection import active_videos
 
@@ -790,16 +790,7 @@ class SessionCache:
             raise HTTPException(503, '缺少 FFmpeg，无法准备精简播放素材。')
         temporary = target.with_suffix('.partial.mp4')
         duration = spec.source['duration_ms']
-        filters = ('setpts=PTS-STARTPTS,scale=480:270:force_original_aspect_ratio=decrease:reset_sar=1,'
-                   'pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1')
-        args = [str(ffmpeg), '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-                '-progress', 'pipe:1', '-nostats', '-stats_period', '0.5', '-threads', '2', '-filter_threads', '1',
-                '-copyts', '-i', str(normal), '-map', '0:v:0', '-map', '0:a?', '-vf', filters,
-                '-c:v', 'libx264', '-preset', 'veryfast', '-threads', encoder_threads(4), '-b:v', '256k',
-                '-maxrate', '320k', '-bufsize', '512k', '-g', '15', '-keyint_min', '15',
-                '-pix_fmt', 'yuv420p', '-fps_mode', 'passthrough', '-c:a', 'aac', '-b:a', '32k',
-                '-af', f'asetpts=PTS-({audio_start:.9f})/TB,atrim=start=0:end={duration / 1000:.6f}',
-                '-movflags', '+faststart', str(temporary)]
+        args = compact_command(ffmpeg, normal, temporary, duration, audio_start)
         try:
             run_ffmpeg(args, duration, target.with_suffix('.ffmpeg.log'), update, stopping)
             rendered = self.service.probe(temporary)
