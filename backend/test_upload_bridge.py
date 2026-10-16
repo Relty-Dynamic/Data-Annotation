@@ -190,3 +190,35 @@ class PublicBridgeRouteTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class OriginBrowserTests(unittest.TestCase):
+    def test_installers_forward_only_allowlisted_browser(self):
+        for render in (shell, powershell):
+            self.assertIn("--browser 'chrome'", render('https://api.example.com', 'https://example.com', 'chrome'))
+            self.assertNotIn('--browser', render('https://api.example.com', 'https://example.com'))
+            with self.assertRaises(HTTPException):
+                render('https://api.example.com', 'https://example.com', "chrome'; bad")
+
+    def test_macos_explicit_browser_and_no_default_fallback(self):
+        from backend.upload_agent import open_handoff
+        import subprocess
+        with patch('backend.upload_agent.sys.platform', 'darwin'), patch('backend.upload_agent.subprocess.run') as run:
+            self.assertTrue(open_handoff('https://example.com/#fixture', 'chrome'))
+            self.assertEqual(run.call_args.args[0], ['open', '-a', 'Google Chrome', 'https://example.com/#fixture'])
+            run.reset_mock()
+            self.assertFalse(open_handoff('https://example.com/#fixture', ''))
+            run.assert_not_called()
+            run.side_effect = subprocess.CalledProcessError(1, 'open')
+            self.assertFalse(open_handoff('https://example.com/#fixture', 'chrome'))
+            self.assertEqual(run.call_count, 1)
+
+    def test_windows_explicit_browser_and_missing_install(self):
+        from backend.upload_agent import open_handoff
+        with patch('backend.upload_agent.sys.platform', 'win32'), patch.dict(os.environ, {'LOCALAPPDATA': '/fixture/local'}), patch('backend.upload_agent.Path.is_file', return_value=True), patch('backend.upload_agent.subprocess.Popen') as launch:
+            self.assertTrue(open_handoff('https://example.com/#fixture', 'edge'))
+            self.assertTrue(str(launch.call_args.args[0][0]).endswith('Microsoft/Edge/Application/msedge.exe'))
+            self.assertEqual(launch.call_args.args[0][1], 'https://example.com/#fixture')
+            launch.reset_mock()
+            with patch('backend.upload_agent.Path.is_file', return_value=False):
+                self.assertFalse(open_handoff('https://example.com/#fixture', 'chrome'))
+            launch.assert_not_called()

@@ -72,6 +72,7 @@ def main():
     parser.add_argument('--root',type=Path,required=True)
     parser.add_argument('--api',required=True)
     parser.add_argument('--frontend',required=True)
+    parser.add_argument('--browser',choices=['','chrome','edge','firefox','safari'],default='')
     args=parser.parse_args()
     if not args.api.startswith('https://') or not args.frontend.startswith('https://'):
         raise RuntimeError('安装需要受信任的 HTTPS 平台地址。')
@@ -101,7 +102,7 @@ def main():
     if installed.exists():installed.rename(root/'.tmp'/('previous-'+uuid.uuid4().hex))
     source.rename(installed)
     (root/'README.txt').write_text('DataMark 本机上传组件。源码、Python、依赖和工具仅保存在此目录。\n压缩视频缓存保存在桌面 dataMarkProject。\n关闭组件后，可重新执行网页上的安装／启动命令。\nFFmpeg 来源及校验值见 app/backend/upload_install.py。\n',encoding='utf-8')
-    subprocess.run([sys.executable,'-m','backend.upload_agent','--api',args.api,'--frontend',args.frontend],cwd=installed,env=env,check=True)
+    subprocess.run([sys.executable,'-m','backend.upload_agent','--api',args.api,'--frontend',args.frontend,'--browser',args.browser],cwd=installed,env=env,check=True)
 
 
 if __name__=='__main__':

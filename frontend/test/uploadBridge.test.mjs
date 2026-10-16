@@ -20,3 +20,10 @@ test('malformed association is cleared and rejected instead of being sent to the
  assert.throws(()=>takeHelperHandoff({hash:'#datamark-upload=bad',pathname:'/',search:''},url=>urls.push(url)));
  assert.deepEqual(urls,['/']);
 });
+test('install commands carry the originating browser on both platforms',()=>{
+ for(const [ua,browser] of [['Mozilla Chrome/130 Safari/537','chrome'],['Mozilla Chrome/130 Edg/130','edge'],['Mozilla Firefox/130','firefox'],['Mozilla Version/18 Safari/605','safari']]){
+  const commands=installCommands('https://api.example.com:8443',ua);
+  for(const command of Object.values(commands))assert.ok(command.includes('?browser='+browser));
+ }
+ for(const command of Object.values(installCommands('https://api.example.com','unknown')))assert.ok(!command.includes('?browser='));
+});
