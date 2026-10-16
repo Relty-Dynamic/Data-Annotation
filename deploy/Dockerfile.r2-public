@@ -1,7 +1,7 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 USER root
-COPY requirements.lock.txt /app/requirements.lock.txt
+COPY requirements.lock.txt requirements.uploader.lock.txt /app/
 ARG DATAMARK_PYPI_INDEX=https://pypi.org/simple
 RUN --mount=type=cache,id=datamark-pip,target=/root/.cache/pip,sharing=locked \
     timeout --signal=TERM --kill-after=10s 600s /opt/venv/bin/python -m pip install \
@@ -12,5 +12,12 @@ COPY backend /app/backend
 COPY launch.py /app/launch.py
 COPY deploy /app/deploy
 RUN chmod -R a+rX /app/backend /app/deploy /app/launch.py
+# Publish complete installers only when every official artifact and wheel is available.
+# Foreign downloads happen during release construction, never on a new user's computer.
+RUN --mount=type=cache,id=datamark-uploader-artifacts,target=/app/uploader-dist/.downloads,sharing=locked \
+    --mount=type=cache,id=datamark-pip,target=/root/.cache/pip,sharing=locked \
+    timeout --signal=TERM --kill-after=10s 1800s /opt/venv/bin/python -m backend.upload_dist \
+      --output /app/uploader-dist --index-url "$DATAMARK_PYPI_INDEX" \
+    && chmod -R a+rX /app/uploader-dist
 USER 1000:1000
 CMD ["/opt/venv/bin/python", "-m", "uvicorn", "backend.public_setup:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]

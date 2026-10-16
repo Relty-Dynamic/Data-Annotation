@@ -170,7 +170,8 @@ def main():
             if 's3-helper-bridge' not in health.json().get('capabilities',[]):
                 raise RuntimeError('公网平台尚未更新到同页上传版本。')
             engine.target.pipeline_enabled = 's3-upload-pipeline-v1' in health.json().get('capabilities',[])
-            registered=client.post('/api/r2/helper/register',json={'platform':sys.platform,'protocol':1})
+            from .upload_dist import kit_key
+            registered=client.post('/api/r2/helper/register',json={'platform':sys.platform,'protocol':1,'component_version':kit_key(Path(__file__).resolve().parents[1])})
             registered.raise_for_status()
             registered=registered.json()
             client.headers.update({'Authorization':'Bearer '+registered['token'],'X-Upload-Agent':registered['id']})
