@@ -3,6 +3,13 @@ import assert from 'node:assert/strict';
 import {sourceCollections,registeredCollections} from '../src/tasks/collections.ts';
 const source=(project,video,backend='s3')=>({id:`${project}/${video}`,name:`${video}.mp4`,collection:'1001lixin',collection_id:project,duration_ms:1000,source:{backend,key:`${project}/${video}`}});
 const video=(source,fields={})=>({id:source.id,source:source.source,quality:'passed',...fields});
+test('collection carries uploaded collector without guessing names for legacy or NAS sources',()=>{
+ const sources=[{...source('a','v1'),collector_name:'李鑫'},{...source('a','v2'),collector_name:'李鑫'},source('b','v1','nas')];
+ const groups=sourceCollections(sources,[]);
+ assert.equal(groups[0].collector_name,'李鑫');
+ assert.equal(groups[1].collector_name,undefined);
+ assert.equal(sourceCollections(sources.map(s=>({...s})),[])[0].collector_name,'李鑫');
+});
 test('folder selection groups clips once and counts unregistered sources by backend and identity',()=>{
  const sources=[source('a','v1'),source('a','v2'),source('b','v1')];
  assert.deepEqual(sourceCollections(sources,[video(sources[0])]),[

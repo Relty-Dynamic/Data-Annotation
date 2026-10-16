@@ -88,6 +88,7 @@ class ProjectMedia:
         if not actor.get('can_upload'):
             raise HTTPException(403, '管理员尚未开放上传权限。')
         return [{'id': project['id'] + '/' + video['id'], 'name': video['name'],
+                 **({'collector_name': project['collector_name']} if project.get('collector_name') else {}),
                  'collection': collection_name(project), 'collection_id': project['id'], 'duration_ms': video['duration_ms'],
                  'source': {'backend': self.backend, 'key': project['id'] + '/' + video['id']}}
                 for project in self.service.projects() if self.authorized(actor, project['id'])

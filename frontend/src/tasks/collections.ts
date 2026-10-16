@@ -1,9 +1,9 @@
 import type {TaskVideo} from './types';
-export interface TaskSource {id:string;name:string;collection:string;collection_id?:string;duration_ms:number;source:{backend:string;key:string}}
+export interface TaskSource {id:string;name:string;collection:string;collection_id?:string;collector_name?:string;duration_ms:number;source:{backend:string;key:string}}
 export function sourceCollections(sources:TaskSource[],videos:TaskVideo[]){
  const registered=new Set(videos.map(v=>`${v.source.backend}:${v.source.key}`));
- const groups=new Map<string,{id:string;name:string;count:number;pending:number}>();
- for(const source of sources){const id=source.collection_id??source.id.split('/')[0];const group=groups.get(id)??{id,name:source.collection,count:0,pending:0};group.count++;if(!registered.has(`${source.source.backend}:${source.source.key}`))group.pending++;groups.set(id,group);}
+ const groups=new Map<string,{id:string;name:string;count:number;pending:number;collector_name?:string}>();
+ for(const source of sources){const id=source.collection_id??source.id.split('/')[0];const group=groups.get(id)??{id,name:source.collection,count:0,pending:0};if(source.collector_name)group.collector_name=source.collector_name;group.count++;if(!registered.has(`${source.source.backend}:${source.source.key}`))group.pending++;groups.set(id,group);}
  return [...groups.values()];
 }
 export function registeredCollections(videos:TaskVideo[],sources:TaskSource[]){

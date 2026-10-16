@@ -50,6 +50,9 @@ class R2ProjectService(ProjectService):
         value = super().public(project)
         value.update(storage_mode='s3', storage_prefix=project.get('_r2_prefix'), source_dir=None,
                      cache_directories=[], needs_source_relink=False, owner_id=project.get('_r2_owner'))
+        collector = project.get('_r2_manifest', {}).get('collector_name')
+        if isinstance(collector, str) and collector.strip():
+            value['collector_name'] = collector.strip()
         return value
 
     def allowed(self, actor, ident):

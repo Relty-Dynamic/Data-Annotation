@@ -114,6 +114,22 @@ class R2ProjectTests(unittest.TestCase):
         self.assertTrue(self.service.allowed(USER, value['id']))
         self.assertFalse(self.service.allowed(OTHER, value['id']))
 
+    def test_uploaded_collector_reaches_authorized_task_catalog_and_legacy_is_empty(self):
+        from backend.tasks.storage import ProjectMedia
+        media = ProjectMedia(self.service, 's3', self.service.allowed)
+        self.open()
+        self.assertNotIn('collector_name', media.catalog(USER)[0])
+        self.manifest['collector_name'] = ' 李鑫 '
+        _, etag = self.provider.optional_json(PREFIX + '/manifest.json')
+        self.provider.put(PREFIX + '/manifest.json', document_bytes(self.manifest), etag=etag)
+        opened = self.open()
+        self.assertEqual(opened['collector_name'], '李鑫')
+        sources = media.catalog(USER)
+        current = next(source for source in sources if source['collection_id'] == opened['id'])
+        self.assertEqual(current['collector_name'], '李鑫')
+        self.assertEqual(media.catalog(OTHER), [])
+        self.assertNotIn('_r2_manifest', opened)
+
     def test_takeover_requires_inspection_and_preserves_draft_until_confirmed(self):
         value = self.open()
         before = self.service.load(value['id'])
