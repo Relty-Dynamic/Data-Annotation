@@ -9,3 +9,11 @@ export function canReviewTask(user:Pick<Account,'id'|'role'>,roles:TaskRole[],ta
  if(user.role==='admin')return true;
  return !task.annotator_ids.includes(user.id)&&(roles.includes('leader')||task.reviewer_id===user.id);
 }
+
+export function canOpenReviewWorkspace(user:Pick<Account,'id'|'role'>,roles:TaskRole[],task:Pick<TaskItem,'annotator_ids'|'reviewer_id'|'status'>):boolean{
+ return ['submitted','reviewing','adjudicating','accepted','delivered'].includes(task.status)&&canReviewTask(user,roles,task);
+}
+
+export function canUseLegacyTrackTools(user:Pick<Account,'role'>,tasksEnabled:boolean):boolean{
+ return user.role==='admin'||!tasksEnabled;
+}

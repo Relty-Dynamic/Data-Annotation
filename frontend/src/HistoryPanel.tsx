@@ -1,3 +1,4 @@
+import {formatOperationTime} from './operationTime';
 import {useEffect, useState} from 'react';
 import {authFetch} from './auth';
 
@@ -26,6 +27,6 @@ export default function HistoryPanel({projectId,onClose}:{projectId:string;onClo
     <p>操作记录保存在服务所在电脑的本地数据库。此处显示最近的标注编辑与项目操作，取消勾选不删除标注或记录。</p>
     {error&&<p role="alert" className="import-error">{error}</p>}
     {!error&&rows.length===0&&<p>暂无操作记录。旧版本导入的标注没有可追溯的编辑者。</p>}
-    <div className="admin-list">{rows.map(event=><div key={event.id}><span>{event.actor_name??'本机'} · {event.description}</span><small>{new Date(event.recorded_at).toLocaleString()} · 版本 {event.revision}</small></div>)}</div>
+    <div className="admin-list">{rows.map(event=><div key={event.id}><span>{event.actor_name??'本机'} · {event.description}</span><small>{formatOperationTime(event.recorded_at)} · 版本 {event.revision}</small></div>)}</div>
   </section></div>;
 }

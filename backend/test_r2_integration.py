@@ -228,6 +228,40 @@ class R2ProjectTests(unittest.TestCase):
                     self.assertIsNone(auth.session(logged.cookies.get('datamark_session')))
                     self.assertFalse((self.root / '.local/auth.sqlite3').exists())
 
+    def test_task_mode_blocks_public_legacy_library_edits_but_keeps_admin_maintenance(self):
+        from backend.auth import AuthStore
+        from backend.shared_accounts import AccountClient, create_app as bridge_app
+        accounts_root = self.root / 'accounts'
+        auth = AuthStore(accounts_root)
+        auth.create_user('admin', 'Admin', 'correct horse battery staple', 'admin')
+        auth.create_user('worker', 'Worker', 'another long safe password')
+        origin = 'https://datamark.example.com'
+        env = {'DATAMARK_PUBLIC_ORIGIN':origin, 'DATAMARK_PUBLIC_API_ORIGIN':'https://api.example.com:8443',
+               'DATAMARK_R2_CONFIG':'/protected/config', 'DATAMARK_R2_STATE':str(self.root),
+               'DATAMARK_TASKS_ENABLED':'1','DATAMARK_TASKS_STATE':str((self.root/'tasks').resolve()),
+               'DATAMARK_TASKS_ARTIFACTS':str((self.root/'artifacts').resolve())}
+        with patch.dict(os.environ,env),patch('backend.r2_store.R2Store',return_value=self.provider):
+            bridge = TestClient(bridge_app(accounts_root),base_url='http://accounts:8766')
+            with TestClient(create_app(accounts=AccountClient(bridge)),base_url='https://api.example.com:8443') as client:
+                response = client.post('/api/auth/login',json={'username':'worker','password':'another long safe password'},headers={'Origin':origin})
+                self.assertEqual(200,response.status_code,response.text)
+                headers = {'Origin':origin,'X-CSRF-Token':response.json()['csrf']}
+                for method,path,body in [
+                    ('POST','/api/account/track-library',{'id':'newaxis','name':'新轴','labels':['新标签']}),
+                    ('PUT','/api/account/track-library/oldaxis',{'id':'oldaxis','name':'修改','labels':['修改']}),
+                    ('DELETE','/api/account/track-library/oldaxis',{'confirmed':True}),
+                    ('POST','/api/account/track-library/scene/default',{'is_default':False}),
+                    ('PUT','/api/projects/'+'a'*32+'/track-selection',{'tracks':[], 'expected_revision':0}),
+                ]:
+                    response = client.request(method,path,json=body,headers=headers)
+                    self.assertEqual(403,response.status_code,response.text)
+                    self.assertIn('标注规则',response.json()['detail'])
+                response = client.post('/api/auth/login',json={'username':'admin','password':'correct horse battery staple'},headers={'Origin':origin})
+                self.assertEqual(200,response.status_code,response.text)
+                headers['X-CSRF-Token'] = response.json()['csrf']
+                response = client.post('/api/account/track-library',json={'id':'adminaxis','name':'管理轴','labels':['管理']},headers=headers)
+                self.assertEqual(200,response.status_code,response.text)
+
     def test_local_json_export_preserves_hidden_axes_and_checks_ownership(self):
         from backend.auth import AuthStore
         from backend.shared_accounts import AccountClient, create_app as bridge_app

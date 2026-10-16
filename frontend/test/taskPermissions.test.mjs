@@ -16,3 +16,20 @@ test('only admins can review their own annotations',()=>{
  assert.equal(canReviewTask({id:'other',role:'annotator'},['reviewer'],task),true);
  assert.equal(canReviewTask({id:'outsider',role:'annotator'},['reviewer'],task),false);
 });
+
+test('review workbench entry requires an eligible task and existing reviewer permissions',async()=>{
+ const {canOpenReviewWorkspace}=await import('../src/tasks/permissions.ts');
+ const task={annotator_ids:['annotator'],reviewer_id:'reviewer',status:'submitted'};
+ assert.equal(canOpenReviewWorkspace({id:'reviewer',role:'annotator'},['reviewer'],task),true);
+ assert.equal(canOpenReviewWorkspace({id:'outsider',role:'annotator'},['reviewer'],task),false);
+ assert.equal(canOpenReviewWorkspace({id:'annotator',role:'annotator'},['reviewer','leader'],task),false);
+ assert.equal(canOpenReviewWorkspace({id:'annotator',role:'admin'},[],task),true);
+ for(const status of ['pending','annotating','rework','deleted'])assert.equal(canOpenReviewWorkspace({id:'reviewer',role:'annotator'},['reviewer'],{...task,status}),false);
+});
+
+test('task workers use rule axes while admins retain legacy definition maintenance',async()=>{
+ const {canUseLegacyTrackTools}=await import('../src/tasks/permissions.ts');
+ assert.equal(canUseLegacyTrackTools({role:'annotator'},true),false);
+ assert.equal(canUseLegacyTrackTools({role:'admin'},true),true);
+ assert.equal(canUseLegacyTrackTools({role:'annotator'},false),true);
+});
