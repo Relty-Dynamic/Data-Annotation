@@ -655,6 +655,52 @@ class TaskHostTests(unittest.TestCase):
             'action': 'pass', 'resolved_issue_ids': [issue['id'] for issue in task['issues'] if issue['id'].startswith('review:')]}, headers)
         self.assertTrue(task['review_complete'])
 
+    def test_collection_output_submission_failure_retry_and_approved_publication(self):
+        from backend.tasks.storage import ProjectMedia
+        from backend.tasks.collection_outputs import CollectionOutputs
+        from backend.test_r2_integration import MemoryObjects
+        app,client=self.host()
+        self.initialize(app,client)
+        provider=MemoryObjects()
+        service=app.state.service
+        service.provider=provider
+        project=service.load(self.project['id'])
+        prefix='daily/20261015/fixture'
+        project['_r2_prefix']=prefix
+        service.save(project)
+        workspace=app.state.task_workspaces
+        workspace.media=ProjectMedia(service,'s3',lambda actor,ident:True)
+        store=app.state.tasks
+        store.outputs=CollectionOutputs(store,workspace.media,workspace.service)
+        headers=self.login(client,'admin')
+        self.request(client,'POST','/collections',{'collection_id':project['id'],'collector_id':'fixture',
+            'date':'2026-10-15','scene':'室内','quality':'passed'},headers)
+        rule=self.request(client,'POST','/rules',{'name':'S3 output','task_type':'output',
+            'axes':[{'id':'posture','name':'姿势','mode':'state','labels':['坐']}]},headers)
+        task=self.request(client,'POST','/items',{'collection_id':project['id'],'storage_backend':'s3','rule_id':rule['id'],
+            'annotator_ids':[self.users['admin']['id']],'reviewer_id':self.users['admin']['id'],'deadline':'2026-10-26'},headers)
+        path='/items/'+task['id']
+        with patch.object(provider,'put_if_absent',side_effect=HTTPException(503,'fixture offline')):
+            task=self.request(client,'POST',path+'/submit',{'expected_revision':task['revision'],
+                'request_id':'one','annotations':{'posture':[{'id':'one','label':'坐','start_ms':0,'end_ms':1000}]}},headers)
+        self.assertEqual(task['status'],'submitted')
+        self.assertEqual(task['output_sync']['state'],'error')
+        self.request(client,'POST',path+'/outputs/retry',{},expected=403)
+        sync=self.request(client,'POST',path+'/outputs/retry',{},headers)
+        self.assertEqual(sync['state'],'ready')
+        self.assertIn(prefix+'/timeline/admin/v1/posture.timeline.json',provider.objects)
+        task=self.request(client,'POST',path+'/start-review',{'expected_revision':task['revision']},headers)
+        task=self.request(client,'POST',path+'/review',{'expected_revision':task['revision'],'action':'pass'},headers)
+        task=self.request(client,'POST',path+'/accept',{'expected_revision':task['revision']},headers)
+        self.assertEqual(task['output_sync']['state'],'ready')
+        self.assertIn(prefix+'/timeline/finally/posture.timeline.json',provider.objects)
+        delivery=self.request(client,'POST','/deliveries',{'task_ids':[task['id']],
+            'expected_revisions':{task['id']:task['revision']},'request_id':'export'},headers)
+        self.assertEqual(delivery['output_sync'][0]['state'],'ready')
+        self.assertIn(prefix+'/timeline/delivery-'+delivery['id']+'.csv',provider.objects)
+        client.cookies.clear()
+        self.request(client,'POST',path+'/outputs/retry',{},headers,expected=401)
+
     def test_direct_task_cache_routes_do_not_start_or_read_server_preparation(self):
         app,client=self.host()
         task=self.initialize(app,client)

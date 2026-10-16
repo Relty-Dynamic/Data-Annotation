@@ -21,6 +21,7 @@ function mount(){
   if(name==='react/jsx-runtime')return require(name);
   if(name==='./TaskReview')return {default:'TaskReview'};
   if(name==='./SuccessDialog')return {default:'SuccessDialog'};
+  if(name==='./TaskOutputSync')return {default:'TaskOutputSync'};
   if(name==='./taskChoices')return {reviewStage:task=>task.status};
   if(name==='./TaskPanel')return {async taskRequest(path,method,body){
    requests.push({path,method,body});

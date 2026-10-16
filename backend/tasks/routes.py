@@ -29,6 +29,8 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     from .store import TaskStore, TaskError
     store = TaskStore(state, artifact_store or FileArtifacts(artifacts))
     workspace = Workspaces(Path(state) / 'workspaces', store, media or UnavailableMedia())
+    if hasattr(workspace.media,'collection_outputs'):
+        store.outputs = workspace.media.collection_outputs(store,workspace.service)
     router = APIRouter(prefix='/api/tasks')
 
     @app.exception_handler(TaskError)
@@ -295,9 +297,20 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     for action, method in [('submit','submit'), ('start-review','start_review'), ('review','review'), ('adjudicate','adjudicate'), ('accept','accept')]:
         def make_endpoint(method):
             def endpoint(task_id: str, body: dict, request: Request):
-                return getattr(store, method)(actor(request), task_id, body)
+                names = {user['id']:user['display_name'] for user in users_for_request(request)} if store.outputs is not None and method in ('submit','accept') else None
+                result = getattr(store,method)(actor(request),task_id,body,**({'output_names':names} if names is not None else {}))
+                if store.outputs is not None:
+                    result['output_sync'] = store.outputs.flush(task_id)
+                return result
             return endpoint
         router.add_api_route('/items/{task_id}/' + action, make_endpoint(method), methods=['POST'])
+
+    @router.post('/items/{task_id}/outputs/retry')
+    def retry_outputs(task_id: str, request: Request):
+        if store.outputs is None:
+            raise HTTPException(404,'此存储模式不使用 S3 采集结果目录。')
+        names = {user['id']:user['display_name'] for user in users_for_request(request)}
+        return store.outputs.backfill(actor(request),task_id,names)
 
     @router.get('/audit')
     def audit(request: Request, task_id: str | None = None):
@@ -309,7 +322,11 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
 
     @router.post('/deliveries')
     def deliver(body: dict, request: Request):
-        return store.deliver(actor(request), body)
+        names = {user['id']:user['display_name'] for user in users_for_request(request)} if store.outputs is not None else None
+        result = store.deliver(actor(request),body,**({'output_names':names} if names is not None else {}))
+        if store.outputs is not None:
+            result['output_sync'] = [store.outputs.flush(ident) for ident in result['task_ids']]
+        return result
 
     @router.get('/deliveries/{ident}')
     def download(ident: str, request: Request):

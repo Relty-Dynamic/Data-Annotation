@@ -57,3 +57,5 @@
 .task-status-badge[data-status="awaiting_acceptance"]{background:#343525;color:#e7df9e;border-color:#746f43}.task-record-info>small{color:#d6cc9c;font-size:11px;line-height:1.6}
 
 .task-workbench-review .task-review-submit{width:100%;min-height:44px;border-radius:8px;font-weight:600}
+
+.task-output-sync{padding:10px 12px;margin:10px 0;border:1px solid #3c596d;border-radius:8px;background:#1c2b36;font-size:12px;line-height:1.7}.task-output-sync p{margin:0}.task-output-sync.ready{border-color:#39594e;color:#a6d7c9}.task-output-sync.error{border-color:#855e40;color:#e8c39f}.task-output-sync button{margin-top:8px}
