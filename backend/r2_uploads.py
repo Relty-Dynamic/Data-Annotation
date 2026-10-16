@@ -130,7 +130,9 @@ class R2Uploads:
     @staticmethod
     def public(job):
         return {'id': job['id'], 'prefix': job['manifest']['prefix'], 'state': job['state'], 'file_count': len(job['files']),
-                'verified_files': len(job.get('verified', {})), 'error': job.get('validation_error', '')}
+                'verified_files': len(job.get('verified', {})),
+                'validation_bytes': sum(job.get('validation_read_bytes', {}).values()),
+                'validation_total_bytes': sum(item['size'] for item in R2Uploads.items(job)), 'error': job.get('validation_error', '')}
 
     @staticmethod
     def items(job):

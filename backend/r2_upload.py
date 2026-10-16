@@ -69,9 +69,12 @@ class RemoteCaptureTarget:
         deadline = time.monotonic() + 7200
         while result.get('state') == 'validating':
             checked, total = result.get('verified_files', 0), result.get('file_count', 0)
-            self.transfer_progress(dict(state='validating', progress=round(checked / max(1,total) * 100,1),
+            read_bytes, total_bytes = result.get('validation_bytes', 0), result.get('validation_total_bytes', 0)
+            percent = read_bytes / total_bytes * 100 if total_bytes else checked / max(1,total) * 100
+            self.transfer_progress(dict(state='validating', progress=round(percent,1),
                                         verified_files=checked, files_total=total))
-            self.progress(f'文件已传输，正在校验并发布采集目录：{checked}/{total} 个文件。')
+            amount = f' · 已读取 {read_bytes / 1024**2:.1f}/{total_bytes / 1024**2:.1f} MiB' if total_bytes else ''
+            self.progress(f'正在校验并发布：{checked}/{total} 个文件已通过{amount}。')
             if time.monotonic() >= deadline:
                 raise HTTPException(504, '后台仍在核验，请稍后重试继续；已上传内容保留。')
             time.sleep(2)

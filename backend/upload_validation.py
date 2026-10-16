@@ -31,6 +31,12 @@ def validate_upload(uploads, ident, user, authorize=None):
         items = uploads.items(job)
         validate_playback(manifest)
         update(state='validating', validation_error='')
+        def read_progress(index, count, reset=False):
+            with uploads.job_lock(ident):
+                current = uploads.load(ident, user)
+                counts = current.setdefault('validation_read_bytes', {})
+                counts[str(index)] = 0 if reset else min(items[index]['size'], counts.get(str(index), 0) + count)
+                uploads.save(current)
         def verify(index):
             permitted()
             item = items[index]
@@ -41,11 +47,18 @@ def validate_upload(uploads, ident, user, authorize=None):
             etag = before.get('ETag')
             with uploads.job_lock(ident):
                 checkpoint = uploads.load(ident, user).get('verified', {}).get(str(index))
+            read_progress(index, 0, reset=True)
             if etag and checkpoint == etag:
+                read_progress(index, item['size'])
                 return
             version = hashlib.sha256(str(etag).encode()).hexdigest()[:16]
             destination = uploads.service.local / 'upload-validation' / item['sha256'] / version / Path(item['key']).name
-            uploads.provider.download(key, destination, item['sha256'], item['size'])
+            reader = getattr(uploads.provider, 'download_for_validation', None)
+            if reader:
+                reader(key, destination, item['sha256'], item['size'], etag, lambda n: read_progress(index, n))
+            else:
+                uploads.provider.download(key, destination, item['sha256'], item['size'])
+                read_progress(index, item['size'])
             if index < len(manifest['files']):
                 info = uploads.service.probe(destination)
                 if info['codec'] != 'h264' or abs(info['duration_ms'] - item['duration_ms']) > 250:
