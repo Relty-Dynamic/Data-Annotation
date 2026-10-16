@@ -19,5 +19,6 @@
 !frontend/tsconfig.json
 !frontend/vite.config.ts
 !requirements.lock.txt
+!requirements.uploader.lock.txt
 **/__pycache__/
 **/*.pyc
