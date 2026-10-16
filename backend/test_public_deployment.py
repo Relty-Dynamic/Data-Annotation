@@ -100,6 +100,10 @@ class PublicDeploymentTests(unittest.TestCase):
             if args[-1].endswith('/api/health'):
                 return json.dumps(dict(ready=self.failure != 'health', accounts_ready=True, storage_ready=True, storage_backend='s3'))
             return json.dumps({} if self.failure == 'challenge' else dict(challenge='fixture', public_key='fixture'))
+        if args[:3] == ('docker', 'exec', 'datamark-public-setup-api-1'):
+            if self.failure == 'prediction':
+                raise DeploymentError('fixture worker unavailable')
+            return ''
         if args[:2] == ('docker', 'stop'):
             return ''
         raise AssertionError(args)
@@ -176,3 +180,60 @@ class PublicDeploymentTests(unittest.TestCase):
                 with self.assertRaises(DeploymentError): verify_repository(run)
                 self.assertFalse(any(c[0] == 'docker' for c in calls))
             else: self.assertEqual(verify_repository(run), NEW)
+
+
+    def enable_prediction(self):
+        secret = self.home / 'secrets/prediction-token'
+        secret.write_text('fixture-only-not-a-real-token')
+        secret.chmod(0o600)
+        self.config += 'DATAMARK_PREDICTION_EXTERNAL=1\n'
+        (self.home / 'runtime.conf').write_text(self.config)
+        for release in (self.previous, self.release):
+            (release / 'deploy/compose.prediction-external.yaml').write_text('fixture overlay')
+        self.rendered['services']['api']['environment'].update(
+            DATAMARK_PREDICTION_URL='http://imu-posture-worker:8778',
+            DATAMARK_PREDICTION_TOKEN_FILE='/run/secrets/imu-prediction-token')
+        self.rendered['services']['api']['volumes'].append(dict(
+            type='bind', source=str(secret), target='/run/secrets/imu-prediction-token', read_only=True))
+        self.items['api']['Mounts'].append(dict(
+            Type='bind', Source=str(secret), Destination='/run/secrets/imu-prediction-token', RW=False))
+        return secret
+
+    def test_prediction_opt_in_preserved_and_health_checked(self):
+        secret = self.enable_prediction()
+        with patch('deploy.ci_deploy_public.PREDICTION_SECRET', secret):
+            self.deployment.deploy()
+        self.assertIn('DATAMARK_PREDICTION_EXTERNAL=1', (self.home / 'runtime.conf').read_text())
+        self.assertTrue(any('compose.prediction-external.yaml' in ' '.join(c) for c in self.calls))
+        self.assertTrue(any(c[:2] == ('docker', 'exec') for c in self.calls))
+
+    def test_prediction_failure_rolls_back_without_touching_worker(self):
+        secret = self.enable_prediction()
+        self.failure = 'prediction'
+        with patch('deploy.ci_deploy_public.PREDICTION_SECRET', secret):
+            with self.assertRaises(DeploymentError):
+                self.deployment.deploy()
+        self.assert_rolled_back()
+        self.assertFalse(any(c[:3] == ('docker', 'stop', 'imu-posture-worker') for c in self.calls))
+
+    def test_prediction_credentials_and_origin_fail_closed(self):
+        secret = self.enable_prediction()
+        original = copy.deepcopy(self.rendered)
+        for kind in ('writable', 'origin', 'file', 'world_readable'):
+            self.rendered = copy.deepcopy(original)
+            api = self.rendered['services']['api']
+            if kind == 'writable': api['volumes'][-1]['read_only'] = False
+            if kind == 'origin': api['environment']['DATAMARK_PREDICTION_URL'] = 'https://outside.example.com'
+            if kind == 'file': api['environment']['DATAMARK_PREDICTION_TOKEN_FILE'] = '/wrong'
+            if kind == 'world_readable': secret.chmod(0o604)
+            with self.subTest(kind=kind), patch('deploy.ci_deploy_public.PREDICTION_SECRET', secret):
+                with self.assertRaises(DeploymentError):
+                    self.deployment.deploy()
+            self.assertFalse(any(c[:2] == ('docker', 'stop') for c in self.calls))
+            secret.chmod(0o600)
+
+    def test_invalid_or_duplicate_prediction_opt_in_rejected(self):
+        for value in ('yes', '1\nDATAMARK_PREDICTION_EXTERNAL=0'):
+            (self.home / 'runtime.conf').write_text(self.config + 'DATAMARK_PREDICTION_EXTERNAL=' + value + '\n')
+            with self.assertRaises(DeploymentError):
+                self.deployment.compose(self.previous, self.home / 'runtime.conf')

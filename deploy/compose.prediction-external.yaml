@@ -1,0 +1,13 @@
+# Connect only the public API to an existing private worker; do not recreate it.
+services:
+  api:
+    environment:
+      DATAMARK_PREDICTION_URL: http://imu-posture-worker:8778
+      DATAMARK_PREDICTION_TOKEN_FILE: /run/secrets/imu-prediction-token
+    volumes:
+      - type: bind
+        source: /home/relty/services/imu-posture/secrets/worker-token
+        target: /run/secrets/imu-prediction-token
+        read_only: true
+        bind:
+          create_host_path: false

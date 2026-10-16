@@ -482,7 +482,7 @@ NAS 部署直接在持久 `intranet.env` 中设置 `DATAMARK_TASKS_ENABLED=1`，
 
 算法服务来自独立 `IMU_posture` 仓库的远程协议 1。上传组件从算法服务通过平台代理获取仅使用标准库的本机采样工具，并核验摘要，不安装 NumPy／模型依赖。平台代理逐次检查当前会话、上传权限和任务所属账号，服务凭据只保存在后台。
 
-后台默认关闭远程生成。启用需配置 `DATAMARK_PREDICTION_URL`（私网算法服务地址）和 `DATAMARK_PREDICTION_TOKEN_FILE`（受保护的只读凭据文件），私网服务不开放公网端口。`deploy/compose.prediction.yaml` 是显式启用用的可选 overlay，需预先提供固定算法镜像、UID 1000 可写的持久任务目录和受控凭据文件。**现有 Jenkins 发布仍使用原部署配置，不会自动加挂这个 overlay；首次启用需要单独完成部署配置评审和私网联调，并继续保留现有挂载校验及回滚规则。** 合并代码本身不会启动算法服务或修改公网入口。
+后台默认关闭远程生成。启用需配置 `DATAMARK_PREDICTION_URL`（私网算法服务地址）和 `DATAMARK_PREDICTION_TOKEN_FILE`（受保护的只读凭据文件），私网服务不开放公网端口。`deploy/compose.prediction.yaml` 是显式启用用的可选 overlay，需预先提供固定算法镜像、UID 1000 可写的持久任务目录和受控凭据文件。现有 Ubuntu 算法容器 `imu-posture-worker` 可通过独立的 `compose.prediction-external.yaml` 接入，无需重建算法服务；在公网持久 `runtime.conf` 中显式设置 `DATAMARK_PREDICTION_EXTERNAL=1` 后，Jenkins 公网发布自动保留该连接。凭据仅只读挂载现有受保护文件，算法端口不对公网开放，部署后验证真实私网能力接口，失败回滚公网 API。首次接入需先核对网络、挂载及当前业务窗口，普通发布仍禁止改变已有持久挂载；未启用时保留原行为。 合并代码本身不会启动算法服务或修改公网入口。
 
 完整发布的采集可携带 `prediction/posture.json`。新建项目在首次初始化时间轴库后，只有全空且没有人工草稿、原 timeline 或写回记录时才自动初始化姿势。已有项目不会追溯导入；明确从空白重新开始也不会重新灌入预测。任务使用自身冻结规则，在标注员首次打开且尚无草稿／提交时初始化其独立草稿；复核人不产生预测草稿。人工清空或编辑后重新打开不会再次导入，返修、正式提交和已验收结果均保留。
 
