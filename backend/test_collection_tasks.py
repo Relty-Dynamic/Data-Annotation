@@ -170,6 +170,7 @@ class CollectionTaskTests(unittest.TestCase):
             manifest['files'].append({'name':normal.name,'key':'FPV/'+normal.name,'duration_ms':1000,
                                      'size':normal.stat().st_size,'sha256':hashlib.sha256(normal.read_bytes()).hexdigest()})
         build(uploader,prepared,manifest,lambda detail:None)
+        manifest['media_metadata']={item['name']:uploader.probe(prepared/item['key']) for item in manifest['files']}
         provider=MemoryObjects()
         for item in manifest['files']+manifest['cache_files']:
             provider.put(manifest['prefix']+'/'+item['key'],(prepared/item['key']).read_bytes(),create=True)

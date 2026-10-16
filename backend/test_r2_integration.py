@@ -206,19 +206,14 @@ class R2ProjectTests(unittest.TestCase):
         for cache in self.manifest['cache_files']:
             self.provider.objects[PREFIX+'/'+cache['key']] = ((prepared/cache['key']).read_bytes(), 'cache')
         self.provider.objects[PREFIX + '/' + item['key']] = (payload, 'video')
+        self.manifest['media_metadata']={NAME:self.service.probe(video)}
         self.provider.objects[PREFIX + '/manifest.json'] = (document_bytes(self.manifest), 'manifest')
         env = {'FFMPEG_PATH': shutil.which('ffmpeg'), 'FFPROBE_PATH': shutil.which('ffprobe')}
         with patch.dict(os.environ, env):
             value = self.open()
             self.service.start_session(value['id'])
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                status = self.service.sessions.status(value['id'])
-                if status['state'] in ('ready', 'partial', 'error'):
-                    break
-                time.sleep(.05)
-            self.assertEqual(status['state'], 'ready', status)
-            manifest = self.service.media_manifest(self.service, self.service.sessions.manifest(value['id']))
+            self.assertEqual(self.service.session_status(value['id'])['state'],'ready')
+            manifest = self.service.session_manifest(value['id'])
             self.assertEqual(manifest['collection_name'], '1015test')
             self.assertIn('/' + PREFIX + '/' + item['key'] + '?', manifest['videos'][0]['url'])
             normal = next(asset for asset in manifest['assets'] if asset['url'] == manifest['videos'][0]['url'])
@@ -226,7 +221,7 @@ class R2ProjectTests(unittest.TestCase):
             self.assertEqual(normal['file_name'], Path(NAME).stem + '.' + item['sha256'] + '.normal.mp4')
             self.assertTrue(all(asset['url'].startswith('https://') for asset in manifest['assets']))
             self.assertFalse(any(key.startswith('media/') for key in self.provider.objects))
-            self.assertEqual(self.service.sessions.browser_ready(value['id']), {'released': False})
+            self.assertEqual(self.service.browser_ready(value['id']), {'released': False})
 
     def test_shared_account_browser_routes_and_version_guards(self):
         from backend.auth import AuthStore

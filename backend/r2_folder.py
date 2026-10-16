@@ -124,7 +124,17 @@ class FolderUploadManager(MockUploadManager):
 
     def finish(self, ident, user_id, service, can_upload):
         job = self._job(ident, user_id)
+        if hasattr(self.store,'hash_guard'):
+            with self.store.hash_guard:
+                self.store.source_hashes.clear()
+                self.store.source_hash_locks.clear()
         options = job.get('prediction_options', {})
+        if getattr(self.store,'pipeline_enabled',False):
+            from .upload_pipeline import run
+            def transfer_progress(values):
+                with self.lock:job.update(values)
+            self.store.transfer_progress=transfer_progress
+            return run(self,job,user_id,service,can_upload)
         if options.get('prediction') == 'generate':
             if not can_upload(user_id):
                 raise HTTPException(403, '上传权限已关闭。')
@@ -165,10 +175,10 @@ class FolderUploadManager(MockUploadManager):
         return result
 
 
-def attachment_manifest(records):
+def attachment_manifest(records, digest=None):
     result = []
     for record in records:
         path = MockUploadManager._check_local_source(record)
-        result.append({'key': record['output'], 'size': record['size'], 'sha256': file_sha256(path)})
+        result.append({'key': record['output'], 'size': record['size'], 'sha256': digest(record) if digest else file_sha256(path)})
         MockUploadManager._check_local_source(record)
     return result

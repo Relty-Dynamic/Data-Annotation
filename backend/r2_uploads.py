@@ -35,6 +35,8 @@ class R2Uploads:
             con.execute('CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, owner TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL)')
             con.execute('CREATE UNIQUE INDEX IF NOT EXISTS upload_request ON uploads(owner,digest)')
         self.path.chmod(0o600)
+        from .upload_proofs import UploadProofs
+        self.proofs = UploadProofs(self.path)
 
     def job_lock(self, ident, scope='state'):
         with self.locks_guard:
@@ -66,6 +68,7 @@ class R2Uploads:
         if not isinstance(manifest, dict):
             raise HTTPException(422, '上传清单无效。')
         manifest = copy.deepcopy(manifest)
+        manifest.pop('media_metadata',None)  # Only server verification can publish media metadata.
         prefix = capture_prefix(manifest.get('prefix'))
         files = manifest.get('files')
         if not isinstance(files, list) or not 1 <= len(files) <= 1000:
@@ -219,10 +222,10 @@ class R2Uploads:
                 raise HTTPException(409, '上传视频大小不一致。')
             return {'ok': True}
 
-    def finish(self, ident, user, *, authorize=None):
+    def finish(self, ident, user, *, authorize=None, prepare=False):
         from .upload_validation import validate_upload
         with self.job_lock(ident, 'validation'), self.validation_slots:
-            return validate_upload(self, ident, user, authorize)
+            return validate_upload(self, ident, user, authorize, prepare=prepare)
 
     def status(self, ident, user):
         result = self.public(self.load(ident, user))
@@ -230,12 +233,12 @@ class R2Uploads:
             result['validation_active'] = ident in self.validations
         return result
 
-    def begin_finish(self, ident, user, authorize):
+    def begin_finish(self, ident, user, authorize, *, prepare=False):
         # Authentication runs both before enqueue and again throughout publication.
         with self.job_lock(ident):
             current = self.load(ident, user)
             with self.locks_guard:
-                if current['state'] == 'ready' or ident in self.validations:
+                if current['state'] == 'ready' or prepare and current['state'] == 'verified' or ident in self.validations:
                     return self.public(current)
                 if len(self.validations) >= 8:
                     raise HTTPException(429, '核验队列繁忙，请稍后重试；已上传内容保留。')
@@ -245,7 +248,7 @@ class R2Uploads:
                 self.save(current)
                 def work():
                     try:
-                        self.finish(ident, user, authorize=authorize)
+                        self.finish(ident, user, authorize=authorize, prepare=prepare)
                     except Exception:
                         pass  # Persisted, sanitized errors are returned by status.
                     finally:

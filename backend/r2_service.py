@@ -103,7 +103,7 @@ class R2ProjectService(ProjectService):
                 'can_open': manifest is not None, 'capture': {key: manifest.get(key) for key in
                     ('collector_name','uploader_name','capture_date','note')} if manifest else None}
 
-    def collection(self, prefix):
+    def collection(self, prefix, *, download=True):
         prefix = capture_prefix(prefix)
         manifest, _ = self.provider.optional_json(prefix + '/manifest.json')
         if (not isinstance(manifest, dict) or manifest.get('prefix') != prefix
@@ -112,7 +112,7 @@ class R2ProjectService(ProjectService):
         identity = digest(document_bytes(manifest))
         directory = self.local / 'r2-captures' / identity
         names = set()
-        for item in manifest['files']:
+        for index, item in enumerate(manifest['files']):
             if not isinstance(item, dict):
                 raise HTTPException(422, 'S3 视频清单无效。')
             name = item.get('name', Path(item.get('key', '')).name)
@@ -122,13 +122,22 @@ class R2ProjectService(ProjectService):
                 raise HTTPException(422, 'S3 视频清单无效。')
             names.add(name.casefold())
             object_key(item['key'])
-            self.provider.download(prefix + '/' + item['key'], directory / 'FPV' / name, item['sha256'], item['size'])
+            if download:
+                self.provider.download(prefix + '/' + item['key'], directory / 'FPV' / name, item['sha256'], item['size'])
         return manifest, identity, directory
 
     def open_capture(self, prefix, *, actor=None, body=None, inspect=False):
         body = body or {}
         with self.lock:
-            manifest, identity, directory = self.collection(prefix)
+            manifest, identity, directory = self.collection(prefix, download=False)
+            from .upload_intake import metadata
+            source_metadata=metadata(self,prefix,manifest,directory)
+            if source_metadata is None:
+                if 'cache_profile' in manifest:
+                    raise HTTPException(409,'此采集缺少服务端核验元数据，请先恢复上传核验；登记不会重新下载视频。')
+                manifest, identity, directory = self.collection(prefix)
+            else:
+                directory.mkdir(parents=True,exist_ok=True)
             # Validate ownership and the inspection token before any draft replacement.
             pointer, etag = self.provider.optional_json(prefix + '/timeline/.latest.json')
             with self.connection() as con:
@@ -178,7 +187,7 @@ class R2ProjectService(ProjectService):
             # Source files are content-verified; normalize host-specific identity
             # only after matching the immutable R2 collection digest above.
             if mirrors.exists():
-                fresh = self.create(list((directory / 'FPV').iterdir()), directory.name, directory)
+                fresh = self.create([directory/'FPV'/name for name in source_metadata] if source_metadata is not None else list((directory/'FPV').iterdir()), directory.name, directory, metadata_by_name=source_metadata)
                 for path in mirrors.glob('*.timeline.json'):
                     document = json.loads(path.read_bytes())
                     aliases = document['timebase'].setdefault('source_fingerprint_aliases', [])
@@ -186,12 +195,14 @@ class R2ProjectService(ProjectService):
                         aliases.append(fresh['source_fingerprint'])
                         path.write_bytes(document_bytes(document))
             project = super().open_path(str(directory), name=body.get('name') or prefix.split('/')[-1],
-                                        claim_mode=body.get('claim_mode') if body.get('claim_mode') in ('continue', 'restart') else None)
+                                        claim_mode=body.get('claim_mode') if body.get('claim_mode') in ('continue', 'restart') else None, _metadata=source_metadata)
             stored = self.load(project['id'])
             stored.update(_r2_prefix=prefix, _r2_capture_sha256=identity, _r2_manifest=manifest)
             from .upload_playback import reference
             for video in stored['videos']:
                 stored['_sources'][video['id']]['r2_playback'] = reference(prefix, manifest, video['name'])
+                if source_metadata is not None:
+                    stored['_sources'][video['id']]['storage'] = 's3'
             stored.setdefault('_r2_collection_named', False)
             if not stored['_r2_collection_named']:
                 stored['collection_folder_name'] = prefix.split('/')[-1]
@@ -221,6 +232,13 @@ class R2ProjectService(ProjectService):
         return hydrate(self.provider, source, directory, key)
 
     def media_source(self, project, video_id):
+        source=project['_sources'].get(video_id,{})
+        if source.get('storage')=='s3' and source.get('r2_playback'):
+            capture=source['r2_playback']
+            item=capture['manifest']['files'][0]
+            if source['stamp']['size'] != item['size']:
+                raise HTTPException(409,'S3 素材记录与冻结清单不一致。')
+            return Path(source['path']),source
         path, metadata = super().media_source(project, video_id)
         if 'r2_playback' not in metadata and project.get('_r2_manifest'):
             from .upload_playback import reference
@@ -228,7 +246,30 @@ class R2ProjectService(ProjectService):
             metadata = {**metadata, 'r2_playback': reference(project['_r2_prefix'], project['_r2_manifest'], name)}
         return path, metadata
 
+    def direct_session(self, ident):
+        from .upload_playback import direct_manifest
+        return direct_manifest(self.provider,self.load(ident))
+
+    def session_status(self, ident):
+        if self.direct_session(ident) is not None:
+            from .session_cache import SessionCache
+            result=SessionCache._initial(self.load(ident))
+            result.update(state='ready',stage='ready',operation='reuse',ready=result['total'],queued=0,progress=100,
+                          detail='上传缓存已就绪，正在交由浏览器校验本机文件。')
+            for item in result['items']:item.update(state='ready',operation='reuse',progress=100,detail=None)
+            return result
+        return self.sessions.status(ident)
+
+    def browser_ready(self, ident):
+        return {'released':False} if self.direct_session(ident) is not None else self.sessions.browser_ready(ident)
+
+    def session_manifest(self, ident):
+        direct=self.direct_session(ident)
+        return direct if direct is not None else self.media_manifest(self,self.sessions.manifest(ident))
+
     def start_session(self, ident, **kwargs):
+        if self.direct_session(ident) is not None:
+            return self.session_status(ident)
         from .upload_playback import reference
         with self.lock:
             project = self.load(ident)

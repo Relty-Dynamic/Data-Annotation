@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import time
+import threading
 from types import SimpleNamespace
 
 import httpx
@@ -22,6 +23,22 @@ class RemoteCaptureTarget:
         self.attachments = attachments
         self.progress = progress or (lambda value: None)
         self.transfer_progress = lambda value: None
+        self.pipeline_enabled = False
+        self.hash_guard=threading.RLock()
+        self.source_hashes={}
+        self.source_hash_locks={}
+
+    def source_digest(self, record):
+        from .mock_s3 import MockUploadManager, file_sha256
+        path=MockUploadManager._check_local_source(record)
+        key=(str(path),record['size'],record['mtime_ns'],record['device'],record['inode'])
+        with self.hash_guard:lock=self.source_hash_locks.setdefault(key,threading.RLock())
+        with lock:
+            if key not in self.source_hashes:
+                value=file_sha256(path)
+                MockUploadManager._check_local_source(record)
+                self.source_hashes[key]=value
+            return self.source_hashes[key]
 
     def response(self, method, path, **kwargs):
         response = self.client.request(method, path, **kwargs)
@@ -45,16 +62,22 @@ class RemoteCaptureTarget:
             item['duration_ms'] = service.probe(prepared / item['key'])['duration_ms']
         from .upload_playback import build
         build(service, prepared, manifest, self.progress)
+        return self.publish_ready(prefix,prepared,manifest,service)
+
+    def publish_ready(self, prefix, prepared, manifest, service, *, prepare=False, completed_keys=None):
         # Stable request metadata permits restart/resume without storing tokens.
         manifest.pop('created_at', None)
         if self.attachments:
-            manifest['attachments'] = attachment_manifest(self.attachments)
+            manifest['attachments'] = attachment_manifest(self.attachments, self.source_digest)
         job = self.request('POST', '/api/r2/uploads', json=manifest)
         from .upload_transfer import transfer_files
-        transfer_files(self, job, prepared, manifest)
+        transfer_files(self, job, prepared, manifest, completed_keys=completed_keys)
         self.progress('文件已传输，正在校验并发布采集目录，请稍候。')
+        finish_url = f"/api/r2/uploads/{job['id']}/finish?background=1" + ('&prepare=1' if prepare else '')
+        expected = 'verified' if prepare else 'ready'
+        accepted={expected,'ready'} if prepare else {expected}
         try:
-            result = self.request('POST', f"/api/r2/uploads/{job['id']}/finish?background=1", timeout=600)
+            result = self.request('POST', finish_url, timeout=600)
         except (httpx.TransportError, HTTPException) as error:
             if isinstance(error, HTTPException) and error.status_code not in {502, 503, 504}:
                 raise
@@ -64,10 +87,10 @@ class RemoteCaptureTarget:
                 result = self.request('GET', f"/api/r2/uploads/{job['id']}")
             except (httpx.HTTPError, HTTPException):
                 result = None
-            if not result or result.get('state') not in {'ready', 'validating'}:
+            if not result or result.get('state') not in accepted | {'validating'}:
                 raise HTTPException(504, '文件已传输，但尚未确认采集目录发布结果。请稍后重试，已上传内容可续传，不会覆盖已有目录。') from None
         deadline = time.monotonic() + 7200
-        while result.get('state') == 'validating':
+        while result.get('state') == 'validating' or (not prepare and result.get('state') == 'verified'):
             checked, total = result.get('verified_files', 0), result.get('file_count', 0)
             read_bytes, total_bytes = result.get('validation_bytes', 0), result.get('validation_total_bytes', 0)
             percent = read_bytes / total_bytes * 100 if total_bytes else checked / max(1,total) * 100
@@ -79,12 +102,12 @@ class RemoteCaptureTarget:
                 raise HTTPException(504, '后台仍在核验，请稍后重试继续；已上传内容保留。')
             time.sleep(2)
             result = self.request('GET', f"/api/r2/uploads/{job['id']}", timeout=30)
-            if result.get('state') == 'validating' and result.get('validation_active') is False:
+            if result.get('state') in {'validating','verified'} and result.get('validation_active') is False:
                 # Resume after an API restart; errors remain visible until an explicit retry.
-                result = self.request('POST', f"/api/r2/uploads/{job['id']}/finish?background=1", timeout=30)
+                result = self.request('POST', finish_url, timeout=30)
         if result.get('state') == 'validation_error':
             raise HTTPException(422, result.get('error') or '采集目录核验失败，可重试。')
-        if result.get('state') != 'ready':
+        if result.get('state') not in accepted:
             raise HTTPException(502, '服务端尚未确认采集目录发布成功，请稍后重试。')
 
 
@@ -125,6 +148,7 @@ def main():
             if not user.get('can_upload'):
                 raise RuntimeError('此账号尚未获得上传权限。')
             target = RemoteCaptureTarget(client, service)
+            target.pipeline_enabled = 's3-upload-pipeline-v1' in target.request('GET','/api/health').get('capabilities',[])
             manager = FolderUploadManager(target, local / 'staging')
             selection = manager.select_folder(user['id'], folders[0])
             target.attachments = selection['attachments']

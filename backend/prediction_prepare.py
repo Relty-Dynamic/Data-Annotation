@@ -78,7 +78,7 @@ def _publish(path, raw):
 
 
 def prepare_prediction(target, service, root, selection, roles, *, progress=lambda detail: None,
-                       wait=time.sleep, clock=time.monotonic):
+                       wait=time.sleep, clock=time.monotonic, cancel=lambda: None):
     if not all(isinstance(roles.get(k), str) and roles[k].strip() for k in ('chest', 'thigh')) or roles['chest'] == roles['thigh']:
         raise HTTPException(422, '请明确填写不同的胸部和大腿 IMU 设备编号。')
     root = Path(root).absolute()
@@ -94,9 +94,10 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
         raise HTTPException(422, '生成预标注需要完整采集目录中的 WT901 IMU TXT；请勿只选择 FPV 文件夹。')
     videos, records, by_name = [], [], {}
     for index, record in enumerate([*current['videos'], *inputs]):
+        cancel()
         progress(f'正在核验预标注素材 {index + 1}/{len(current["videos"]) + len(inputs)}：{record["name"]}')
         path = MockUploadManager._check_local_source(record)
-        digest = file_sha256(path)
+        digest = target.source_digest(record) if hasattr(target,'source_digest') else file_sha256(path)
         MockUploadManager._check_local_source(record)
         if record in current['videos']:
             video = module.probe(path)
@@ -122,6 +123,7 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
         job = target.request('POST', prefix + '/start')
     deadline = clock() + 7200
     while job['state'] != 'completed':
+        cancel()
         if clock() >= deadline:
             raise HTTPException(504, '预标注仍在处理，可稍后重试继续同一任务。')
         state = job['state']
