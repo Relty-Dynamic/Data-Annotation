@@ -54,10 +54,10 @@ class Workspaces:
                     'gaps': capture.get('gaps',[]) if capture else [],
                     'source_dir': None, 'source_fingerprint': digest(document_bytes([videos, sources])),
                     'videos': videos, '_sources': sources, '_external_hashes': {a: None for a in AXES},
-                    'annotations': empty_annotations(), 'fixed_tracks': [a['id'] for a in axes if a['id'] in AXES],
+                    'annotations': empty_annotations(), 'fixed_tracks': [axis for axis in AXES if any(a['id'] == axis for a in axes)],
                     'selected_tracks': [a['id'] for a in axes],
                     'custom_tracks': [{k: a[k] for k in ('id','name','mode','labels')} for a in axes if a['id'] not in AXES],
-                    'track_labels': {**copy.deepcopy(DEFAULT_TRACK_LABELS), **{a['id']: a['labels'] for a in axes}},
+                    'track_labels': {**copy.deepcopy(DEFAULT_TRACK_LABELS), **{a['id']: a['labels'] for a in axes if a['id'] in AXES}},
                     'track_names': {a['id']: a['name'] for a in axes},
                     'revision': 0, 'updated_at': now(), 'draft_dirty': False, '_task_id': task_id,
                     'collection_folder_name': capture['name'] if capture else 'task-' + task_id, '_task_actor': actor['id']}
@@ -65,6 +65,18 @@ class Workspaces:
                     project['annotations'][axis['id']] = []
                 self.service.save(project)
             changed = False
+            # Older task workspaces mixed custom labels into the fixed-axis map.
+            # Repair only known custom keys; retain strict validation of other data.
+            custom_ids = {axis['id'] for axis in project.get('custom_tracks', [])}
+            labels = project.get('track_labels', {})
+            if custom_ids.intersection(labels):
+                project['track_labels'] = {axis: values for axis, values in labels.items() if axis not in custom_ids}
+                changed = True
+            fixed = project.get('fixed_tracks', [])
+            ordered = [axis for axis in AXES if axis in fixed]
+            if len(ordered) == len(fixed) and ordered != fixed:
+                project['fixed_tracks'] = ordered
+                changed = True
             for video_id, member, path, metadata, original, start, end in resolved:
                 if metadata.get('r2_playback') and project['_sources'][video_id].get('r2_playback') != metadata['r2_playback']:
                     project['_sources'][video_id]['r2_playback'] = copy.deepcopy(metadata['r2_playback'])
