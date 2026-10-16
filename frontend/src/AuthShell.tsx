@@ -1,6 +1,6 @@
 import TaskPanel from './tasks/TaskPanel';
 import TaskAccounts from './tasks/TaskAccounts';
-import {useEffect, useState, type FormEvent} from 'react';
+import {useEffect, useRef, useState, type FormEvent} from 'react';
 import App from './App';
 import {encryptLogin,type LoginChallenge} from './loginEncryption';
 import {authFetch, setCsrfToken, type Account} from './auth';
@@ -13,7 +13,7 @@ export default function AuthShell() {
   const [user, setUser] = useState<Account | null>(null);
   const [checking, setChecking] = useState(true);
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const passwordInput = useRef<HTMLInputElement>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [setupDetail, setSetupDetail] = useState('');
@@ -39,17 +39,22 @@ export default function AuthShell() {
   }, []);
   async function login(event: FormEvent) {
     event.preventDefault();
+    if(busy||!passwordInput.current)return;
+    const input=passwordInput.current;
     setBusy(true);setError('');
     try {
       const challengeResponse=await authFetch('/api/auth/login-challenge',{cache:'no-store'});
       if(!challengeResponse.ok)throw new Error('无法准备加密登录，请稍后重试。');
-      const encrypted=await encryptLogin(username.trim(),password,await challengeResponse.json() as LoginChallenge);
+      const challenge=await challengeResponse.json() as LoginChallenge;
+      const encryption=encryptLogin(username.trim(),input.value,challenge);
+      input.value='';
+      const encrypted=await encryption;
       const response = await authFetch('/api/auth/login-encrypted', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(encrypted)});
       if (!response.ok) { const data=await response.json(); throw new Error(data.detail ?? '登录失败'); }
       const data = await response.json();
-      setCsrfToken(data.csrf ?? '');setPassword('');setUser(data.user);
+      setCsrfToken(data.csrf ?? '');setUser(data.user);
     } catch (cause) {setError(cause instanceof Error?cause.message:'登录失败');}
-    finally {setBusy(false);}
+    finally {input.value='';setBusy(false);}
   }
   async function logout() {
     await authFetch('/api/auth/logout', {method:'POST'});
@@ -69,8 +74,8 @@ export default function AuthShell() {
   if (user) return <App user={user} onLogout={logout}/>;
   return <main className="auth-page"><form className="auth-card" onSubmit={login}>
     <h1>登录 DataMark</h1><p>使用管理员创建的账号进入标注平台。</p>
-    <label>{tasksAvailable?'账号（邮箱）':'账号'}<input maxLength={254} autoComplete="username" value={username} onChange={event=>setUsername(event.target.value)} required/></label>
-    <label>密码<input type="password" autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} required/></label>
+    <label>{tasksAvailable?'账号（邮箱）':'账号'}<input maxLength={254} autoComplete="username" value={username} onChange={event=>setUsername(event.target.value)} disabled={busy} required/></label>
+    <label>密码<input ref={passwordInput} type="password" autoComplete="current-password" disabled={busy} required/></label>
     {error&&<p role="alert" className="import-error">{error}</p>}
     <button className="primary wide" disabled={busy}>{busy?'正在登录…':'登录'}</button>
   </form></main>;
