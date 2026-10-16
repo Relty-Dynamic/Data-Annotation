@@ -36,7 +36,7 @@ export default function TaskWorkbenchReview({taskId,user,time,onSeek,onPreview,o
    // submissions and every historical S3 artifact again before showing it.
    const updated=await taskRequest<TaskItem>(`/items/${task.id}/${endpoint}`,'POST',{expected_revision:task.revision,...body});
    setTask(current=>({...updated,participants:updated.participants??current?.participants}));markDirty(false);setReset(value=>value+1);
-   const message=endpoint==='start-review'?'已开始复核，请查看提交版本，检查后在下方选择通过或退回返修。':endpoint==='accept'?'验收成功，最终结果已锁定。':endpoint==='adjudicate'?'裁定已保存，等待管理员验收。':updated.status==='rework'?'复核已提交，已退回所选标注员返修。':updated.status==='adjudicating'?'复核已提交，请继续处理差异并完成裁定。':updated.annotator_ids.includes(user.id)?'复核已提交。你参与了本任务标注，请由另一名未参与标注的管理员或组长验收。':'复核已提交，等待管理员验收。';
+   const message=endpoint==='start-review'?'已开始复核，请查看提交版本，检查后在下方选择通过或退回返修。':endpoint==='accept'?'验收成功，最终结果已锁定。':endpoint==='adjudicate'?'裁定已保存，等待管理员验收。':updated.status==='rework'?'复核已提交，已退回所选标注员返修。':updated.status==='adjudicating'?'复核已提交，请继续处理差异并完成裁定。':'复核已提交，可由管理员或组长继续验收。';
    if(endpoint==='start-review')setNotice(message);else setSuccess(message);
   }catch(cause){setError(cause instanceof Error?cause.message:'复核操作未确认成功，请刷新任务核对。');}
   finally{actionPending.current=false;setBusy(false);onBusy(false);}

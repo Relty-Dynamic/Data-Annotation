@@ -20,6 +20,17 @@ test('task names identify collection and video, and no unrelated metadata is nee
 });
 test('review stages distinguish pending review, adjudication, completed review and read-only results',()=>{
  assert.match(reviewStage({status:'submitted'}),/待开始/);assert.match(reviewStage({status:'reviewing'}),/进行中/);
- assert.match(reviewStage({status:'reviewing',review_complete:true}),/等待管理员验收/);
+ assert.match(reviewStage({status:'reviewing',review_complete:true}),/等待管理员或组长验收/);
  assert.match(reviewStage({status:'adjudicating'}),/裁定/);assert.match(reviewStage({status:'accepted'}),/只读/);
+});
+
+
+test('manager assigned to annotate can also select the review workspace for that task',()=>{
+ const tasks=[task('own',{annotator_ids:['self'],reviewer_id:'self',status:'submitted'})];
+ for(const [user,roles] of [[{id:'self',role:'admin'},[]],[{id:'self',role:'annotator'},['leader']]]){
+  const choices=assignedTaskChoices(user,tasks,roles);
+  assert.deepEqual(choices.map(choice=>choice.kind).sort(),['annotate','review']);
+  assert.equal(choices.find(choice=>choice.kind==='review').waiting,false);
+ }
+ assert.deepEqual(assignedTaskChoices({id:'self',role:'annotator'},tasks,['annotator','reviewer']).map(choice=>choice.kind),['annotate']);
 });

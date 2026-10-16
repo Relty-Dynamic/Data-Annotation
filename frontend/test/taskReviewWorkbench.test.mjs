@@ -14,7 +14,7 @@ function loadReview(form=null){
  vm.runInNewContext(code,{exports,require(name){
   if(name==='react')return {useEffect(){},useRef:()=>({current:form}),useState:initial=>[initial,()=>{}]};
   if(name==='react/jsx-runtime')return require(name);
-  if(name==='./permissions')return {canReviewTask:(user,roles,task)=>user.role==='admin'||!task.annotator_ids.includes(user.id)&&task.reviewer_id===user.id};
+  if(name==='./permissions')return {canReviewTask:(user,roles,task)=>user.role==='admin'||roles.includes('leader')||!task.annotator_ids.includes(user.id)&&task.reviewer_id===user.id};
   if(name==='../operationTime')return {formatOperationTime};
   if(name==='./TaskPresentation')return {TaskStatus:()=>null};
   if(name==='../domain')return {formatTime:value=>String(value),parseTime:value=>Number(value)};
@@ -92,9 +92,12 @@ test('history is fetched only when expanded and the decision form explains retur
 });
 
 
-test('self-reviewing admin gets an explicit acceptance restriction and other leader can accept',()=>{
- const own=renderToStaticMarkup(createElement(Review,{...props,user:{id:'a',role:'admin'},roles:['leader','reviewer'],task:{...task,review_complete:true}}));
- assert.match(own,/待验收/);assert.match(own,/你参与了本任务标注，不能验收自己的结果/);assert.doesNotMatch(own,/验收并锁定最终结果/);
- const other=renderToStaticMarkup(createElement(Review,{...props,user:{id:'admin',role:'admin'},roles:['leader','reviewer'],task:{...task,review_complete:true}}));
- assert.match(other,/验收并锁定最终结果/);
+test('admins and leaders can accept their own completed review and ordinary reviewer cannot',()=>{
+ for(const [user,roles] of [[{id:'a',role:'admin'},[]],[{id:'a',role:'annotator'},['leader']]]){
+  const html=renderToStaticMarkup(createElement(Review,{...props,user,roles,task:{...task,review_complete:true}}));
+  assert.match(html,/待验收/);assert.match(html,/验收并锁定最终结果/);assert.doesNotMatch(html,/不能验收自己的结果/);
+ }
+ const ordinary=renderToStaticMarkup(createElement(Review,{...props,task:{...task,review_complete:true}}));
+ assert.doesNotMatch(ordinary,/验收并锁定最终结果/);
+ assert.match(ordinary,/请由管理员或组长完成验收/);
 });

@@ -173,7 +173,7 @@ class TaskHostTests(unittest.TestCase):
         response = client.post('/api/auth/login', json={'username': 'LI.XIN@example.com', 'password': '1234567890'},
                                headers={'Origin': 'https://nas.example.com'})
         self.assertEqual(200, response.status_code, response.text)
-        self.assertEqual(['annotator', 'leader'], self.request(client, 'GET', '/me')['roles'])
+        self.assertEqual(['annotator', 'leader', 'reviewer'], self.request(client, 'GET', '/me')['roles'])
         self.request(client, 'GET', '/accounts', expected=403)
         self.request(client, 'POST', '/accounts', body, expected=403)
         # Creation did not change any existing account or legacy role.
@@ -466,16 +466,19 @@ class TaskHostTests(unittest.TestCase):
             task = replacement
         self.assertEqual(project_before, app.state.service.load(self.project['id']))
 
-    def test_admin_assignment_annotation_self_review_and_rework(self):
+    def test_managers_assignment_self_annotation_review_acceptance_and_export(self):
         app, client = self.host()
         original = self.initialize(app, client)
         headers = self.login(client, 'admin')
         admin_id = self.users['admin']['id']
         self.assertEqual(['annotator', 'leader', 'reviewer'], self.request(client, 'GET', '/me')['roles'])
-        for pending in (False, True):
-            with self.subTest(pending=pending):
+        for name,pending in [(name,pending) for name in ('admin','lead') for pending in (False,True)]:
+            headers=self.login(client,name)
+            admin_id=self.users[name]['id']
+            self.assertEqual(['annotator','leader','reviewer'],self.request(client,'GET','/me')['roles'])
+            with self.subTest(manager=name,pending=pending):
                 rule = self.request(client, 'POST', '/rules', {'name': 'admin rule',
-                    'task_type': 'admin-' + str(pending), 'axes': original['rule']['axes']}, headers)
+                    'task_type': name + '-' + str(pending), 'axes': original['rule']['axes']}, headers)
                 assignment = {'annotator_ids': [admin_id], 'reviewer_id': admin_id}
                 task = self.request(client, 'POST', '/items', {'video_id': 'clip', 'rule_id': rule['id'],
                     'deadline': '2026-10-26', **({} if pending else assignment)}, headers)
@@ -508,7 +511,14 @@ class TaskHostTests(unittest.TestCase):
                     'action': 'pass', 'resolved_issue_ids': [i['id'] for i in task['issues'] if i['id'].startswith('review:')]}, headers)
                 self.assertEqual(admin_id, task['reviewed_by'])
                 self.assertTrue(task['review_complete'])
-                self.request(client, 'POST', path + '/accept', {'expected_revision': task['revision']}, headers, 403)
+                task=self.request(client,'POST',path+'/accept',{'expected_revision':task['revision']},headers)
+                self.assertEqual('accepted',task['status'])
+                self.assertEqual(admin_id,task['accepted_by'])
+                delivery=self.request(client,'POST','/deliveries',{'task_ids':[task['id']],'expected_revisions':{task['id']:task['revision']},'request_id':name+str(pending)},headers)
+                exported=client.get('/api/tasks/deliveries/'+delivery['id'])
+                self.assertEqual(exported.status_code,200,exported.text)
+                self.assertIn('admin-segment',exported.text)
+        headers=self.login(client,'admin')
         # An administrator can inspect all tasks but cannot annotate unassigned work.
         path = f"/items/{original['id']}"
         self.assertTrue(self.request(client, 'GET', path + '/workspace/project')['task_readonly'])
