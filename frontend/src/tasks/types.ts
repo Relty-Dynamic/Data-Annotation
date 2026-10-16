@@ -1,7 +1,7 @@
 import type {Segment} from '../domain';
 export type TaskRole = 'annotator'|'reviewer'|'leader';
 export interface TaskAxis {id:string;name:string;mode:'state'|'event';labels:string[];minimum_ms?:number;transport_labels?:string[];transport_types?:string[]}
-export interface TaskRule {id:string;name:string;task_type:string;axes:TaskAxis[];boundary_tolerance_ms?:number}
+export interface TaskRule {id:string;name:string;task_type:string;axes:TaskAxis[];boundary_tolerance_ms?:number|null}
 export type TaskSegment = Segment & {transport_type?:string;needs_review?:boolean;review_reason?:string};
 export type TaskAnnotations = Record<string,TaskSegment[]>;
 export interface TaskVideo {collection_id?:string;collection_name?:string;video_name?:string;id:string;collector_id:string;date:string;scene:string;duration_ms:number;quality:string;uploader_id?:string;source:{backend:string;key:string}}

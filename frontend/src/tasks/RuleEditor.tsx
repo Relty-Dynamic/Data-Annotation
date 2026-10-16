@@ -1,18 +1,19 @@
-import type {FormEvent} from 'react';
+import {useState,type FormEvent} from 'react';
 import {labels,type TaskAxis} from './types';
 
 export default function RuleEditor({axes,onAxes,busy,onCopy,onPublish}:{axes:TaskAxis[];onAxes:(axes:TaskAxis[])=>void;busy:boolean;onCopy:()=>void;onPublish:(body:Record<string,unknown>)=>void}){
+ const [limitTolerance,setLimitTolerance]=useState(false);
  function submit(event:FormEvent<HTMLFormElement>){
   event.preventDefault();
   const data=new FormData(event.currentTarget),text=(key:string)=>String(data.get(key)??'').trim();
-  onPublish({name:text('name'),task_type:text('type'),axes,...(text('tolerance')?{boundary_tolerance_ms:Number(text('tolerance'))}:{})});
+  onPublish({name:text('name'),task_type:text('type'),axes,boundary_tolerance_ms:limitTolerance?Number(text('tolerance')):null});
  }
  return <form className="task-rule-form" onSubmit={submit}>
-  <div className="task-assignment-heading"><div><h3>发布新规则</h3><p>设置任务规则和时间轴，最短标注时长默认不限制。</p></div><button type="button" disabled={busy} onClick={onCopy}>从时间轴库复制</button></div>
+  <div className="task-assignment-heading"><div><h3>规则内容</h3><p>设置任务规则和时间轴，容差及最短标注时长默认不限制。</p></div><button type="button" disabled={busy} onClick={onCopy}>从时间轴库复制</button></div>
   <fieldset className="task-rule-basics"><legend>基本信息</legend>
    <label>规则名称<input name="name" required placeholder="例如：姿势标注规则 V1.0"/></label>
    <label>任务类型<input name="type" required placeholder="例如：姿势标注"/></label>
-   <label>边界容差（毫秒）<input name="tolerance" type="number" min="0" placeholder="0"/><span className="task-rule-hint">比较两份标注时允许的切点误差，留空按 0 处理。</span></label>
+   <label>边界容差<select value={limitTolerance?'custom':'none'} disabled={busy} onChange={event=>setLimitTolerance(event.target.value==='custom')}><option value="none">不限制（默认）</option><option value="custom">设置边界容差</option></select>{limitTolerance&&<span className="task-rule-duration"><input aria-label="边界容差（毫秒）" name="tolerance" type="number" min="0" step="1" required defaultValue="0"/><span>毫秒</span></span>}<span className="task-rule-hint">不限制时由复核员人工判断，保留主动标记的待复核项。</span></label>
   </fieldset>
   <div className="task-rule-section-title"><h4>时间轴配置</h4><span>{axes.length} 条时间轴</span></div>
   <div className="task-rule-axes">{axes.map((axis,index)=>{

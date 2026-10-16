@@ -168,8 +168,8 @@ class TaskStore:
                     raise TaskError(422, '交通工具规则不正确')
                 if isinstance(axis.get('minimum_ms', 0), bool) or not isinstance(axis.get('minimum_ms', 0), (int, float)) or not math.isfinite(axis.get('minimum_ms', 0)) or axis.get('minimum_ms', 0) < 0:
                     raise TaskError(422, '最短片段时长不正确')
-            tolerance = body.get('boundary_tolerance_ms', 0)
-            if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not math.isfinite(tolerance) or tolerance < 0:
+            tolerance = body.get('boundary_tolerance_ms')
+            if tolerance is not None and (isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not math.isfinite(tolerance) or tolerance < 0):
                 raise TaskError(422, '边界容差不正确')
             obj = {**body, 'name': clean_name(body['name']), 'axes': axes, 'id': uid(), 'published_at': stamp(), 'published_by': actor['id'], 'boundary_tolerance_ms': tolerance}
             self._save(db, 'rules', obj, True)
@@ -484,7 +484,8 @@ class TaskStore:
                 raise TaskError(409, '任务尚未完成提交')
             task['status'] = 'reviewing'
             current = [self._read(db, 'submissions', task['current_submissions'][u])['annotations'] for u in task['annotator_ids']]
-            issues = differences(current[0], current[1], self._read(db, 'rules', task['rule_id'])['boundary_tolerance_ms']) if len(current) == 2 else []
+            tolerance = self._read(db, 'rules', task['rule_id']).get('boundary_tolerance_ms', 0)
+            issues = differences(current[0], current[1], tolerance) if len(current) == 2 and tolerance is not None else []
             for u, annotations in zip(task['annotator_ids'], current):
                 for axis, segments in annotations.items():
                     for segment in segments:
