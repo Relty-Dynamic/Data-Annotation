@@ -645,6 +645,31 @@ class TaskHostTests(unittest.TestCase):
             'action': 'pass', 'resolved_issue_ids': [issue['id'] for issue in task['issues'] if issue['id'].startswith('review:')]}, headers)
         self.assertTrue(task['review_complete'])
 
+    def test_direct_task_cache_routes_do_not_start_or_read_server_preparation(self):
+        app,client=self.host()
+        task=self.initialize(app,client)
+        self.login(client,'reviewer')
+        workspace=app.state.task_workspaces
+        manifest={'version':'verified-upload-version','videos':[{'id':'v0001','url':'https://objects.example/normal',
+                  'fast_url':'https://objects.example/fast','thumbnail_url':'https://objects.example/thumbnail',
+                  'storyboard':{'sheets':[]}}],'assets':[]}
+        with patch.object(workspace.media,'direct_session',create=True,return_value=manifest), \
+             patch.object(workspace.service.sessions,'start',side_effect=AssertionError('no server preparation')), \
+             patch.object(workspace.service.sessions,'status',side_effect=AssertionError('no server polling')), \
+             patch.object(workspace.service.sessions,'manifest',side_effect=AssertionError('no server media copy')):
+            path=f"/items/{task['id']}/workspace/project"
+            status=self.request(client,'GET',path+'/session')
+            self.assertEqual(status['state'],'ready')
+            self.assertEqual(status['ready'],status['total'])
+            headers=self.login(client,'reviewer')
+            self.assertEqual(self.request(client,'POST',path+'/session/prepare',{},headers)['state'],'ready')
+            self.assertEqual(self.request(client,'GET',path+'/session/manifest'),manifest)
+            self.assertEqual(self.request(client,'POST',path+'/session/browser-ready',{},headers),{'released':False})
+            preview=self.request(client,'GET',f"/items/{task['id']}/workspace/previews/v0001?fast=true")
+            self.assertEqual(preview['url'],'https://objects.example/fast')
+        client.cookies.clear()
+        self.request(client,'GET',path+'/session/manifest',expected=401)
+
     def test_leader_import_reads_real_video_without_copying_and_checks_permissions(self):
         repo = Path(__file__).resolve().parents[1]
         tools = repo / '.tools' / 'ffmpeg' / 'bin'

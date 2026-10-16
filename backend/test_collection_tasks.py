@@ -187,6 +187,22 @@ class CollectionTaskTests(unittest.TestCase):
         task=store.create_task(self.admin,{**self.body,'collection_id':opened['id'],'storage_backend':'s3','rule_id':rule['id']},collection_layout=media.task_collection(records))
         workspace=Workspaces(self.root/'s3-workspace',store,media);self.addCleanup(workspace.close)
         project=workspace.project(self.a,task['id'])
+        # Entering annotation/review uses published metadata and signed object
+        # URLs, without another Ubuntu download or render for either actor.
+        with patch.object(provider,'download',side_effect=AssertionError('redundant server download')), \
+             patch.object(workspace.service.sessions,'start',side_effect=AssertionError('redundant preparation')):
+            direct=workspace.session_manifest(project,task['id'])
+            self.assertEqual(workspace.session_status(project,start=True)['state'],'ready')
+            self.assertEqual(len(direct['videos']),2)
+            self.assertEqual(len(direct['assets']),8)
+            review_project=workspace.project(self.r,task['id'])
+            review=workspace.session_manifest(review_project,task['id'])
+            self.assertEqual(direct['version'],review['version'])
+            self.assertEqual([a['file_name'] for a in direct['assets']],[a['file_name'] for a in review['assets']])
+            self.assertTrue(all('/'+manifest['prefix']+'/' in asset['url'] for asset in direct['assets']))
+            broken=__import__('copy').deepcopy(project)
+            broken['_sources']['v0001']['r2_playback']['manifest']['cache_files'].pop()
+            with self.assertRaises(HTTPException):workspace.direct_session(broken)
         with patch.object(SessionCache,'_render_compact',side_effect=AssertionError('server encoded')), \
              patch('backend.session_cache.render_local_fast',side_effect=AssertionError('server fast')), \
              patch('backend.session_cache.render_local_thumbnail',side_effect=AssertionError('server jpg')), \

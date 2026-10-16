@@ -46,3 +46,14 @@
 .task-assigned-dialog .task-assigned-menu{display:flex;flex-direction:column;min-height:0;width:100%;padding:22px;overflow:hidden}
 .task-assigned-dialog .task-assigned-menu>header{margin-bottom:8px}.task-assigned-dialog .task-assigned-options{max-height:460px;min-height:0;overflow:auto;padding:2px}
 @media(max-width:600px){.task-assigned-dialog .task-assigned-menu{padding:16px}.task-assigned-dialog .task-assigned-options{max-height:calc(100dvh - 200px)}}
+
+.task-review-start-card{padding:18px;margin:14px 0;border:1px solid #397c70;border-radius:12px;background:linear-gradient(135deg,#1d3836,#182b32)}
+.task-review-start-card>strong{font-size:15px;color:#e0f5ee}.task-review-start-card p,.task-review-help{font-size:12px;line-height:1.8;color:#afc5cf}
+.task-workbench-review .task-review-start{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;min-height:48px;margin-top:14px;border-radius:9px;font-size:14px;font-weight:650;box-shadow:0 4px 14px #0003}
+.task-review-start span{font-size:12px}.task-review-pending{display:flex;align-items:center;gap:9px;padding:12px;border:1px solid #476a7b;border-radius:8px;background:#1d2d39;color:#c1dce7;font-size:12px}
+.task-review-spinner{width:14px;height:14px;border:2px solid #66818b;border-top-color:#9de2cf;border-radius:50%;animation:task-review-spin .8s linear infinite}@keyframes task-review-spin{to{transform:rotate(360deg)}}
+
+.task-review-acceptance{padding:14px;border:1px solid #6c7050;border-radius:10px;background:#2d3025}.task-review-acceptance p{font-size:12px;line-height:1.8;color:#d7ddbe}.task-review-acceptance .primary{width:100%;min-height:42px}
+.task-status-badge[data-status="awaiting_acceptance"]{background:#343525;color:#e7df9e;border-color:#746f43}.task-record-info>small{color:#d6cc9c;font-size:11px;line-height:1.6}
+
+.task-workbench-review .task-review-submit{width:100%;min-height:44px;border-radius:8px;font-weight:600}

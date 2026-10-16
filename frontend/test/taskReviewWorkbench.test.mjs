@@ -69,3 +69,32 @@ test('review sidebar omits repeated task metadata while keeping versions and dec
  assert.doesNotMatch(html,/任务版本|截止|采集员：|标注员：|复核员：/);
  assert.match(html,/提交版本/);assert.match(html,/提交复核结论/);assert.match(html,/历史版本/);
 });
+
+
+test('start review is prominent, explains the workflow and disables repeated clicks while pending',()=>{
+ const submitted={...props,task:{...task,status:'submitted'}};
+ const html=renderToStaticMarkup(createElement(Review,submitted));
+ assert.match(html,/primary task-review-start/);assert.match(html,/准备检查标注结果/);assert.match(html,/通过或退回返修/);
+ const pending=renderToStaticMarkup(createElement(Review,{...submitted,busy:true}));
+ assert.match(pending,/aria-busy="true"/);assert.match(pending,/正在开始复核…/);
+ const calls=[];const tree=Review({...submitted,onAction:endpoint=>calls.push(endpoint)});
+ findAll(tree,node=>node.type==='button'&&node.props.className==='primary task-review-start')[0].props.onClick();
+ assert.deepEqual(calls,['start-review']);
+});
+test('history is fetched only when expanded and the decision form explains return steps',()=>{
+ let requests=0;
+ const tree=Review({...props,task:{...task,history:undefined},onLoadHistory:()=>requests++});
+ assert.equal(requests,0);
+ const details=findAll(tree,node=>node.type==='details')[0];
+ details.props.onToggle({currentTarget:{open:false}});assert.equal(requests,0);
+ details.props.onToggle({currentTarget:{open:true}});assert.equal(requests,1);
+ const html=renderToStaticMarkup(createElement(Review,props));assert.match(html,/填写复核结论/);assert.match(html,/勾选返修人员后提交/);
+});
+
+
+test('self-reviewing admin gets an explicit acceptance restriction and other leader can accept',()=>{
+ const own=renderToStaticMarkup(createElement(Review,{...props,user:{id:'a',role:'admin'},roles:['leader','reviewer'],task:{...task,review_complete:true}}));
+ assert.match(own,/待验收/);assert.match(own,/你参与了本任务标注，不能验收自己的结果/);assert.doesNotMatch(own,/验收并锁定最终结果/);
+ const other=renderToStaticMarkup(createElement(Review,{...props,user:{id:'admin',role:'admin'},roles:['leader','reviewer'],task:{...task,review_complete:true}}));
+ assert.match(other,/验收并锁定最终结果/);
+});

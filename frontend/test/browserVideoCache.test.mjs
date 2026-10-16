@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash,randomBytes} from 'node:crypto';
 import {browserVideoUrl,clearBrowserVideoCache,forgetBrowserVideoUrls,prepareBrowserVideos,desktopAssetFile} from '../src/browserVideoCache.ts';
 import {rememberCacheDirectory,forgetSelectedCacheDirectory} from '../src/cacheDirectory.ts';
-import {fileSha256} from '../src/fileHash.ts';
+import {fileSha256,streamingSha256} from '../src/fileHash.ts';
 const missing=()=>new DOMException('Missing','NotFoundError');
 class Directory{
   constructor(name='dataMarkProject'){this.name=name;this.directories=new Map();this.files=new Map();this.permission='granted';}
@@ -40,7 +40,7 @@ async function setup(t){
 }
 test('streaming SHA-256 matches reference hashes across padding and stream boundaries',async()=>{
   for(const length of [0,1,55,56,63,64,65,128,65535,65536,65537,1024*1024+37]){
-    const bytes=randomBytes(length);assert.equal(await fileSha256(new Blob([bytes])),digest(bytes));
+    const bytes=randomBytes(length);assert.equal(await streamingSha256(new Blob([bytes])),digest(bytes));assert.equal(await fileSha256(new Blob([bytes])),digest(bytes));
   }
 });
 test('all videos and images persist in the selected collection and reuse renewed URLs',async t=>{
@@ -107,4 +107,13 @@ test('another account task reuses uploader desktop files with no media download 
   assert.ok(!activity.some(item=>item.operation==='download'));
   for(const [name,content] of original)assert.deepEqual(directory.files.get(name),content);
   assert.equal(desktopAssetFile('project_2',manifest.videos[0].url).size,bytes.length);
+});
+
+
+test('cache hash cancellation is respected before and after native digest',async t=>{
+ const controller=new AbortController();controller.abort();
+ await assert.rejects(fileSha256(new Blob(['data']),controller.signal),{name:'AbortError'});
+ const later=new AbortController();
+ t.mock.method(crypto.subtle,'digest',async()=>{later.abort();return new ArrayBuffer(32);});
+ await assert.rejects(fileSha256(new Blob(['data']),later.signal),{name:'AbortError'});
 });

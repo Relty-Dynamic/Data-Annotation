@@ -322,13 +322,13 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
         user = actor(request)
         project = workspace.project(user, task_id)
         ident = project['id']
-        state = workspace.service.sessions.status(ident)
+        state = workspace.session_status(project)
         if state['state'] != 'ready':
             if state['state'] == 'idle':
-                workspace.service.sessions.start(ident)
-            return JSONResponse(status_code=202, content=workspace.service.sessions.status(ident), headers={'Retry-After':'1'})
+                workspace.session_status(project, start=True)
+            return JSONResponse(status_code=202, content=workspace.session_status(project), headers={'Retry-After':'1'})
         if hasattr(workspace.media, 'media_manifest'):
-            manifest = workspace.media.media_manifest(workspace.service, workspace.service.sessions.manifest(ident))
+            manifest = workspace.session_manifest(project, task_id)
             return RedirectResponse(manifest['videos'][0]['url'], status_code=307)
         path = workspace.service.sessions.asset(ident, 'normal', 'v0001')
         return CancellableFileResponse(path, media_type='video/mp4')
@@ -351,21 +351,19 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
             if tail == 'editing':
                 return {'others': []}
             if tail == 'session' and request.method == 'GET':
-                return service.sessions.status(ident)
+                return workspace.session_status(project)
             if tail == 'session/prepare' and request.method == 'POST':
-                return service.sessions.start(ident, retry_failed=body.get('retry_failed', False))
+                return workspace.session_status(project, start=True, retry_failed=body.get('retry_failed', False))
             if tail == 'session/manifest' and request.method == 'GET':
-                return (workspace.media.media_manifest(service, service.sessions.manifest(ident))
-                        if hasattr(workspace.media, 'media_manifest') else workspace.urls(service.sessions.manifest(ident), task_id, ident))
+                return workspace.session_manifest(project, task_id)
             if tail == 'session/browser-ready' and request.method == 'POST':
-                return service.sessions.browser_ready(ident)
+                return {'released': False} if workspace.direct_session(project) is not None else service.sessions.browser_ready(ident)
             if tail in ('history', 'operations') and request.method == 'GET':
                 return []
         if resource == 'previews' and any(video['id'] == tail for video in project['videos']):
-            state = service.sessions.status(ident)
+            state = workspace.session_status(project)
             if state['state'] == 'ready':
-                manifest = (workspace.media.media_manifest(service, service.sessions.manifest(ident))
-                            if hasattr(workspace.media, 'media_manifest') else workspace.urls(service.sessions.manifest(ident), task_id, ident))
+                manifest = workspace.session_manifest(project, task_id)
                 video = next(item for item in manifest['videos'] if item['id'] == tail)
                 return {'state': 'ready', 'progress': 100, 'url': video['fast_url'] if request.query_params.get('fast') == 'true' else video['url']}
             return {'state': 'queued', 'progress': None, 'url': None, 'detail': state.get('detail')}

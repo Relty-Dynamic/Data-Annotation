@@ -64,3 +64,19 @@ test('task details are a dialog with metadata, audit and independently gated wor
  assert.match(html,/<dialog/);assert.match(html,/任务详情/);assert.match(html,/1001lixin/);assert.match(html,/姓名-reviewer/);assert.match(html,/已创建任务/);assert.match(html,/打开复核工作台/);assert.doesNotMatch(html,/打开标注工作台/);assert.match(html,/待分配任务/);
  const blocked=renderToStaticMarkup(createElement(Detail,{...props,canReview:false,error:'版本冲突'}));assert.doesNotMatch(blocked,/打开复核工作台/);assert.match(blocked,/role="alert"/);assert.match(blocked,/版本冲突/);
 });
+
+
+test('completed review is labeled waiting acceptance rather than still reviewing',()=>{
+ const html=renderToStaticMarkup(createElement(TaskStatus,{status:'reviewing',reviewComplete:true}));
+ assert.match(html,/待验收/);assert.match(html,/awaiting_acceptance/);assert.doesNotMatch(html,/>复核中</);
+});
+
+
+test('waiting acceptance rows offer the right entry and explain self acceptance restriction',()=>{
+ const task=item('reviewed','reviewing',{review_complete:true});
+ const props={...listProps,items:[task],isReview:()=>true,onReview(){}};
+ const self=renderToStaticMarkup(createElement(TaskList,props));
+ assert.match(self,/待验收/);assert.match(self,/本人参与标注，需其他管理人员验收/);assert.match(self,/查看复核结果/);
+ const manager=renderToStaticMarkup(createElement(TaskList,{...props,userId:'other-admin'}));
+ assert.match(manager,/验收任务/);assert.doesNotMatch(manager,/本人参与标注/);
+});
