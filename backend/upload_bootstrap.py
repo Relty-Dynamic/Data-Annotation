@@ -83,7 +83,12 @@ def offline_kit(directory):
         with path.open('rb') as stream:
             if hashlib.file_digest(stream,'sha256').hexdigest()!=checksum:
                 raise RuntimeError('离线安装包文件校验失败，请重新下载。')
-    actual={p.relative_to(directory).as_posix() for p in directory.rglob('*') if p.is_file()}
+    # Finder and Explorer add display/thumbnail metadata after extraction.
+    # Ignore only ordinary metadata files; aliases and unlisted code still fail.
+    metadata_names={'.ds_store','desktop.ini','thumbs.db'}
+    actual={p.relative_to(directory).as_posix() for p in directory.rglob('*') if p.is_file()
+            and not (p.name.casefold() in metadata_names and not p.is_symlink()
+                     and p.relative_to(directory).as_posix() not in ledger['files'])}
     if actual!=set(ledger['files'])|{'files.json'}:
         raise RuntimeError('离线安装包文件清单不完整或含额外文件。')
     return directory

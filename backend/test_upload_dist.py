@@ -111,6 +111,32 @@ class UploaderDistributionTests(unittest.TestCase):
         (kit/'files.json').write_text(json.dumps(ledger))
         with self.assertRaises(RuntimeError):bootstrap.offline_kit(kit)
 
+    def test_system_metadata_is_allowed_but_missing_and_changed_payloads_still_fail(self):
+        kit=self.kit()
+        for name in ('.DS_Store','wheels/Thumbs.db','tools/desktop.ini'):(kit/name).write_bytes(b'explicit OS metadata fixture')
+        self.assertEqual(bootstrap.offline_kit(kit),kit.resolve())
+        wheel=kit/'wheels/fixture.whl';wheel.unlink()
+        with self.assertRaises(RuntimeError):bootstrap.offline_kit(kit)
+        wheel.write_bytes(b'corrupt wheel fixture')
+        with self.assertRaises(RuntimeError):bootstrap.offline_kit(kit)
+
+    def test_metadata_aliases_and_lookalike_filenames_are_rejected(self):
+        kit=self.kit()
+        (kit/'.DS_Store.py').write_text('unlisted code fixture')
+        with self.assertRaises(RuntimeError):bootstrap.offline_kit(kit)
+        (kit/'.DS_Store.py').unlink()
+        (kit/'.DS_Store').symlink_to(kit/'source.zip')
+        with self.assertRaises(RuntimeError):bootstrap.offline_kit(kit)
+
+    def test_publisher_listed_metadata_keeps_its_digest_check(self):
+        kit=self.kit();metadata=kit/'.DS_Store';metadata.write_bytes(b'listed metadata fixture')
+        ledger=json.loads((kit/'files.json').read_bytes())
+        ledger['files']['.DS_Store']=hashlib.sha256(metadata.read_bytes()).hexdigest()
+        (kit/'files.json').write_text(json.dumps(ledger))
+        self.assertEqual(bootstrap.offline_kit(kit),kit.resolve())
+        metadata.write_bytes(b'changed metadata fixture')
+        with self.assertRaises(RuntimeError):bootstrap.offline_kit(kit)
+
     def test_download_digest_mismatch_does_not_publish_or_reuse_corrupt_cache(self):
         cache=self.root/'downloads';cache.mkdir()
         checksum=hashlib.sha256(b'expected').hexdigest();(cache/checksum).write_bytes(b'corrupt')
