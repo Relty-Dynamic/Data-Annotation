@@ -179,6 +179,10 @@ def install(app, router, actor, accounts, uploads):
     def start(body: dict, request: Request):
         return uploads.start(bridge.actor(bridge.agent(request)),body)
 
+    @app.get('/api/r2/helper/transfer/uploads/{ident}')
+    def upload_status(ident: str, request: Request):
+        return uploads.public(uploads.load(ident, bridge.actor(bridge.agent(request))))
+
     @app.get('/api/r2/helper/transfer/uploads/{ident}/files/{index}')
     def plan(ident: str,index: int,request: Request):
         return uploads.plan(ident,index,bridge.actor(bridge.agent(request)))

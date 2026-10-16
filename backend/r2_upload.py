@@ -72,7 +72,22 @@ class RemoteCaptureTarget:
                     time.sleep(1)
             if record:
                 MockUploadManager._check_local_source(record)
-        self.request('POST', f"/api/r2/uploads/{job['id']}/finish")
+        self.progress('文件已传输，正在校验并发布采集目录，请稍候。')
+        try:
+            result = self.request('POST', f"/api/r2/uploads/{job['id']}/finish", timeout=600)
+        except (httpx.TransportError, HTTPException) as error:
+            if isinstance(error, HTTPException) and error.status_code not in {502, 503, 504}:
+                raise
+            # A lost response does not mean publication failed. Read durable
+            # state through the same owner/permission checks before reporting.
+            try:
+                result = self.request('GET', f"/api/r2/uploads/{job['id']}")
+            except (httpx.HTTPError, HTTPException):
+                result = None
+            if not result or result.get('state') != 'ready':
+                raise HTTPException(504, '文件已传输，但尚未确认采集目录发布结果。请稍后重试，已上传内容可续传，不会覆盖已有目录。') from None
+        if result.get('state') != 'ready':
+            raise HTTPException(502, '服务端尚未确认采集目录发布成功，请稍后重试。')
 
 
 def main():

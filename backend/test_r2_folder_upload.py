@@ -123,6 +123,11 @@ class MultipartModalitiesTests(unittest.TestCase):
         self.assertEqual(prediction['name'], 'prediction/posture.json')
         self.assertTrue(all(path.name.endswith('.mp4') for path in self.probes))
         self.assertEqual(self.uploads.start(USER, self.manifest)['state'], 'ready')
+        with patch.object(self.provider, 'download', side_effect=AssertionError('already verified')):
+            self.assertEqual(self.uploads.finish(job['id'], USER)['state'], 'ready')
+        for actor in (OTHER, {**USER, 'can_upload': False}):
+            with self.assertRaises(HTTPException):
+                self.uploads.finish(job['id'], actor)
         with self.assertRaises(HTTPException):
             self.uploads.start(OTHER, self.manifest)
 
@@ -152,6 +157,56 @@ class MultipartModalitiesTests(unittest.TestCase):
             self.uploads.finish(job['id'], USER)
         self.assertEqual(invalid.exception.status_code, 422)
         self.assertIsNone(self.provider.optional_json(PREFIX + '/manifest.json')[0])
+
+
+class PublicationConfirmationTests(unittest.TestCase):
+    def publish(self, finish_error=None, state='ready'):
+        self.requests = []
+        self.progress = []
+        def handle(request):
+            self.requests.append(request)
+            if request.url.path.endswith('/finish'):
+                self.assertEqual(request.extensions['timeout']['read'], 600)
+                if isinstance(finish_error, int):
+                    return httpx.Response(finish_error, json={'detail': 'server response'})
+                if finish_error:
+                    raise finish_error
+                return httpx.Response(200, json={'state': state})
+            if request.method == 'POST':
+                return httpx.Response(200, json={'id': 'upload'})
+            if '/files/' in request.url.path:
+                return httpx.Response(200, json={'complete': True})
+            return httpx.Response(200, json={'state': state})
+        service = SimpleNamespace(probe=lambda path: {'duration_ms': 1000})
+        with httpx.Client(base_url='https://api.example.com', timeout=30,
+                          transport=httpx.MockTransport(handle)) as client:
+            target = RemoteCaptureTarget(client, service, progress=self.progress.append)
+            target.publish_capture(PREFIX, Path('/unused'), {'files': [{'key': 'FPV/clip.mp4'}]}, service)
+
+    def test_long_publication_wait_and_explicit_progress(self):
+        self.publish()
+        self.assertIn('校验并发布', self.progress[-1])
+        self.assertEqual(len(self.requests), 3)
+
+    def test_lost_response_and_gateway_timeout_confirm_durable_success(self):
+        for error in (httpx.ReadTimeout('fixture'), httpx.RemoteProtocolError('fixture'), 504):
+            with self.subTest(error=type(error).__name__):
+                self.publish(error)
+                self.assertEqual(self.requests[-1].url.path, '/api/r2/uploads/upload')
+                self.assertEqual(self.requests[-1].method, 'GET')
+
+    def test_unconfirmed_publication_never_reports_success(self):
+        with self.assertRaises(HTTPException) as failed:
+            self.publish(httpx.ReadTimeout('fixture'), 'uploading')
+        self.assertEqual(failed.exception.status_code, 504)
+        self.assertIn('尚未确认', failed.exception.detail)
+
+    def test_validation_and_permission_failures_are_not_hidden_by_status(self):
+        for status in (401, 403, 422):
+            with self.subTest(status=status), self.assertRaises(HTTPException) as failed:
+                self.publish(status)
+            self.assertEqual(failed.exception.status_code, status)
+            self.assertTrue(self.requests[-1].url.path.endswith('/finish'))
 
 
 class HelperWindowTests(unittest.TestCase):
