@@ -54,6 +54,11 @@ export function preparationPresentation(status: {
     title = '正在载入预览图片';
     activity = '载入预览图片';
     description = '视频缓存已经准备好，正在将封面和悬停图片载入当前页面。全部载入后可开始标注。';
+    if (status?.operation === 'check' || status?.operation === 'reuse' || status?.operation === 'download') {
+      title = status.operation === 'check' ? '正在校验本机缓存' : status.operation === 'reuse' ? '正在复用本机缓存' : '正在补齐缺失缓存';
+      activity = title;
+      description = '同一电脑、同一授权目录下的有效缓存可跨账号复用，不重复压缩或下载；仅补齐缺失或校验失败的文件。';
+    }
   }
   if (ready) {
     title = '标注素材已就绪';
@@ -69,7 +74,7 @@ export function preparationPresentation(status: {
   }
   return {
     phase, title, description, activity,
-    progressLabel: phase === 'browser' ? '当前阶段：预览图片载入' : phase === 'ready' ? '全部播放素材已就绪' : '当前阶段：全部视频缓存准备',
+    progressLabel: phase === 'browser' ? status?.operation === 'assets' ? '当前阶段：预览图片载入' : '当前阶段：本机缓存校验与载入' : phase === 'ready' ? '全部播放素材已就绪' : '当前阶段：全部视频缓存准备',
     progress: status && !status.checking ? measuredPercent(status.progress) : null,
   };
 }

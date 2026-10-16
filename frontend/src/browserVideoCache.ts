@@ -3,6 +3,7 @@ import type {SessionManifest, DesktopAsset} from './sessionAssets.ts';
 import {fetchAsset, validAssetUrl} from './objectAsset.ts';
 import {cacheDirectory,savedCacheIndex} from './cacheDirectory.ts';
 import {fileSha256} from './fileHash.ts';
+type CacheActivity = (operation:'check'|'reuse'|'download',ready:number,total:number)=>void;
 const ROOT='datamark-playback-v1';
 const APPLICATION='DataMark-desktop-cache-v1';
 const live=new Map<string,{urls:Map<string,string>;files:Map<string,File>}>();
@@ -19,7 +20,7 @@ async function oldPreview(projectId:string,manifest:SessionManifest,url:string):
   const video=manifest.videos.find(item=>item.url===url||item.fast_url===url);if(!video)return;
   try{const root=await navigator.storage.getDirectory(),cache=await root.getDirectoryHandle(ROOT),project=await cache.getDirectoryHandle(projectId),version=await project.getDirectoryHandle(manifest.version);return await(await version.getFileHandle(`${video.id}-${video.url===url?'normal':'fast'}.mp4`)).getFile();}catch(error){if(!(error instanceof DOMException&&error.name==='NotFoundError'))throw error;}
 }
-async function prepare(projectId:string,manifest:SessionManifest,signal:AbortSignal,onProgress:(ready:number,total:number)=>void){
+async function prepare(projectId:string,manifest:SessionManifest,signal:AbortSignal,onProgress:(ready:number,total:number)=>void,onActivity?:CacheActivity){
   if(!/^[a-zA-Z0-9_-]{1,80}$/.test(manifest.version)||(!validPart(manifest.collection_name??'')||(manifest.collection_name?.length??0)>120)||!manifest.assets?.length||manifest.assets.some(item=>!validAsset(item)))throw new Error('服务未提供可校验的桌面缓存清单，请更新服务后重新准备。');
   const required=manifest.videos.flatMap(video=>[video.url,video.fast_url,video.thumbnail_url,...video.storyboard.sheets]);
   if(required.some(url=>!manifest.assets!.some(item=>item.url===url)))throw new Error('桌面缓存清单缺少必需素材。');
@@ -40,9 +41,10 @@ async function prepare(projectId:string,manifest:SessionManifest,signal:AbortSig
   await jsonFile(directory,ref,{application:APPLICATION,files:records,state:'downloading'});
   const urls=new Map<string,string>(),files=new Map<string,File>();onProgress(0,manifest.assets.length);
   try{for(const [i,item] of manifest.assets.entries()){
-    signal.throwIfAborted();let file:File|undefined;let existed=false;
+    signal.throwIfAborted();onActivity?.('check',i,manifest.assets.length);let file:File|undefined;let existed=false;
     try{file=await(await directory.getFileHandle(item.file_name)).getFile();existed=true;}catch(error){if(!(error instanceof DOMException&&error.name==='NotFoundError'))throw error;}
     if(file&&(file.size!==item.size||await fileSha256(file,signal)!==item.sha256))file=undefined;
+    let reused=!!file;
     if(!file){
       if(existed){
         if(!knownOwners.has(item.file_name.toLowerCase()))throw new Error('同名文件不是已登记的缓存，已保留原文件，请选择其它缓存目录。');
@@ -51,8 +53,8 @@ async function prepare(projectId:string,manifest:SessionManifest,signal:AbortSig
       }
       const legacy=await oldPreview(projectId,manifest,item.url);
       let incoming:ReadableStream<Uint8Array>;
-      if(legacy&&legacy.size===item.size&&await fileSha256(legacy,signal)===item.sha256)incoming=legacy.stream();
-      else{const response=await fetchAsset(item.url,{cache:'no-store',signal});if(!response.ok||!response.body||!response.headers.get('content-type')?.startsWith(item.media_type))throw new Error('缓存素材下载失败，请重试。');incoming=response.body;}
+      if(legacy&&legacy.size===item.size&&await fileSha256(legacy,signal)===item.sha256){incoming=legacy.stream();reused=true;}
+      else{onActivity?.('download',i,manifest.assets.length);const response=await fetchAsset(item.url,{cache:'no-store',signal});if(!response.ok||!response.body||!response.headers.get('content-type')?.startsWith(item.media_type))throw new Error('缓存素材下载失败，请重试。');incoming=response.body;}
       const handle=await directory.getFileHandle(item.file_name,{create:true});
       try{
         const writable=await handle.createWritable();let received=0;
@@ -62,7 +64,7 @@ async function prepare(projectId:string,manifest:SessionManifest,signal:AbortSig
     }
     const record=records.find(record=>record.file_name===item.file_name)!;record.owned=record.owned||!existed||knownOwners.has(item.file_name.toLowerCase());
     await jsonFile(directory,ref,{application:APPLICATION,files:records,state:'downloading'});
-    files.set(item.url,file);urls.set(item.url,URL.createObjectURL(file));onProgress(i+1,manifest.assets.length);
+    files.set(item.url,file);urls.set(item.url,URL.createObjectURL(file));onProgress(i+1,manifest.assets.length);onActivity?.(reused?'reuse':'download',i+1,manifest.assets.length);
   }
   signal.throwIfAborted();
   await jsonFile(directory,'manifest.'+manifest.version+'.json',{application:APPLICATION,collection_name:manifest.collection_name,profile:manifest.profile,files:records});
@@ -70,10 +72,10 @@ async function prepare(projectId:string,manifest:SessionManifest,signal:AbortSig
   forgetBrowserVideoUrls(projectId);live.set(projectId,{urls,files});
   }catch(error){for(const url of urls.values())URL.revokeObjectURL(url);throw error;}
 }
-export async function prepareBrowserVideos(projectId:string,manifest:SessionManifest,signal:AbortSignal,onProgress:(ready:number,total:number)=>void){
+export async function prepareBrowserVideos(projectId:string,manifest:SessionManifest,signal:AbortSignal,onProgress:(ready:number,total:number)=>void,onActivity?:CacheActivity){
   const locks=(navigator as unknown as {locks?:LockManager}).locks;
-  if(locks)return locks.request('datamark-desktop:'+manifest.collection_name,{signal},()=>prepare(projectId,manifest,signal,onProgress));
-  return prepare(projectId,manifest,signal,onProgress);
+  if(locks)return locks.request('datamark-desktop:'+manifest.collection_name,{signal},()=>prepare(projectId,manifest,signal,onProgress,onActivity));
+  return prepare(projectId,manifest,signal,onProgress,onActivity);
 }
 export async function clearBrowserVideoCache(projectId:string){
   forgetBrowserVideoUrls(projectId);

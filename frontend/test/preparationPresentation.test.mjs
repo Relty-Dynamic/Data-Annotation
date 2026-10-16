@@ -69,7 +69,7 @@ test('remote processing and download identify where preparation is happening', (
 });
 
 test('remote completion still waits for browser images and failed preparation remains retryable', () => {
-  assert.equal(preparationPresentation({...base,stage:'browser',operation:'download'}).title,'正在载入预览图片');
+  assert.equal(preparationPresentation({...base,stage:'browser',operation:'assets'}).title,'正在载入预览图片');
   assert.equal(preparationPresentation({...base,state:'partial',operation:'remote'}).title,'部分素材准备失败');
   assert.equal(preparationPresentation({...base,operation:'download'},'服务器连接中断').title,'素材准备需要重试');
   assert.equal(preparationItemLabel('running','remote'),'服务器处理中');
@@ -115,7 +115,7 @@ test('per-file cache stages stay in one stable overall preparation phase', () =>
 });
 
 test('browser image zero is labeled as a new measured phase rather than overall progress resetting', () => {
-  const view=preparationPresentation({...base,stage:'browser',operation:'reuse',progress:0});
+  const view=preparationPresentation({...base,stage:'browser',operation:'assets',progress:0});
   assert.equal(view.phase,'browser');
   assert.equal(view.title,'正在载入预览图片');
   assert.match(view.progressLabel,/当前阶段.*图片载入/);
@@ -142,4 +142,14 @@ test('per-file reuse labels only claim reuse when backend confirms it', () => {
   assert.equal(preparationItemLabel('running','generate'),'首次生成');
   assert.equal(preparationItemLabel('running','assets'),'准备快进和图片');
   assert.equal(preparationItemLabel('error','generate'),null);
+});
+
+
+test('browser phase distinguishes local verification and reuse from actual download', () => {
+  for (const [operation,title] of [['check','正在校验本机缓存'],['reuse','正在复用本机缓存'],['download','正在补齐缺失缓存']]) {
+    const view=preparationPresentation({...base,stage:'browser',operation});
+    assert.equal(view.title,title);
+    assert.match(view.description,/跨账号复用/);
+    assert.equal(view.phase,'browser');
+  }
 });

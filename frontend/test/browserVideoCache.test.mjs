@@ -86,3 +86,25 @@ test('matching files without application ownership survive explicit cleanup',asy
   await prepareBrowserVideos('project_1',manifest,signal,()=>{});assert.equal(requests(),0);
   await clearBrowserVideoCache('project_1');assert.ok(manifest.assets.every(item=>directory.files.has(item.file_name)));
 });
+
+
+test('another account task reuses uploader desktop files with no media download or rewrite',async t=>{
+  const {root,requests}=await setup(t),{manifest,bytes}=fixture(),signal=new AbortController().signal;
+  const directory=await root.getDirectoryHandle(manifest.collection_name,{create:true});
+  for(const item of manifest.assets)directory.files.set(item.file_name,Buffer.from(bytes));
+  directory.files.set('.datamark-ref.uploader.json',Buffer.from(JSON.stringify({application:'DataMark-desktop-cache-v1',files:manifest.assets.map(item=>({...item,owned:true}))})));
+  const original=new Map(directory.files),activity=[];
+  const originalHandle=directory.getFileHandle.bind(directory);
+  directory.getFileHandle=async(name,options)=>{
+    const handle=await originalHandle(name,options);
+    if(manifest.assets.some(item=>item.file_name===name))handle.createWritable=async()=>{throw new Error('Existing media must not be rewritten');};
+    return handle;
+  };
+  await prepareBrowserVideos('project_2',manifest,signal,()=>{},(operation,ready,total)=>activity.push({operation,ready,total}));
+  assert.equal(requests(),0);
+  assert.equal(activity.filter(item=>item.operation==='check').length,4);
+  assert.deepEqual(activity.at(-1),{operation:'reuse',ready:4,total:4});
+  assert.ok(!activity.some(item=>item.operation==='download'));
+  for(const [name,content] of original)assert.deepEqual(directory.files.get(name),content);
+  assert.equal(desktopAssetFile('project_2',manifest.videos[0].url).size,bytes.length);
+});
