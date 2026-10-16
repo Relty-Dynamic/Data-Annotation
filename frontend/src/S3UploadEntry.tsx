@@ -4,39 +4,52 @@ import {apiOrigin} from './apiOrigin';
 import {authFetch} from './auth';
 import {bridgeRequest,helperStorageKey,installCommands,takeHelperHandoff,type HelperStatus} from './uploadBridge';
 import './s3Upload.css';
+import {CheckCircle2,FolderOpen,Upload,RefreshCw,X} from 'lucide-react';
+import SuccessDialog from './tasks/SuccessDialog';
+import {claimUploadCompletion,uploadStateName} from './uploadFeedback';
 
 let pairedHelper='';
+const notifiedUploads=new Set<string>();
 function readId(){try{return pairedHelper||localStorage.getItem(helperStorageKey)||'';}catch{return pairedHelper;}}
-function UploadDialog({onClose}:{onClose:()=>void}){
+export function UploadDialog({onClose}:{onClose:()=>void}){
  const [helper,setHelper]=useState<HelperStatus|null>(null),[error,setError]=useState(''),[busy,setBusy]=useState(false),[checking,setChecking]=useState(true),[copied,setCopied]=useState('');
  const [backendReady,setBackendReady]=useState<boolean|null>(null),[connectionError,setConnectionError]=useState('');
  const [collector,setCollector]=useState(''),[uploader,setUploader]=useState(''),[note,setNote]=useState('');
- const dialogRef=useRef<HTMLElement>(null),closeRef=useRef(onClose);closeRef.current=onClose;
+ const dialogRef=useRef<HTMLDialogElement>(null),mounted=useRef(true);
+ const [success,setSuccess]=useState('');
  const commands=installCommands(apiOrigin||location.origin);
- async function check(){const id=readId();if(!id){setHelper(null);setChecking(false);return;}try{setHelper(await bridgeRequest<HelperStatus>('helpers/'+id));setConnectionError('');setChecking(false);}catch(cause){setHelper(null);setChecking(false);setConnectionError(cause instanceof Error?cause.message:'组件检测失败。');}}
- useEffect(()=>{let alive=true,ready=false;void authFetch('/api/health').then(async response=>{if(!response.ok)throw new Error('无法连接公网上传服务。');const health=await response.json();if(!alive)return;ready=health.capabilities?.includes('s3-helper-bridge')===true;setBackendReady(ready);if(ready)void check();else setChecking(false);}).catch(()=>{if(alive){setBackendReady(false);setChecking(false);setConnectionError('无法连接公网上传服务，请检查网络后刷新。');}});const timer=setInterval(()=>{if(alive&&ready)void check();},2000);return()=>{alive=false;clearInterval(timer);};},[]);
- useEffect(()=>{const previous=document.activeElement,dialog=dialogRef.current;dialog?.focus();const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeRef.current();return;}if(event.key!=='Tab'||!dialog)return;const controls=Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),summary'));const first=controls[0],last=controls[controls.length-1];if(!first){event.preventDefault();return;}if(event.shiftKey&&(document.activeElement===first||document.activeElement===dialog)){event.preventDefault();last.focus();}else if(!event.shiftKey&&(document.activeElement===last||document.activeElement===dialog)){event.preventDefault();first.focus();}};window.addEventListener('keydown',key,true);return()=>{window.removeEventListener('keydown',key,true);if(previous instanceof HTMLElement&&previous.isConnected)previous.focus({preventScroll:true});};},[]);
+ async function check(){const id=readId();if(!id){setHelper(null);setChecking(false);return;}try{const value=await bridgeRequest<HelperStatus>('helpers/'+id);if(!mounted.current)return;setHelper(value);setConnectionError('');setChecking(false);}catch(cause){if(!mounted.current)return;setHelper(null);setChecking(false);setConnectionError(cause instanceof Error?cause.message:'组件检测失败。');}}
+ useEffect(()=>{mounted.current=true;let alive=true,ready=false;void authFetch('/api/health').then(async response=>{if(!response.ok)throw new Error('无法连接公网上传服务。');const health=await response.json();if(!alive)return;ready=health.capabilities?.includes('s3-helper-bridge')===true;setBackendReady(ready);if(ready)void check();else setChecking(false);}).catch(()=>{if(alive){setBackendReady(false);setChecking(false);setConnectionError('无法连接公网上传服务，请检查网络后刷新。');}});const timer=setInterval(()=>{if(alive&&ready)void check();},2000);return()=>{alive=false;mounted.current=false;clearInterval(timer);};},[]);
+ useEffect(()=>{const dialog=dialogRef.current!;dialog.showModal();return()=>dialog.close()},[]);
+ useEffect(()=>{if(busy)return;const completion=claimUploadCompletion(helper,notifiedUploads);if(completion)setSuccess(completion.prefix)},[helper,busy]);
  async function command(action:'select'|'start',event?:FormEvent){event?.preventDefault();if(!helper)return;setBusy(true);setError('');try{setHelper(await bridgeRequest<HelperStatus>('helpers/'+helper.id+'/commands',{action,fields:action==='start'?{collector:collector.trim(),uploader:uploader.trim(),note:note.trim()}:{}}));}catch(cause){setError(cause instanceof Error?cause.message:'操作未完成。');}finally{setBusy(false);}}
- async function copy(value:string){try{await navigator.clipboard.writeText(value);setCopied('已复制，请在本机终端粘贴运行。');}catch{setCopied('请手动选中并复制命令。');}}
+ async function copy(value:string,message='已复制，请在本机终端粘贴运行。'){try{await navigator.clipboard.writeText(value);setCopied(message);}catch{setCopied('请手动选中并复制命令。');}}
  const pending=busy||!!helper?.command||!!helper?.report.busy;
  const selection=helper?.report.selection,job=helper?.report.job;
- return createPortal(<div className="s3-upload-backdrop" onClick={onClose}><section ref={dialogRef} tabIndex={-1} className="s3-upload-dialog" role="dialog" aria-modal="true" aria-labelledby="s3-upload-title" data-s3-upload-dialog onClick={event=>event.stopPropagation()}>
-  <header><div><small>DataMark · 公网 S3</small><h2 id="s3-upload-title">上传采集文件夹</h2></div><button aria-label="关闭上传" onClick={onClose}>×</button></header>
-  <p>在本机压缩后直传 S3。原视频保留原处，压缩缓存同时保留到桌面 dataMarkProject。</p>
-  {checking?<p role="status">正在检测本机压缩组件…</p>:backendReady===false?<p role="alert">公网后端尚未就绪或尚未更新到同页上传版本，请稍后刷新页面。</p>:!helper?.online?<section className="s3-upload-install"><h3>未检测到正在运行的本机组件</h3><p>组件可能尚未安装、尚未启动或网络中断。首次使用或组件已关闭时，复制对应命令到这台电脑的终端运行。命令会安装／更新 Python、依赖和 FFmpeg，并启动组件；不需要管理员权限，不修改系统 PATH。</p><label>macOS<code>{commands.mac}</code><button onClick={()=>void copy(commands.mac)}>复制 macOS 命令</button></label><label>Windows PowerShell<code>{commands.windows}</code><button onClick={()=>void copy(commands.windows)}>复制 Windows 命令</button></label><p role="status">{copied}</p><p>安装完成会打开原 DataMark 页面，自动关联当前登录账号。请保持组件终端开启；无需进入另一套上传页面或重新输入密码。</p><button onClick={()=>void check()}>重新检测</button></section>:<>
-   <p className="s3-upload-ready">本机组件已连接 · {helper.platform==='darwin'?'macOS':'Windows'}</p>
-   <button className="s3-upload-open" disabled={pending} onClick={()=>void command('select')}>{pending&&helper.command?.action==='select'?'请在系统窗口选择文件夹…':'选择本机采集文件夹'}</button>
-   {selection&&<><p>{selection.name} · {selection.capture_date} · {selection.videos.length} 个视频 · {selection.attachments.length} 个附属文件</p><details><summary>查看上传清单与排除项</summary><pre>{['FPV（压缩后上传）',...selection.videos,'','IMU／HEART／prediction（原样上传）',...selection.attachments,'','不上传',...selection.ignored].join('\n')}</pre></details><form onSubmit={event=>void command('start',event)}><label>采集人<input required maxLength={80} value={collector} disabled={pending} onChange={event=>setCollector(event.target.value)} placeholder="例如 lixin"/></label><label>上传人（选填）<input value={uploader} maxLength={80} disabled={pending} onChange={event=>setUploader(event.target.value)} placeholder="默认使用当前登录账号姓名"/></label><label>备注（选填）<textarea value={note} maxLength={500} disabled={pending} onChange={event=>setNote(event.target.value)}/></label><p>S3 目标：daily/{selection.capture_date}/{selection.capture_date.slice(4)+collector.trim()}/</p><button className="s3-upload-open" disabled={pending}>{pending?'正在处理…':'压缩并上传'}</button></form></>}
+ return createPortal(<>
+ <dialog ref={dialogRef} className="s3-upload-dialog" aria-labelledby="s3-upload-title" aria-modal="true" data-s3-upload-dialog onCancel={event=>{event.preventDefault();onClose();}}>
+  <header className="s3-upload-heading"><div><h2 id="s3-upload-title">上传采集文件夹</h2><p>选择文件夹，在本机压缩后上传到 S3。</p></div><button type="button" className="s3-upload-icon" aria-label="关闭上传" onClick={onClose}><X size={19}/></button></header>
+  {checking?<p className="s3-upload-message" role="status">正在检测本机组件…</p>:backendReady===false?<p className="s3-upload-error" role="alert">上传服务暂不可用，请稍后刷新重试。</p>:!helper?.online?<section className="s3-upload-card s3-upload-install"><h3>连接本机上传组件</h3><p>首次使用或组件未启动时，复制对应命令到本机终端运行，并保持终端开启。</p><label>macOS<code>{commands.mac}</code><button type="button" className="s3-upload-secondary" onClick={()=>void copy(commands.mac)}>复制 macOS 命令</button></label><label>Windows PowerShell<code>{commands.windows}</code><button type="button" className="s3-upload-secondary" onClick={()=>void copy(commands.windows)}>复制 Windows 命令</button></label>{copied&&<p role="status">{copied}</p>}<button type="button" className="s3-upload-secondary" onClick={()=>void check()}><RefreshCw size={14}/>重新检测</button></section>:<>
+   <section className="s3-upload-card"><div className="s3-upload-section-heading"><h3>采集素材</h3><span className="s3-upload-ready"><CheckCircle2 size={13}/>组件已连接</span></div>
+    <button type="button" className="s3-upload-select" disabled={pending} onClick={()=>void command('select')}><FolderOpen size={19}/><span>{selection?selection.name:'选择本机采集文件夹'}<small>{pending&&helper.command?.action==='select'?'请在系统窗口选择文件夹…':selection?`${selection.capture_date} · ${selection.videos.length} 段视频 · ${selection.attachments.length} 个附属文件`:'选择包含视频及采集数据的文件夹'}</small></span></button>
+    {selection&&<details className="s3-upload-files"><summary>文件清单{selection.ignored.length>0?` · ${selection.ignored.length} 项不参与上传`:''}</summary><pre>{['视频',...selection.videos,...(selection.attachments.length?['','附属数据',...selection.attachments]:[]),...(selection.ignored.length?['','不上传',...selection.ignored]:[])].join('\n')}</pre></details>}
+   </section>
+   {selection&&job?.state!=='ready'&&<form className="s3-upload-card s3-upload-form" onSubmit={event=>void command('start',event)}><h3>上传信息</h3><div className="s3-upload-fields"><label>采集人<input required maxLength={80} value={collector} disabled={pending} onChange={event=>setCollector(event.target.value)} placeholder="例如 lixin"/></label><label>上传人（选填）<input value={uploader} maxLength={80} disabled={pending} onChange={event=>setUploader(event.target.value)} placeholder="默认使用当前账号姓名"/></label><label className="s3-upload-field-wide">备注（选填）<textarea value={note} maxLength={500} disabled={pending} onChange={event=>setNote(event.target.value)}/></label></div>
+    <div className="s3-upload-destination"><span>保存目录</span><code>daily/{selection.capture_date}/{selection.capture_date.slice(4)+collector.trim()}/</code></div>
+    <footer><span>压缩缓存同步保留至桌面 dataMarkProject。</span><button className="s3-upload-open" disabled={pending}><Upload size={15}/>{pending?'正在处理…':'压缩并上传'}</button></footer>
+   </form>}
   </>}
-  {job&&<section aria-live="polite"><h3>上传进度</h3><p>{job.prefix}</p><progress max={100} value={job.progress}/><p>{job.detail}</p>{job.state==='ready'&&<p>上传完成。现在可以导入此 S3 采集目录，登记、质检后分配任务。</p>}</section>}
-  {(error||connectionError||helper?.report.error)&&<p role="alert" className="import-error">{error||connectionError||helper?.report.error}</p>}
-  <p>关闭此弹窗不会取消本机任务；再次点击上传可查看进度。timeline 由标注输出生成，已有本机时间轴不上传。</p>
- </section></div>,document.body);
+  {job&&<section className="s3-upload-card s3-upload-progress" aria-live="polite"><div className="s3-upload-section-heading"><h3>{uploadStateName(job.state)}</h3><span>{Math.min(100,Math.max(0,Math.round(job.progress)))}%</span></div><progress aria-label="压缩及上传进度" max={100} value={job.progress}/><p>{job.state==='ready'?job.prefix:job.detail}</p>{job.state==='ready'&&<><button type="button" className="s3-upload-secondary" onClick={()=>void copy(job.prefix,'采集目录已复制。')}>复制采集目录</button>{copied&&<p role="status">{copied}</p>}<p>可在“素材与质检”导入该采集目录。</p></>}</section>}
+  {(error||connectionError||helper?.report.error)&&<p role="alert" className="s3-upload-error">{error||connectionError||helper?.report.error}</p>}
+  {pending&&<p className="s3-upload-footnote">关闭窗口后任务继续运行，可再次打开查看进度。</p>}
+ </dialog>
+ {success&&<SuccessDialog title="上传成功" message={`采集目录：${success}。可在“素材与质检”导入该目录。`} onClose={()=>setSuccess('')}/>}
+ </>,document.fullscreenElement??document.body);
 }
 
 export default function S3UploadEntry(){
  const [open,setOpen]=useState(false);
- return <section className="s3-upload-entry"><h3>上传到 S3</h3><p>选择本机采集文件夹，自动压缩视频并上传 FPV、IMU、HEART 和 prediction。</p><button className="s3-upload-open" onClick={()=>setOpen(true)}>上传采集文件夹</button>{open&&<UploadDialog onClose={()=>setOpen(false)}/>}</section>;
+ return <section className="s3-upload-entry"><div><h3>上传到 S3</h3><p>本机压缩后上传采集数据。</p></div><button className="s3-upload-open primary" onClick={()=>setOpen(true)}><Upload size={15}/>上传采集文件夹</button>{open&&<UploadDialog onClose={()=>setOpen(false)}/>}</section>;
 }
 
 export function S3HelperHandoff({canUpload}:{canUpload:boolean}){
