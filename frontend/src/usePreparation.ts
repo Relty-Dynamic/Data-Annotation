@@ -54,7 +54,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
           return;
         }
         if (status.state === 'ready') {
-          publish({...status, state: 'running', checking: false, stage: 'browser', progress: 0, detail: '正在载入封面和悬停预览图片'});
+          publish({...status, state: 'running', checking: false, stage: 'browser', progress: 0, operation: 'check', detail: '正在检查播放素材清单'});
           const manifestResponse = await authFetch('/api/projects/' + id + '/session/manifest', {cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)])});
           const manifest = await manifestResponse.json();
           if (!manifestResponse.ok) throw new Error(typeof manifest.detail === 'string' ? manifest.detail : '无法读取播放素材列表');
@@ -64,9 +64,9 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
           }
           if (downloadVideos && manifest.cache_location?.mode !== 'native') {
             try {
-              await prepareBrowserVideos(id, manifest, abort.signal, (ready, total) => {
+              await prepareBrowserVideos(id, manifest, abort.signal, () => {}, (operation, ready, total) => {
                 publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
-                  detail: '正在保存视频和预览图到缓存目录 ' + ready + ' / ' + total});
+                  operation, detail: ({check:'正在校验本机缓存',reuse:'已复用本机缓存',download:'正在补齐缺失或失效缓存'})[operation] + ' ' + ready + ' / ' + total});
               });
               const confirmed = await authFetch('/api/projects/' + id + '/session/browser-ready', {
                 method: 'POST', cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]),
@@ -79,7 +79,7 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
           }
           await prepareSessionAssets(id, manifest, abort.signal, (ready, total) => {
             publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
-              detail: '正在载入预览图片 ' + ready + ' / ' + total});
+              operation: 'assets', detail: '正在载入预览图片 ' + ready + ' / ' + total});
           });
           if (!stopped) publish({...status, state: 'ready', checking: false, stage: 'ready', progress: 100}, manifest);
           return;

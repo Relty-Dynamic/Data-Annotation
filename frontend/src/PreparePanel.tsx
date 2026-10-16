@@ -108,7 +108,7 @@ export default function PreparePanel({ projectName, status, error, onRetry, onEn
   const retry = preparationRetryAction(status, error);
   const phase = presentation.phase;
   const phaseLabel = presentation.activity;
-  const stageLabels = {prepare: '准备播放素材', browser: '保存并载入本机缓存', ready: '开始标注'};
+  const stageLabels = {prepare: '准备播放素材', browser: '检查并载入本机缓存', ready: '开始标注'};
   const title = presentation.title;
   const description = presentation.description;
 
