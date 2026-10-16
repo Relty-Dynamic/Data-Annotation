@@ -114,6 +114,18 @@ class R2ProjectTests(unittest.TestCase):
         self.assertTrue(self.service.allowed(USER, value['id']))
         self.assertFalse(self.service.allowed(OTHER, value['id']))
 
+    def test_legacy_missing_bundle_is_explicit_and_never_generated_on_server(self):
+        value=self.open()
+        with patch.object(self.service.sessions,'_render_compact',side_effect=AssertionError('must not render')):
+            self.service.start_session(value['id'])
+            deadline=time.monotonic()+10
+            while time.monotonic()<deadline:
+                state=self.service.sessions.status(value['id'])
+                if state['state'] in ('ready','partial','error'):break
+                time.sleep(.02)
+        self.assertEqual(state['state'],'partial',state)
+        self.assertIn('旧采集目录',str(state))
+
     def test_uploaded_collector_reaches_authorized_task_catalog_and_legacy_is_empty(self):
         from backend.tasks.storage import ProjectMedia
         media = ProjectMedia(self.service, 's3', self.service.allowed)
@@ -178,6 +190,16 @@ class R2ProjectTests(unittest.TestCase):
         payload = video.read_bytes()
         item = self.manifest['files'][0]
         item.update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+        item['duration_ms'] = 1000
+        from backend.upload_playback import build
+        prepared = self.root / 'uploader'
+        normal = prepared / item['key']
+        normal.parent.mkdir(parents=True)
+        normal.write_bytes(payload)
+        self.service.tool = lambda name: Path(shutil.which(name))
+        build(self.service, prepared, self.manifest, lambda detail: None)
+        for cache in self.manifest['cache_files']:
+            self.provider.objects[PREFIX+'/'+cache['key']] = ((prepared/cache['key']).read_bytes(), 'cache')
         self.provider.objects[PREFIX + '/' + item['key']] = (payload, 'video')
         self.provider.objects[PREFIX + '/manifest.json'] = (document_bytes(self.manifest), 'manifest')
         env = {'FFMPEG_PATH': shutil.which('ffmpeg'), 'FFPROBE_PATH': shutil.which('ffprobe')}
@@ -198,7 +220,7 @@ class R2ProjectTests(unittest.TestCase):
             self.assertEqual(normal['sha256'], item['sha256'])
             self.assertEqual(normal['file_name'], Path(NAME).stem + '.' + item['sha256'] + '.normal.mp4')
             self.assertTrue(all(asset['url'].startswith('https://') for asset in manifest['assets']))
-            self.assertTrue(any(key.startswith('media/') for key in self.provider.objects))
+            self.assertFalse(any(key.startswith('media/') for key in self.provider.objects))
             self.assertEqual(self.service.sessions.browser_ready(value['id']), {'released': False})
 
     def test_shared_account_browser_routes_and_version_guards(self):

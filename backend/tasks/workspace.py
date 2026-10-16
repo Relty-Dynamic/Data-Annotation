@@ -13,6 +13,8 @@ class Workspaces:
         self.service.desktop_cache.enabled = False
         if hasattr(media, 'service'):
             self.service.tool = media.service.tool
+            if hasattr(media.service, 'uploaded_playback'):
+                self.service.uploaded_playback = media.service.uploaded_playback
         self.lock = threading.RLock()
 
     def project(self, actor, task_id):
@@ -45,6 +47,9 @@ class Workspaces:
                 for axis in project['custom_tracks']:
                     project['annotations'][axis['id']] = []
                 self.service.save(project)
+        if metadata.get('r2_playback') and project['_sources']['v0001'].get('r2_playback') != metadata['r2_playback']:
+            project['_sources']['v0001']['r2_playback'] = copy.deepcopy(metadata['r2_playback'])
+            self.service.save(project)
         project = copy.deepcopy(project)
         own_submission = task.get('current_submissions', {}).get(actor['id'])
         annotations = (task.get('draft') or {}).get('annotations')

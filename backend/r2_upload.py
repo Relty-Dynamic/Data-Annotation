@@ -40,14 +40,17 @@ class RemoteCaptureTarget:
     def publish_capture(self, prefix, prepared, manifest, service):
         for item in manifest['files']:
             item['duration_ms'] = service.probe(prepared / item['key'])['duration_ms']
+        from .upload_playback import build
+        build(service, prepared, manifest, self.progress)
         # Stable request metadata permits restart/resume without storing tokens.
         manifest.pop('created_at', None)
         if self.attachments:
             manifest['attachments'] = attachment_manifest(self.attachments)
-        items = manifest['files'] + manifest.get('attachments', [])
+        items = manifest['files'] + manifest.get('attachments', []) + manifest.get('cache_files', [])
         job = self.request('POST', '/api/r2/uploads', json=manifest)
         for index, item in enumerate(items):
-            record = self.attachments[index - len(manifest['files'])] if index >= len(manifest['files']) else None
+            offset = index - len(manifest['files'])
+            record = self.attachments[offset] if 0 <= offset < len(self.attachments) else None
             source = MockUploadManager._check_local_source(record) if record else prepared / item['key']
             self.progress(f"正在上传 {index + 1}/{len(items)}：{item['key']}")
             for attempt in range(3):

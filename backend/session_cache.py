@@ -839,6 +839,17 @@ class SessionCache:
                         entry = self.service.desktop_cache.publish_entry(project, video, old, legacy, directory)
                         break
             if entry is None:
+                if source.get('r2_playback'):
+                    # S3 derivation belongs to the uploading computer. Never
+                    # fall through to an Ubuntu/local render when cache is bad.
+                    entry = self.service.uploaded_playback(source, directory, key)
+                    if self._load_entry(directory, key, source) is None:
+                        raise HTTPException(422, 'S3 完整播放缓存校验失败。')
+                    with self._condition:
+                        item = next(item for item in job['status']['items'] if item['video_id'] == video_id)
+                        item.update(state='ready', progress=100, detail=None)
+                        self._counts(job)
+                    return entry, directory
                 found = self._local_nas_entry(source)
                 if found is not None:
                     cached, cached_directory = found

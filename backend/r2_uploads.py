@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from .r2_service import capture_prefix
 from .service import document_bytes, now, parse_recording_start
 from .r2_folder import attachment_key, validate_prediction
+from .upload_playback import validate as validate_playback
 
 
 class R2Uploads:
@@ -80,7 +81,8 @@ class R2Uploads:
                 raise HTTPException(422, '附属数据文件名称重复。')
             attachment_names.add(key.casefold())
             item['name'] = key
-        all_files = files + attachments
+        cache_files = validate_playback(manifest)
+        all_files = files + attachments + cache_files
         if sum(item['size'] for item in all_files) > 100 * 1024**3:
             raise HTTPException(422, '上传数据总量超过 100 GiB。')
         for field in ('collector_name', 'uploader_name'):
@@ -116,7 +118,7 @@ class R2Uploads:
 
     @staticmethod
     def items(job):
-        return job['manifest']['files'] + job['manifest'].get('attachments', [])
+        return job['manifest']['files'] + job['manifest'].get('attachments', []) + job['manifest'].get('cache_files', [])
 
     def plan(self, ident, index, user):
         with self.lock:
@@ -138,7 +140,8 @@ class R2Uploads:
                 return {'complete': True, 'parts': []}
             for attempt in range(2):
                 if 'upload_id' not in record:
-                    content_type = 'video/mp4' if index < len(job['manifest']['files']) else 'application/octet-stream'
+                    content_type = ('video/mp4' if index < len(job['manifest']['files']) or item.get('kind') == 'fast'
+                                    else 'image/jpeg' if item.get('kind') in ('thumbnail', 'sheet') else 'application/octet-stream')
                     record['upload_id'] = self.provider.call('create_multipart_upload', Key=key, ContentType=content_type, Metadata={'sha256': item['sha256']})['UploadId']
                     self.save(job)
                 completed, marker = {}, 0
@@ -208,6 +211,16 @@ class R2Uploads:
                 self.provider.download(prefix + '/' + item['key'], destination, item['sha256'], item['size'])
                 if item['name'].startswith('prediction/'):
                     validate_prediction(destination)
+            for item in validate_playback(manifest):
+                destination = self.service.local / 'upload-validation' / item['sha256'] / Path(item['key']).name
+                self.provider.download(prefix + '/' + item['key'], destination, item['sha256'], item['size'])
+                if item['kind'] == 'fast':
+                    duration = next(video['duration_ms'] for video in manifest['files'] if video['name'] == item['video_name'])
+                    info = self.service.probe(destination)
+                    if info['codec'] != 'h264' or abs(info['duration_ms'] - duration / 20) > 70 or abs(info.get('media_start_seconds', 0)) >= .001:
+                        raise HTTPException(422, '上传的倍速缓存时间或格式无效。')
+                elif not self.service.valid_thumbnail(destination):
+                    raise HTTPException(422, '上传的 JPG 缓存无效。')
             # Manifest is the publication point. Files from an interrupted or
             # revoked upload are never listed as a usable collection.
             self.provider.put_if_absent(prefix + '/manifest.json', document_bytes(manifest))
