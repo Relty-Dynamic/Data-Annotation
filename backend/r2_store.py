@@ -5,7 +5,9 @@ import hashlib
 import json
 import os
 import re
+import threading
 import uuid
+import weakref
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -55,6 +57,9 @@ class R2Store:
                               request_checksum_calculation='when_required', response_checksum_validation='when_required',
                               s3={'addressing_style': 'path'}))
         self.client = client
+        self.validation_download_slots = threading.BoundedSemaphore(6)
+        self.validation_download_guard = threading.RLock()
+        self.validation_download_locks = weakref.WeakValueDictionary()
 
     def call(self, operation, **arguments):
         from botocore.exceptions import BotoCoreError, ClientError
@@ -171,6 +176,13 @@ class R2Store:
             os.replace(temp, destination)
         finally:
             temp.unlink(missing_ok=True)
+
+    def download_for_validation(self, key, destination, checksum, size, etag, progress=lambda n: None):
+        from .validation_download import download
+        with self.validation_download_guard:
+            lock = self.validation_download_locks.setdefault(str(destination), threading.RLock())
+        with lock:
+            return download(self, object_key(key), destination, checksum, size, etag, progress)
 
     def list(self, prefix='', delimiter=None):
         arguments = {'Prefix': prefix, 'MaxKeys': 1000}
