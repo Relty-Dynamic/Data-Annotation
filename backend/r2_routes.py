@@ -286,6 +286,10 @@ def install(app, session, accounts, provider, root):
     def start_upload(body: dict, request: Request):
         return uploads.start(actor(request), body)
 
+    @router.get('/r2/uploads/{ident}')
+    def upload_status(ident: str, request: Request):
+        return uploads.public(uploads.load(ident, actor(request)))
+
     @router.get('/r2/uploads/{ident}/files/{index}')
     def upload_plan(ident: str, index: int, request: Request):
         return uploads.plan(ident, index, actor(request))

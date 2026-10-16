@@ -193,6 +193,8 @@ class R2Uploads:
     def finish(self, ident, user):
         with self.lock:
             job = self.load(ident, user)
+            if job['state'] == 'ready':
+                return self.public(job)
             manifest = job['manifest']
             prefix = manifest['prefix']
             for item in manifest['files']:
