@@ -44,7 +44,7 @@ def transfer_files(target, job, prepared, manifest, *, completed_keys=None):
     items = manifest['files'] + manifest.get('attachments', []) + manifest.get('cache_files', [])
     tracker = TransferProgress(target, items)
     # Three simultaneous requests at most; files and multipart chunks share the same pool.
-    with httpx.Client(timeout=httpx.Timeout(180, connect=15), follow_redirects=False,
+    with httpx.Client(timeout=httpx.Timeout(180, connect=15), follow_redirects=False, trust_env=False,
                       limits=httpx.Limits(max_connections=3, max_keepalive_connections=3)) as direct, \
             ThreadPoolExecutor(max_workers=3) as parts, ThreadPoolExecutor(max_workers=3) as files:
         def send(index, source, number, offset, length, url, headers, cancelled):

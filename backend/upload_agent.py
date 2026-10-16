@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import threading
@@ -18,6 +19,7 @@ from .public_setup import public_origin
 from .r2_folder import FolderUploadManager
 from .r2_upload import RemoteCaptureTarget
 from .service import ProjectService
+from .upload_errors import failure_detail
 
 
 class AgentTarget(RemoteCaptureTarget):
@@ -77,6 +79,7 @@ class AgentEngine:
         threading.Thread(target=self.execute,args=(command,),daemon=True).start()
 
     def execute(self, command):
+        active_job = None
         try:
             user = self.target.request('GET','/api/auth/me')
             if not user.get('can_upload'):
@@ -97,10 +100,13 @@ class AgentEngine:
                     raise HTTPException(422,'请先在网页选择本机采集文件夹。')
                 fields = command.get('fields',{})
                 job = self.manager.start(user,fields.get('collector',''),fields.get('uploader'),fields.get('note'),self.selection['selection_id'], prediction=fields)
+                active_job = job
                 self.job = {**job,'owner':user['id']}
                 def progress(detail):
                     with self.manager.lock:
-                        self.manager.jobs[job['id']]['detail'] = detail
+                        current = self.manager.jobs[job['id']]
+                        if current['state'] != 'error':
+                            current['detail'] = detail
                 self.target.progress = progress
                 self.manager.finish(job['id'],user['id'],self.service,
                     lambda ident:self.target.request('GET','/api/auth/me').get('can_upload') is True)
@@ -109,7 +115,24 @@ class AgentEngine:
             else:
                 raise HTTPException(422,'不支持此上传操作。')
         except Exception as error:
-            detail = error.detail if isinstance(error,HTTPException) and isinstance(error.detail,str) else '本机操作未完成，请检查网络、设备连接和压缩工具后重试。'
+            detail = failure_detail(error)
+            if active_job:
+                with self.manager.lock:
+                    current = self.manager.jobs[active_job['id']]
+                    if current['state'] == 'error':
+                        detail = current['detail']
+                    else:
+                        current.update(state='error', detail=detail)
+            # Record only an allowlisted diagnosis, never exception text or a traceback.
+            diagnosis = dict(at=time.strftime('%Y-%m-%d %H:%M:%S'),
+                             job=active_job['id'] if active_job else None, error_type=type(error).__name__, detail=detail)
+            try:
+                path = self.service.local / 'upload-errors.jsonl'
+                with path.open('a', encoding='utf-8') as output:
+                    output.write(json.dumps(diagnosis, ensure_ascii=False) + '\n')
+            except OSError:
+                pass
+            print(f'上传未完成（{type(error).__name__}）：{detail}', flush=True)
             with self.lock:
                 self.report['error'] = detail
         finally:
@@ -162,7 +185,7 @@ def main():
         raise SystemExit('本机上传组件仅用于 macOS／Windows。')
     os.environ['PYTHONNOUSERSITE']='1'
     root = Path(os.getenv('DATAMARK_UPLOADER_HOME') or Path(__file__).resolve().parents[1])
-    with httpx.Client(base_url=args.api,timeout=30,headers={'Origin':args.api}) as client:
+    with httpx.Client(base_url=args.api,timeout=30,trust_env=False,headers={'Origin':args.api}) as client:
         engine = AgentEngine(root,client)
         try:
             engine.capabilities()

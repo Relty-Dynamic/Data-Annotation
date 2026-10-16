@@ -7,6 +7,8 @@ test('installer commands use the current HTTPS API and never include pairing cre
  assert.match(value.mac,/https:\/\/api.example.com:8443\/api\/r2\/uploader\/install.sh/);
  assert.match(value.windows,/install.ps1/);
  for(const command of Object.values(value))assert.doesNotMatch(command,/claim|Bearer|password|ExecutionPolicy/);
+ for(const command of Object.values(value))assert.match(command,/--noproxy '\*'/);
+ assert.match(value.windows,/LASTEXITCODE/);
  for(const origin of ['http://api.example.com','https://api.example.com/path',"https://bad'.example.com",'https://user:pass@api.example.com'])assert.throws(()=>installCommands(origin));
 });
 test('handoff is removed from browser history and preserves the current project URL',()=>{

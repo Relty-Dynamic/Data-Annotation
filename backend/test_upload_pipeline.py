@@ -79,6 +79,8 @@ class PipelineTests(unittest.TestCase):
         with patch('backend.prediction_prepare.prepare_prediction',side_effect=self.prediction),patch.object(self.manager,'_compress_video',side_effect=self.compress),patch('backend.upload_pipeline.build',side_effect=self.build):
             result=self.manager.finish(job['id'],USER['id'],self.service,lambda user:True)
         self.assertEqual(result['state'],'ready')
+        self.assertEqual((result['clips_verified'],result['clips_total']),(2,2))
+        self.assertEqual(result['progress'],100)
         self.assertEqual(len(self.final),1)
         self.assertFalse((self.root/'staging'/job['id']).exists())
 
@@ -92,6 +94,56 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(HTTPException):self.manager.finish(job['id'],USER['id'],self.service,lambda user:True)
         self.assertFalse(self.final)
         self.assertEqual(self.manager.status(job['id'],USER['id'])['state'],'error')
+
+    def test_failure_is_visible_while_other_worker_is_still_unwinding(self):
+        job=self.start()
+        prediction_running=threading.Event();release=threading.Event();failure_seen=threading.Event()
+        errors=[]
+        def prediction(*args,**kwargs):
+            prediction_running.set()
+            release.wait(3)
+            kwargs['cancel']()
+        def compress(*args,**kwargs):
+            self.assertTrue(prediction_running.wait(3))
+            raise HTTPException(503,'fixture encoder failed')
+        def work():
+            try:self.manager.finish(job['id'],USER['id'],self.service,lambda user:True)
+            except Exception as error:errors.append(error)
+        # Observe the job update itself, before executor shutdown can finish.
+        original_detail=__import__('backend.upload_pipeline',fromlist=['failure_detail']).failure_detail
+        def detail(*args,**kwargs):
+            value=original_detail(*args,**kwargs);failure_seen.set();return value
+        with patch('backend.prediction_prepare.prepare_prediction',side_effect=prediction),patch.object(self.manager,'_compress_video',side_effect=compress),patch('backend.upload_pipeline.failure_detail',side_effect=detail):
+            thread=threading.Thread(target=work);thread.start()
+            try:
+                self.assertTrue(failure_seen.wait(3))
+                status=self.manager.status(job['id'],USER['id'])
+                self.assertEqual(status['state'],'error')
+                self.assertEqual(status['detail'],'fixture encoder failed')
+                self.assertTrue(thread.is_alive())
+                # Late transfer updates must never resurrect a failed task.
+                self.target.transfer_progress(dict(state='uploading',progress=100))
+                self.assertEqual(self.manager.status(job['id'],USER['id'])['state'],'error')
+            finally:release.set();thread.join(5)
+        self.assertFalse(thread.is_alive());self.assertTrue(errors)
+        self.assertFalse(self.final)
+
+    def test_batch_progress_never_replaces_collection_progress(self):
+        job=self.manager.start(USER,'test',None,None,self.selection['selection_id'])
+        self.started.set();original=type(self.target).publish_ready
+        def publish(target,prefix,prepared,manifest,service,**kwargs):
+            if kwargs.get('prepare'):
+                target.transfer_progress(dict(state='uploading',progress=100))
+                status=self.manager.status(job['id'],USER['id'])
+                self.assertLessEqual(status['progress'],95)
+                self.assertEqual(status['progress'],status['clips_verified']/2*95)
+                self.assertNotEqual(status['progress'],100)
+            # The fixture expects a generated prediction only on final publication.
+            if not kwargs.get('prepare'):
+                self.final.append(manifest);return
+            return original(target,prefix,prepared,manifest,service,**kwargs)
+        with patch.object(self.manager,'_compress_video',side_effect=self.compress),patch('backend.upload_pipeline.build',side_effect=self.build),patch.object(type(self.target),'publish_ready',publish):
+            self.assertEqual(self.manager.finish(job['id'],USER['id'],self.service,lambda user:True)['state'],'ready')
 
 
 class MetadataIntakeTests(unittest.TestCase):

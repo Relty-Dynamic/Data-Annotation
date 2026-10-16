@@ -132,7 +132,9 @@ class FolderUploadManager(MockUploadManager):
         if getattr(self.store,'pipeline_enabled',False):
             from .upload_pipeline import run
             def transfer_progress(values):
-                with self.lock:job.update(values)
+                with self.lock:
+                    if job['state'] != 'error':
+                        job.update({key:value for key,value in values.items() if key != 'progress'})
             self.store.transfer_progress=transfer_progress
             return run(self,job,user_id,service,can_upload)
         if options.get('prediction') == 'generate':
@@ -169,7 +171,10 @@ class FolderUploadManager(MockUploadManager):
 
     def status(self, ident, user_id):
         result = super().status(ident, user_id)
-        prediction = self._job(ident, user_id).get('prediction_result')
+        job = self._job(ident, user_id)
+        with self.lock:
+            result.update({key:job[key] for key in ('clips_total','clips_verified','prediction_detail') if key in job})
+        prediction = job.get('prediction_result')
         if prediction:
             result['prediction'] = {key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review')}
         return result
