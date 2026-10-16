@@ -2,7 +2,7 @@
 from ..service import annotation_label_base
 
 
-def validate_annotations(annotations, rule, duration_ms, draft=False):
+def validate_annotations(annotations, rule, duration_ms, draft=False, recording_runs=None):
     errors = []
     axes = {axis['id']: axis for axis in rule['axes']}
     if not isinstance(annotations, dict):
@@ -52,6 +52,10 @@ def validate_annotations(annotations, rule, duration_ms, draft=False):
                 fail('持续片段结束时间必须晚于开始时间')
             elif not draft and not point and end_valid and end - start < axis.get('minimum_ms', 0):
                 fail('片段短于规则要求')
+            if recording_runs is not None and start_valid and (end_valid or open_event):
+                limit = start if point or open_event else end
+                if not any(run['start_ms'] <= start < run['end_ms'] and limit <= run['end_ms'] for run in recording_runs):
+                    fail('标注不能位于或跨越没有视频的真实断档')
             lane = item.get('lane', 0)
             if type(lane) is not int or not 0 <= lane <= 9007199254740991:
                 fail('子轴编号不正确')

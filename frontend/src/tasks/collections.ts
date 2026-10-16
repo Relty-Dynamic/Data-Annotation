@@ -11,3 +11,12 @@ export function registeredCollections(videos:TaskVideo[],sources:TaskSource[]){
  for(const video of videos){const source=sources.find(s=>s.source.backend===video.source.backend&&s.source.key===video.source.key);const collectionId=video.collection_id??source?.collection_id??(video.source.key.includes('/')?video.source.key.split('/')[0]:video.id);const id=`${video.source.backend}:${collectionId}`;const group=groups.get(id)??{id,name:video.collection_name??source?.collection??collectionId,videos:[]};group.videos.push(video);groups.set(id,group);}
  return [...groups.values()];
 }
+export function assignmentCollections(videos:TaskVideo[],sources:TaskSource[]){
+ return registeredCollections(videos,sources).map(group=>{
+  const [backend,...parts]=group.id.split(':');const collectionId=parts.join(':');
+  const known=sources.filter(source=>source.source.backend===backend&&(source.collection_id??source.id.split('/')[0])===collectionId);
+  const expected=Math.max(known.length,...group.videos.map(video=>video.collection_video_count??0),group.videos.length);
+  const complete=group.videos.length===expected;
+  return {...group,complete,eligible:complete&&group.videos.every(video=>video.quality==='passed'),expected};
+ });
+}

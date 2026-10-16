@@ -50,3 +50,9 @@ test('success prompt has its own dialog style and safe non-submit controls',()=>
  assert.equal(buttons.length,2);assert.ok(buttons.every(tag=>tag.includes('type="button"')));
  assert.doesNotMatch(html,/task-rule-delete-dialog/);
 });
+test('assignment exposes one checkbox per complete collection and read-only clip names',()=>{
+ const html=renderToStaticMarkup(React.createElement(load('TaskAssignmentMaterials.tsx').default,{busy:false,collections:[{id:'nas:collection',name:'1015test',complete:true,eligible:true,expected:2,videos:[{id:'one',video_name:'one.mp4'},{id:'two',video_name:'two.mp4'}]}]}));
+ assert.equal((html.match(/type="checkbox"/g)??[]).length,1);
+ assert.match(html,/name="collection"/);assert.doesNotMatch(html,/name="video"/);
+ assert.match(html,/one.mp4/);assert.match(html,/two.mp4/);
+});

@@ -262,7 +262,9 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     def create(body: dict, request: Request):
         user = actor(request)
         roster = require_participants(request, body)
-        return store.create_task(user, body, participants=roster)
+        members, collection_key = store.task_materials(user, body)
+        layout = workspace.media.task_collection(members) if collection_key else None
+        return store.create_task(user, body, participants=roster, collection_layout=layout)
 
     @router.get('/items/{task_id}')
     def task(task_id: str, request: Request):
@@ -359,12 +361,12 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
                 return service.sessions.browser_ready(ident)
             if tail in ('history', 'operations') and request.method == 'GET':
                 return []
-        if resource == 'previews' and tail == 'v0001':
+        if resource == 'previews' and any(video['id'] == tail for video in project['videos']):
             state = service.sessions.status(ident)
             if state['state'] == 'ready':
                 manifest = (workspace.media.media_manifest(service, service.sessions.manifest(ident))
                             if hasattr(workspace.media, 'media_manifest') else workspace.urls(service.sessions.manifest(ident), task_id, ident))
-                video = manifest['videos'][0]
+                video = next(item for item in manifest['videos'] if item['id'] == tail)
                 return {'state': 'ready', 'progress': 100, 'url': video['fast_url'] if request.query_params.get('fast') == 'true' else video['url']}
             return {'state': 'queued', 'progress': None, 'url': None, 'detail': state.get('detail')}
         match = re.fullmatch(r'([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)(?:/(\d+))?', tail)

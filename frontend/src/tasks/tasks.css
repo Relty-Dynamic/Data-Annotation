@@ -230,6 +230,12 @@
 .task-rule-group[open]>summary .task-rule-group-chevron{transform:rotate(0)}
 .task-rule-group[open]>summary{border-bottom:1px solid #34454f}
 .task-rule-group-content{display:flex;flex-direction:column;gap:12px;padding:18px}
+.task-assignment-collection{border:1px solid #34454f;border-radius:9px;background:#17242b;margin-top:12px;padding:14px}
+.task-panel .task-assignment-collection>label{display:flex;flex-direction:row;gap:12px;align-items:center;margin:0}
+.task-assignment-collection>label>span{display:flex;flex-direction:column;gap:6px;min-width:0;overflow-wrap:anywhere}
+.task-assignment-collection small{color:#91aab4;font-size:11px}
+.task-assignment-collection>details{margin:12px 0 0 28px;color:#8fa8b2;font-size:12px}
+.task-assignment-collection ul{padding-left:18px;line-height:1.9;overflow-wrap:anywhere}
 .task-panel .task-rule-tolerance{margin:12px 0 0;color:#90b6ad;font-size:12px}
 .task-panel .task-rule-create .task-rule-group-content{padding:0}
 .task-panel .task-rule-create .task-rule-form{border:0;background:transparent;border-radius:0}
