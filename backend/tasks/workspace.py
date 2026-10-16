@@ -92,6 +92,7 @@ class Workspaces:
         project['revision'] = task['revision']
         project['task_readonly'] = actor['id'] not in task['annotator_ids'] or bool(own_submission) or task['status'] not in ('annotating', 'rework')
         project['task_rule'] = task['rule']
+        project['task_output_sync'] = task.get('output_sync')
         project['task_feedback'] = [{key: issue[key] for key in ('id', 'axis', 'segment_id', 'start_ms', 'end_ms', 'reason') if key in issue}
                                     for issue in task.get('issues', []) if task['status'] == 'rework' and issue['id'].startswith('review:')]
         project['updated_at'] = task.get('updated_at', project['updated_at'])
@@ -105,6 +106,7 @@ class Workspaces:
         result['annotations'] = copy.deepcopy(project['annotations'])
         result['task_readonly'] = project['task_readonly']
         result['task_rule'] = project['task_rule']
+        result['task_output_sync'] = project['task_output_sync']
         result['task_feedback'] = project['task_feedback']
         return self.urls(result, task_id, project['id'])
 

@@ -3,6 +3,7 @@ import type {Account} from '../auth';
 import {taskRequest} from './TaskPanel';
 import TaskReview from './TaskReview';
 import SuccessDialog from './SuccessDialog';
+import TaskOutputSync from './TaskOutputSync';
 import {reviewStage} from './taskChoices';
 import type {TaskItem,TaskRole,TaskVersion} from './types';
 export default function TaskWorkbenchReview({taskId,user,time,onSeek,onPreview,onDirty,onBusy,selection}:{taskId:string;user:Account;time:number;onSeek:(time:number)=>void;onPreview:(version:TaskVersion)=>void;onDirty:(dirty:boolean)=>void;onBusy:(busy:boolean)=>void;selection?:{axis:string;start_ms:number;end_ms:number}}){
@@ -37,9 +38,10 @@ export default function TaskWorkbenchReview({taskId,user,time,onSeek,onPreview,o
    const updated=await taskRequest<TaskItem>(`/items/${task.id}/${endpoint}`,'POST',{expected_revision:task.revision,...body});
    setTask(current=>({...updated,participants:updated.participants??current?.participants}));markDirty(false);setReset(value=>value+1);
    const message=endpoint==='start-review'?'已开始复核，请查看提交版本，检查后在下方选择通过或退回返修。':endpoint==='accept'?'验收成功，最终结果已锁定。':endpoint==='adjudicate'?'裁定已保存，等待管理员验收。':updated.status==='rework'?'复核已提交，已退回所选标注员返修。':updated.status==='adjudicating'?'复核已提交，请继续处理差异并完成裁定。':'复核已提交，可由管理员或组长继续验收。';
-   if(endpoint==='start-review')setNotice(message);else setSuccess(message);
+   const syncWarning=updated.output_sync&&updated.output_sync.state!=='ready'?' 采集目录结果尚未同步完成，请使用下方同步按钮重试。':'';
+   if(endpoint==='start-review')setNotice(message+syncWarning);else setSuccess(message+syncWarning);
   }catch(cause){setError(cause instanceof Error?cause.message:'复核操作未确认成功，请刷新任务核对。');}
   finally{actionPending.current=false;setBusy(false);onBusy(false);}
  }
- return <section className="task-workbench-review" aria-label="任务复核"><header><h2>任务复核</h2></header>{success&&<SuccessDialog title="复核操作成功" message={success} onClose={()=>setSuccess('')}/>}{notice&&<p role="status" className="task-review-notice">{notice}</p>}{busy&&<p role="status" className="task-review-pending"><span className="task-review-spinner" aria-hidden="true"/>正在提交并核验，请稍候…</p>}{error&&<p role="alert" className="import-error">{error}</p>}{!task&&!error&&<p role="status">正在读取提交版本…</p>}{task&&<><p className="task-review-stage" role="status">{reviewStage(task)}</p><div inert={busy} onInput={()=>markDirty(true)}><TaskReview key={reset} task={task} rules={task.rule?[task.rule]:[]} user={user} roles={roles} accountName={id=>task.participants?.find(account=>account.id===id)?.display_name??id} busy={busy} onAction={(endpoint,body)=>void act(endpoint,body)} onLoadHistory={()=>void loadHistory()} historyLoading={historyLoading} workbench={{time,onSeek,onPreview:preview,versionId,selection,onDirty:()=>markDirty(true)}}/></div>{dirty&&<button className="secondary" disabled={busy} onClick={()=>{markDirty(false);setReset(value=>value+1);}}>清空未提交的复核填写</button>}</>}</section>;
+ return <section className="task-workbench-review" aria-label="任务复核"><header><h2>任务复核</h2></header>{success&&<SuccessDialog title="复核操作成功" message={success} onClose={()=>setSuccess('')}/>}{notice&&<p role="status" className="task-review-notice">{notice}</p>}{busy&&<p role="status" className="task-review-pending"><span className="task-review-spinner" aria-hidden="true"/>正在提交并核验，请稍候…</p>}{error&&<p role="alert" className="import-error">{error}</p>}{!task&&!error&&<p role="status">正在读取提交版本…</p>}{task&&<><p className="task-review-stage" role="status">{reviewStage(task)}</p><TaskOutputSync taskId={task.id} status={task.output_sync}/><div inert={busy} onInput={()=>markDirty(true)}><TaskReview key={reset} task={task} rules={task.rule?[task.rule]:[]} user={user} roles={roles} accountName={id=>task.participants?.find(account=>account.id===id)?.display_name??id} busy={busy} onAction={(endpoint,body)=>void act(endpoint,body)} onLoadHistory={()=>void loadHistory()} historyLoading={historyLoading} workbench={{time,onSeek,onPreview:preview,versionId,selection,onDirty:()=>markDirty(true)}}/></div>{dirty&&<button className="secondary" disabled={busy} onClick={()=>{markDirty(false);setReset(value=>value+1);}}>清空未提交的复核填写</button>}</>}</section>;
 }

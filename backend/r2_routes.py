@@ -25,6 +25,10 @@ class R2Media(ProjectMedia):
         from .upload_playback import direct_manifest
         return direct_manifest(self.service.provider, project)
 
+    def collection_outputs(self,store,editor):
+        from .tasks.collection_outputs import CollectionOutputs
+        return CollectionOutputs(store,self,editor)
+
     def source_tools(self, user, action, body, request):
         if action == 'capabilities':
             return {'backend': 's3', 'can_pick': False, 'can_browse': True}

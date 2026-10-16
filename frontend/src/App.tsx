@@ -1,4 +1,5 @@
 import TaskPanel from './tasks/TaskPanel';
+import TaskOutputSync from './tasks/TaskOutputSync';
 import TaskFields from './tasks/TaskFields';
 import TaskWorkbenchReview from './tasks/TaskWorkbenchReview';
 import {canUseLegacyTrackTools} from './tasks/permissions';
@@ -757,7 +758,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    }
    const saved=await api<Project>('/api/projects/'+projectRef.current!.id);
    serverRevision.current=saved.revision;projectRef.current=saved;setProject(saved);clearEditor();
-   setNotice('任务已提交，当前版本已锁定。');
+   setNotice('任务已提交，当前版本已锁定。'+(body.output_sync&&body.output_sync.state!=='ready'?' 采集目录结果尚未同步完成，请点击同步按钮重试。':''));
   });
  }
  async function writeback(){
@@ -851,7 +852,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const anchorInterval=availableAnchorRange?formatTime(availableAnchorRange.end_ms-availableAnchorRange.start_ms).split('.')[0]:'--:--:--';
  const anchorControls=<div className="anchor-toolbar" title={anchors.map(value=>`锚点：${annotationTime(value)}`).join("；")}><button className="secondary" title="添加或移除当前位置的锚点，最多保留最近两个（Ctrl + 空格）" onClick={addAnchor}><Bookmark size={14}/>添加锚点</button><button className="secondary anchor-pair-button" aria-label={`选中区间，间隔 ${anchorInterval}`} aria-pressed={!!selectedRange} disabled={!availableAnchorRange} onClick={selectAnchorRange}><ScanLine size={14}/><span>选中区间</span><strong>{anchorInterval}</strong></button>{anchors.length>0&&<div className="anchor-metrics"><output className="anchor-duration" aria-label="当前时间到前一锚点的间隔" title="当前时间到最近一个锚点的时长">距前锚点 {formatTime(Math.abs(time-(latestAnchor??time))).split('.')[0]}</output></div>}{anchors.length>0&&<button className="text-button anchor-clear" aria-label="清空全部锚点" title="一次清空全部锚点" onClick={()=>{setAnchors([]);cancelRange();}}><Trash2 size={14}/></button>}</div>;
  const taskFeedback=(project as (Project & {task_feedback?:import('./tasks/types').TaskIssue[]})|null)?.task_feedback??[];
- const taskBar=taskId&&<><div className="task-workspace-bar"><button className="secondary" disabled={!!busy} onClick={()=>void returnToTaskManagement()}>返回任务管理</button><span>{reviewMode?'复核工作台：提交版本只读，复核结论在右侧填写。':taskReadOnly?'该提交版本只读，返修时会创建新版本。':'任务草稿独立保存；允许空白和子轴重叠。'}</span>{!taskReadOnly&&<button className="primary" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>void submitTask()}>提交任务</button>}</div>{taskFeedback.length>0&&<details className="task-rework-notes" open><summary>返修意见 · {taskFeedback.length} 处</summary>{taskFeedback.map(issue=><button className="secondary" key={issue.id} onClick={()=>{const record=project?.annotations[issue.axis]?.find(item=>item.id===issue.segment_id);if(record)selectSegment(issue.axis,record);else if(issue.start_ms!==undefined)seek(issue.start_ms);}}>{project?trackName(project,issue.axis):issue.axis}{issue.start_ms!==undefined?` · ${formatTime(issue.start_ms)}`:''}：{issue.reason}</button>)}</details>}</>;
+ const taskBar=taskId&&<><div className="task-workspace-bar"><button className="secondary" disabled={!!busy} onClick={()=>void returnToTaskManagement()}>返回任务管理</button><span>{reviewMode?'复核工作台：提交版本只读，复核结论在右侧填写。':taskReadOnly?'该提交版本只读，返修时会创建新版本。':'任务草稿独立保存；允许空白和子轴重叠。'}</span>{!taskReadOnly&&<button className="primary" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>void submitTask()}>提交任务</button>}</div>{!reviewMode&&<TaskOutputSync taskId={taskId} status={(project as (Project&{task_output_sync?:import('./tasks/TaskOutputSync').TaskOutputStatus})|null)?.task_output_sync}/>}{taskFeedback.length>0&&<details className="task-rework-notes" open><summary>返修意见 · {taskFeedback.length} 处</summary>{taskFeedback.map(issue=><button className="secondary" key={issue.id} onClick={()=>{const record=project?.annotations[issue.axis]?.find(item=>item.id===issue.segment_id);if(record)selectSegment(issue.axis,record);else if(issue.start_ms!==undefined)seek(issue.start_ms);}}>{project?trackName(project,issue.axis):issue.axis}{issue.start_ms!==undefined?` · ${formatTime(issue.start_ms)}`:''}：{issue.reason}</button>)}</details>}</>;
  function previewReviewVersion(version:TaskVersion){
   const current=projectRef.current;if(!current)return;
   const annotations=Object.fromEntries(Object.keys(current.annotations).map(axis=>[axis,version.annotations[axis]??[]]));

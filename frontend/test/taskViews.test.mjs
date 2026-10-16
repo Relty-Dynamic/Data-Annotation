@@ -13,7 +13,7 @@ function load(url){
  const filename=fileURLToPath(url);if(cache.has(filename))return cache.get(filename);
  const exports={};cache.set(filename,exports);
  const code=ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{jsx:ts.JsxEmit.ReactJSX,module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
- vm.runInNewContext(code,{exports,require(name){if(!name.startsWith('.'))return require(name);const base=path.resolve(path.dirname(filename),name);const candidate=[base,base+'.tsx',base+'.ts'].find(file=>fs.existsSync(file)&&fs.statSync(file).isFile());assert.ok(candidate,`Cannot resolve ${name}`);return load(pathToFileURL(candidate));}});return exports;
+ vm.runInNewContext(code,{exports,require(name){if(name==='../auth')return {authFetch:()=>{throw new Error('unexpected request in SSR')}};if(!name.startsWith('.'))return require(name);const base=path.resolve(path.dirname(filename),name);const candidate=[base,base+'.tsx',base+'.ts'].find(file=>fs.existsSync(file)&&fs.statSync(file).isFile());assert.ok(candidate,`Cannot resolve ${name}`);return load(pathToFileURL(candidate));}});return exports;
 }
 const TaskList=load(new URL('../src/tasks/TaskList.tsx',import.meta.url)).default;
 const TaskDelivery=load(new URL('../src/tasks/TaskDelivery.tsx',import.meta.url)).default;

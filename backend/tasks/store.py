@@ -36,6 +36,7 @@ class TaskStore:
         Path(root).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = Path(root) / 'tasks.sqlite3'
         self.artifacts = artifacts
+        self.outputs = None
         with self.db() as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS roles(user_id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -266,6 +267,8 @@ class TaskStore:
                 obj.pop(key, None)
         obj['rule'] = self._read(db, 'rules', task['rule_id'])
         obj['video'] = self._task_video(db, task)
+        if self.outputs is not None:
+            obj['output_sync'] = self.outputs.status(db,task['id'])
         return obj
 
     def list_tasks(self, actor, *, include_deleted=False):
@@ -486,7 +489,7 @@ class TaskStore:
             if any(final.get(stored, {}) != task.get(current, {}) for stored, current in (('annotations', 'final_annotations'), ('contributors', 'contributors'), ('resolutions', 'resolutions'))):
                 raise TaskError(503, '最终版本与任务记录不一致')
 
-    def submit(self, actor, id, body):
+    def submit(self, actor, id, body, *, output_names=None):
         with self.db() as db:
             request_id = body.get('request_id')
             request_key = 'submit:' + id + ':' + actor['id'] + ':' + str(request_id)
@@ -519,6 +522,8 @@ class TaskStore:
             task['current_submissions'][actor['id']] = sid
             if all(u in task['current_submissions'] for u in task['annotator_ids']):
                 task['status'] = 'submitted'
+            if self.outputs is not None:
+                self.outputs.submissions(db,task,output_names or {})
             response = self._finish(db, actor, task, 'submit')
             if request_id:
                 db.execute('INSERT INTO requests VALUES (?,?)', (request_key,json.dumps({'request':body})))
@@ -647,7 +652,7 @@ class TaskStore:
         db.execute('INSERT INTO submissions VALUES (?,?,?,?)', (sid, task['id'], actor['id'], json.dumps(snapshot, ensure_ascii=False)))
         task['final_version_id'] = sid
 
-    def accept(self, actor, id, body):
+    def accept(self, actor, id, body, *, output_names=None):
         with self.db() as db:
             task = self._mutation(db, actor, id, body)
             self._require(db, actor, 'leader')
@@ -672,9 +677,11 @@ class TaskStore:
                         task['contributors'][axis + ':' + segment['id']] = contributors
                 self._final_snapshot(db, actor, task)
             task.update(status='accepted', accepted_by=actor['id'], accepted_at=stamp())
+            if self.outputs is not None:
+                self.outputs.final(db,task,output_names or {})
             return self._finish(db, actor, task, 'accept')
 
-    def deliver(self, actor, body):
+    def deliver(self, actor, body, *, output_names=None):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._require(db, actor, 'leader')
@@ -717,6 +724,8 @@ class TaskStore:
                 raise TaskError(503, '交付文件保存后校验失败')
             result = {'id': did, 'request_id': request_id, 'task_ids': ids, 'artifact_key': key, 'sha256': hashlib.sha256(content).hexdigest(), 'size': len(content), 'created_at': stamp(), 'created_by': actor['id'], 'versions': {t['id']:t['revision'] for t in tasks}}
             db.execute('INSERT INTO deliveries VALUES (?,?,?)', (did, request_id, json.dumps(result)))
+            if self.outputs is not None:
+                self.outputs.delivery(db,tasks,result,content,output_names or {})
             for task in tasks:
                 task.update(status='delivered', delivery_id=did)
                 self._finish(db, actor, task, 'deliver')
