@@ -19,6 +19,9 @@ import tempfile
 
 HOME = Path('/home/relty/services/datamark-public-setup')
 FILES = ('compose.public-setup.yaml', 'compose.tasks-public.yaml', 'compose.r2-public.yaml')
+PREDICTION_FILE = 'compose.prediction-external.yaml'
+PREDICTION_SECRET = Path('/home/relty/services/imu-posture/secrets/worker-token')
+PREDICTION_TARGET = '/run/secrets/imu-prediction-token'
 
 
 class DeploymentError(RuntimeError):
@@ -133,8 +136,13 @@ class PublicDeployment:
         return json.loads(self.run('docker', 'inspect', 'datamark-public-setup-' + service + '-1'))[0]
 
     def compose(self, release, env):
+        settings = [line.strip() for line in Path(env).read_text().splitlines()
+                    if line.startswith('DATAMARK_PREDICTION_EXTERNAL=')]
+        if settings not in ([], ['DATAMARK_PREDICTION_EXTERNAL=0'], ['DATAMARK_PREDICTION_EXTERNAL=1']):
+            raise DeploymentError('invalid persistent prediction opt-in')
+        files = FILES + ((PREDICTION_FILE,) if settings == ['DATAMARK_PREDICTION_EXTERNAL=1'] else ())
         return ['docker', 'compose', '--env-file', str(env),
-                *[item for name in FILES for item in ('-f', str(release / 'deploy' / name))]]
+                *[item for name in files for item in ('-f', str(release / 'deploy' / name))]]
 
     def validate(self, rendered, old):
         services = rendered['services']
@@ -165,11 +173,22 @@ class PublicDeployment:
                 or settings.get('DATAMARK_TASKS_ARTIFACTS') != '/task-artifacts'):
             raise DeploymentError('existing public R2 and task features must stay enabled')
         allowed = {'/run/secrets/r2.json', '/r2-state', '/task-state', '/task-artifacts'}
+        self.prediction_enabled = bool(settings.get('DATAMARK_PREDICTION_URL'))
+        if self.prediction_enabled:
+            if (settings.get('DATAMARK_PREDICTION_URL') != 'http://imu-posture-worker:8778'
+                    or settings.get('DATAMARK_PREDICTION_TOKEN_FILE') != PREDICTION_TARGET):
+                raise DeploymentError('unexpected private prediction configuration')
+            allowed.add(PREDICTION_TARGET)
         volumes = api.get('volumes', [])
         if {v['target'] for v in volumes} != allowed:
             raise DeploymentError('public API must not mount NAS or shared account data')
         for volume in volumes:
             source = Path(volume['source']).resolve()
+            if volume['target'] == PREDICTION_TARGET:
+                if (source != PREDICTION_SECRET or not source.is_file() or not volume.get('read_only')
+                        or source.stat().st_mode & 0o007):
+                    raise DeploymentError('prediction credential must use the approved protected read-only file')
+                continue
             if not source.is_relative_to(self.home.resolve()) or not source.exists():
                 raise DeploymentError('public state or protected credential path is invalid')
         if not next(v for v in volumes if v['target'] == '/run/secrets/r2.json').get('read_only'):
@@ -194,6 +213,12 @@ class PublicDeployment:
         challenge = json.loads(self.run(*args, self.api_origin + '/api/auth/login-challenge'))
         if not challenge.get('challenge') or not challenge.get('public_key'):
             raise DeploymentError('encrypted public login is unavailable')
+        if self.prediction_enabled:
+            self.run('docker', 'exec', 'datamark-public-setup-api-1', '/opt/venv/bin/python', '-c',
+                     "import json,pathlib,urllib.request; "
+                     "token=pathlib.Path('/run/secrets/imu-prediction-token').read_text().strip(); "
+                     "r=urllib.request.Request('http://imu-posture-worker:8778/v1/capabilities',headers={'Authorization':'Bearer '+token}); "
+                     "assert json.load(urllib.request.urlopen(r,timeout=10))['protocol']==1")
         for name in ('api', 'accounts'):
             item = self.inspect(name)
             if item['Config']['Image'] != self.image or item['State'].get('Health', {}).get('Status') != 'healthy':
