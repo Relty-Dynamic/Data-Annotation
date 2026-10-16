@@ -12,8 +12,9 @@ from fastapi import HTTPException, Request
 
 
 class UploadBridge:
-    def __init__(self, accounts, clock=time.monotonic):
+    def __init__(self, accounts, clock=time.monotonic, *, current_version=lambda:None):
         self.accounts, self.clock = accounts, clock
+        self.current_version = current_version
         self.lock = threading.RLock()
         self.agents = {}
 
@@ -29,7 +30,7 @@ class UploadBridge:
                 raise HTTPException(429, '此网络待关联组件过多，请稍后重试。')
             ident, token, claim = uuid.uuid4().hex, secrets.token_urlsafe(32), secrets.token_urlsafe(32)
             self.agents[ident] = {'id': ident, 'token_hash': self.digest(token), 'claim_hash': self.digest(claim),
-                'platform': platform, 'expires': self.clock()+300, 'seen': self.clock(), 'owner': None,
+                'platform': platform, 'component_version':body.get('component_version'), 'expires': self.clock()+300, 'seen': self.clock(), 'owner': None,
                 'session': None, 'command': None, 'report': {}, 'delivered': False, 'client':client}
             return {'id': ident, 'token': token, 'claim': claim, 'expires_in': 300, 'protocol': 1}
 
@@ -83,7 +84,8 @@ class UploadBridge:
             return value
 
     def public(self, value):
-        return {'id': value['id'], 'platform': value['platform'], 'online': self.clock()-value['seen'] < 15,
+        return {'id': value['id'], 'platform': value['platform'],
+                'update_available':bool(self.current_version() and value.get('component_version')!=self.current_version()), 'online': self.clock()-value['seen'] < 15,
                 'command': {k: value['command'][k] for k in ('id', 'action')} if value['command'] else None,
                 'report': value['report']}
 
@@ -145,7 +147,7 @@ class UploadBridge:
 
 
 def install(app, router, actor, accounts, uploads):
-    bridge = UploadBridge(accounts)
+    bridge = UploadBridge(accounts,current_version=lambda:getattr(app.state,'uploader_source_key',None))
 
     @app.post('/api/r2/helper/register')
     def register(body: dict, request: Request):

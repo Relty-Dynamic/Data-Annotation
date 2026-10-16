@@ -120,7 +120,9 @@ class InstallerTests(unittest.TestCase):
 
     def test_project_scoped_installer_does_not_change_host_policy(self):
         for content in [shell('https://api.example.com:8443','https://app.example.com'),powershell('https://api.example.com:8443','https://app.example.com')]:
-            self.assertIn('UV_NO_MODIFY_PATH',content)
+            self.assertNotIn('astral.sh',content)
+            self.assertNotIn('pypi.',content)
+            self.assertIn('/api/r2/uploader/packages/',content)
             self.assertIn('DataMarkUploader',content)
             for forbidden in ['sudo ','Set-ExecutionPolicy','setx ','install -g','ExecutionPolicy Bypass']:
                 self.assertNotIn(forbidden,content)
@@ -231,7 +233,7 @@ if __name__=='__main__':unittest.main()
 class OriginBrowserTests(unittest.TestCase):
     def test_installers_forward_only_allowlisted_browser(self):
         for render in (shell, powershell):
-            self.assertIn("--browser 'chrome'", render('https://api.example.com', 'https://example.com', 'chrome'))
+            self.assertIn(("--browser 'chrome'" if render is shell else "-browser 'chrome'"), render('https://api.example.com', 'https://example.com', 'chrome'))
             self.assertNotIn('--browser', render('https://api.example.com', 'https://example.com'))
             with self.assertRaises(HTTPException):
                 render('https://api.example.com', 'https://example.com', "chrome'; bad")

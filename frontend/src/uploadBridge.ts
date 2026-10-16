@@ -3,7 +3,7 @@ import {apiOrigin} from './apiOrigin.ts';
 
 export const helperStorageKey='datamark.public-upload.helper.'+apiOrigin;
 export type UploadReport={busy?:boolean;error?:string;selection?:{name:string;capture_date:string;videos:string[];attachments:string[];ignored:string[]};job?:{id?:string;state:string;prefix:string;progress:number;detail:string;prediction?:{sha256:string;segments:number;needs_alignment_review:boolean}}};
-export type HelperStatus={id:string;online:boolean;platform:string;command:{id:string;action:string}|null;report:UploadReport};
+export type HelperStatus={id:string;online:boolean;update_available?:boolean;platform:string;command:{id:string;action:string}|null;report:UploadReport};
 export async function bridgeRequest<T>(path:string,body?:unknown):Promise<T>{
  const response=await authFetch('/api/r2/'+path,{method:body===undefined?'GET':'POST',headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
  let value;
@@ -31,4 +31,11 @@ export function takeHelperHandoff(location:{hash:string;pathname:string;search:s
  const match=/^([a-f0-9]{32}):([A-Za-z0-9_-]{30,100})$/.exec(raw);
  if(!match)throw new Error('本机组件关联地址无效，请重新启动组件。');
  return {id:match[1],claim:match[2]};
+}
+
+export type UploaderPackages={ready:boolean;platforms:Record<string,{file:string;sha256:string;size:number;url:string}>};
+export function offlineInstallCommands(origin:string,frontend:string,userAgent=''){
+ installCommands(origin,userAgent);installCommands(frontend);
+ const browser=uploadBrowser(userAgent),argument=browser?` --browser '${browser}'`:'';
+ return {mac:`sh ./install.command --api '${origin}' --frontend '${frontend}'${argument}`,windows:`$DataMarkKit=(Get-Location).Path; & ([scriptblock]::Create([IO.File]::ReadAllText((Join-Path $DataMarkKit 'install.ps1')))) -api '${origin}' -frontend '${frontend}'${argument.replace('--browser','-browser')}`};
 }

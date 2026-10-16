@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {installCommands,takeHelperHandoff} from '../src/uploadBridge.ts';
+import {installCommands,offlineInstallCommands,takeHelperHandoff} from '../src/uploadBridge.ts';
 
 test('installer commands use the current HTTPS API and never include pairing credentials',()=>{
  const value=installCommands('https://api.example.com:8443');
@@ -26,4 +26,14 @@ test('install commands carry the originating browser on both platforms',()=>{
   for(const command of Object.values(commands))assert.ok(command.includes('?browser='+browser));
  }
  for(const command of Object.values(installCommands('https://api.example.com','unknown')))assert.ok(!command.includes('?browser='));
+});
+
+test('offline installation uses the current platform addresses and originating browser without changing host policy',()=>{
+ const value=offlineInstallCommands('https://api.example.com:8443','https://app.example.com','Chrome/130 Safari/537');
+ assert.match(value.mac,/sh \.\/install.command/);
+ for(const command of Object.values(value)){
+  assert.ok(command.includes('https://api.example.com:8443'));assert.ok(command.includes('https://app.example.com'));assert.ok(command.includes("browser 'chrome'"));
+  assert.doesNotMatch(command,/ExecutionPolicy|Bearer|password|github.com|pypi/);
+ }
+ assert.throws(()=>offlineInstallCommands('https://api.example.com',"https://bad'.example.com"));
 });
