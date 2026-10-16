@@ -232,8 +232,8 @@ class TasksTests(unittest.TestCase):
             self.assertEqual(1,db.execute("SELECT COUNT(*) FROM submissions WHERE json_extract(body,'$.type')='final'").fetchone()[0])
         self.assertEqual('accepted',task['status'])
 
-    def test_no_self_review_even_with_all_roles_and_rules_snapshot(self):
-        self.store.set_roles(self.admin,'a',['annotator','leader','reviewer'])
+    def test_ordinary_annotator_reviewer_cannot_self_review_and_rule_snapshot_stays(self):
+        self.store.set_roles(self.admin,'a',['annotator','reviewer'])
         task=self.task()
         task=self.mutate('submit',self.a,task,annotations={})
         self.expect(403,lambda:self.mutate('start_review',self.a,task))
@@ -414,7 +414,7 @@ class TasksTests(unittest.TestCase):
         many=[{'id':f'custom_{i}','name':f'axis {i}','mode':'state','labels':['x']} for i in range(17)]
         self.expect(422,lambda:self.store.publish_rule(self.lead,{**base,'axes':many}))
 
-    def test_superadmin_inherits_roles_and_only_superadmin_can_adjudicate_own_work(self):
+    def test_managers_inherit_roles_and_can_adjudicate_and_accept_own_work(self):
         self.assertEqual(['annotator', 'leader', 'reviewer'], self.store.roles(self.admin)['roles'])
         rule = self.store.publish_rule(self.admin, {'name': 'Admin rule', 'task_type': 'admin-type',
             'axes': [{'id': 'posture', 'name': 'Posture', 'mode': 'state', 'labels': ['sit']}]})
@@ -436,18 +436,42 @@ class TasksTests(unittest.TestCase):
             resolutions={i['id']: 'confirmed' for i in task['issues']})
         self.assertEqual('admin', task['adjudicated_by'])
         self.assertEqual(1, len(self.store.history(self.admin, task['id'])['finals']))
-        self.expect(403, lambda: self.mutate('accept', self.admin, task))
-        task = self.mutate('accept', self.lead, task)
+        task = self.mutate('accept', self.admin, task)
         self.assertEqual('accepted', task['status'])
         self.store.set_roles(self.admin, 'a', ['annotator', 'leader'])
         own = self.task()
         own = self.mutate('submit', self.a, own, annotations=annotations)
-        self.expect(403, lambda: self.mutate('start_review', self.a, own))
-        own = self.mutate('start_review', self.reviewer, own)
-        self.expect(403, lambda: self.mutate('review', self.a, own))
-        own = self.mutate('review', self.reviewer, own)
-        self.expect(403, lambda: self.mutate('adjudicate', self.a, own,
-            annotations=annotations, contributors={}, resolutions={i['id']: 'confirmed' for i in own['issues']}))
+        own = self.mutate('start_review', self.a, own)
+        own = self.mutate('review', self.a, own)
+        own = self.mutate('adjudicate', self.a, own, annotations=annotations,
+            contributors={'posture:'+segment['id']:['a'] for segment in annotations['posture']},
+            resolutions={i['id']:'confirmed' for i in own['issues']})
+        self.assertEqual(1,len(self.store.history(self.a,own['id'])['finals']))
+        own = self.mutate('accept', self.a, own)
+        self.assertEqual('accepted',own['status'])
+        self.assertEqual('a',own['accepted_by'])
+
+    def test_revoking_leader_role_removes_self_review_acceptance_and_export(self):
+        self.store.set_roles(self.admin,'a',['leader'])
+        self.assertEqual(['annotator','leader','reviewer'],self.store.roles(self.a)['roles'])
+        task=self.store.create_task(self.lead,{'video_id':'v','rule_id':self.rule['id'],
+            'annotator_ids':['a'],'reviewer_id':'a','deadline':'2026-10-26'},participants={'a':self.a})
+        task=self.mutate('submit',self.a,task,annotations=self.annotations())
+        self.store.set_roles(self.admin,'a',['annotator','reviewer'])
+        self.expect(403,lambda:self.mutate('start_review',self.a,task))
+        self.store.set_roles(self.admin,'a',['leader'])
+        task=self.mutate('start_review',self.a,task)
+        task=self.mutate('review',self.a,task,action='pass')
+        self.store.set_roles(self.admin,'a',['annotator','reviewer'])
+        self.expect(403,lambda:self.mutate('accept',self.a,task))
+        self.store.set_roles(self.admin,'a',['leader'])
+        task=self.mutate('accept',self.a,task)
+        delivery={'task_ids':[task['id']],'expected_revisions':{task['id']:task['revision']},'request_id':'own-delivery'}
+        self.store.set_roles(self.admin,'a',['annotator','reviewer'])
+        self.expect(403,lambda:self.store.deliver(self.a,delivery))
+        self.store.set_roles(self.admin,'a',['leader'])
+        exported=self.store.deliver(self.a,delivery)
+        self.assertEqual([task['id']],exported['task_ids'])
 
     def test_delete_task_roles_revision_history_and_recreation(self):
         for manager in (self.admin, self.lead):

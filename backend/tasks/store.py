@@ -88,7 +88,8 @@ class TaskStore:
         if actor.get('role') == 'admin':
             return ['annotator', 'leader', 'reviewer']
         row = db.execute('SELECT body FROM roles WHERE user_id=?', (actor['id'],)).fetchone()
-        return json.loads(row[0]) if row else []
+        roles = json.loads(row[0]) if row else []
+        return ['annotator', 'leader', 'reviewer'] if 'leader' in roles else roles
 
     def _require(self, db, actor, role):
         if role not in self._roles(db, actor):
@@ -260,7 +261,7 @@ class TaskStore:
         obj['submissions'] = [{**s, 'actor_id': u} for u, s in obj['current_submissions'].items()]
         row = db.execute('SELECT body FROM drafts WHERE task_id=? AND user_id=?', (task['id'], actor['id'])).fetchone()
         obj['draft'] = json.loads(row[0]) if row else None
-        if actor['id'] in task['annotator_ids'] and actor.get('role') != 'admin' and task['status'] not in ('accepted', 'delivered'):
+        if actor['id'] in task['annotator_ids'] and 'leader' not in self._roles(db, actor) and task['status'] not in ('accepted', 'delivered'):
             for key in ('final_annotations', 'contributors', 'final_version_id', 'resolutions'):
                 obj.pop(key, None)
         obj['rule'] = self._read(db, 'rules', task['rule_id'])
@@ -297,19 +298,18 @@ class TaskStore:
                 raw = json.loads(row[1])
                 final = raw.get('type') == 'final'
                 if final:
-                    visible = task['status'] in ('accepted', 'delivered') or (complete and (actor['id'] not in task['annotator_ids'] or actor.get('role') == 'admin'))
+                    visible = task['status'] in ('accepted', 'delivered') or (complete and (actor['id'] not in task['annotator_ids'] or 'leader' in self._roles(db, actor)))
                 else:
                     visible = complete or raw['user_id'] == actor['id']
                 if visible:
                     result['finals' if final else 'submissions'].append(self._read(db, 'submissions', row[0]))
             return result
 
-    @staticmethod
-    def _check_self_review(actor, annotators, reviewer, participants):
+    def _check_self_review(self, db, actor, annotators, reviewer, participants):
         if reviewer in annotators:
-            account = (participants or {}).get(reviewer, actor if reviewer == actor['id'] else {})
-            if account.get('role') != 'admin':
-                raise TaskError(422, '仅超级管理员可以复核自己的标注')
+            account = (participants or {}).get(reviewer, actor if reviewer == actor['id'] else {'id': reviewer})
+            if 'leader' not in self._roles(db, account):
+                raise TaskError(422, '仅管理员和组长可以复核自己的标注')
 
     @staticmethod
     def _collection_key(video):
@@ -376,7 +376,7 @@ class TaskStore:
             reviewer = body.get('reviewer_id')
             if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or len(annotators) > 2 or len(set(annotators)) != len(annotators) or (reviewer is not None and not isinstance(reviewer, str)):
                 raise TaskError(422, '任务人员配置不正确')
-            self._check_self_review(actor, annotators, reviewer, participants)
+            self._check_self_review(db, actor, annotators, reviewer, participants)
             try:
                 datetime.fromisoformat(body['deadline'].replace('Z', '+00:00'))
             except (KeyError, ValueError, AttributeError):
@@ -435,7 +435,7 @@ class TaskStore:
             reviewer = body.get('reviewer_id')
             if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or not 1 <= len(annotators) <= 2 or len(set(annotators)) != len(annotators) or not isinstance(reviewer, str) or not reviewer:
                 raise TaskError(422, '任务人员配置不正确')
-            self._check_self_review(actor, annotators, reviewer, participants)
+            self._check_self_review(db, actor, annotators, reviewer, participants)
             for person, role in [(u, 'annotator') for u in annotators] + [(reviewer, 'reviewer')]:
                 participant = (participants or {}).get(person, actor if person == actor['id'] else {'id': person})
                 self._require(db, participant, role)
@@ -525,7 +525,7 @@ class TaskStore:
             return response
 
     def _reviewer(self, db, actor, task, *, allow_self=False):
-        if actor['id'] in task['annotator_ids'] and not (allow_self and actor.get('role') == 'admin'):
+        if actor['id'] in task['annotator_ids'] and not (allow_self and 'leader' in self._roles(db, actor)):
             raise TaskError(403, '不能复核、裁定或验收自己标注的任务')
         if actor['id'] != task['reviewer_id'] and 'leader' not in self._roles(db, actor):
             raise TaskError(403, '无权复核此任务')
@@ -651,7 +651,7 @@ class TaskStore:
         with self.db() as db:
             task = self._mutation(db, actor, id, body)
             self._require(db, actor, 'leader')
-            self._reviewer(db, actor, task)
+            self._reviewer(db, actor, task, allow_self=True)
             self._quality(db, task)
             if task['status'] != 'reviewing' or not task.get('review_complete') or (task['issues'] and not task.get('resolutions')):
                 raise TaskError(409, '复核或裁定尚未完成')
@@ -693,7 +693,7 @@ class TaskStore:
             for task in tasks:
                 self._verify_final(db, task)
                 self._quality(db, task)
-                if actor['id'] in task['annotator_ids'] or task['status'] != 'accepted' or revisions.get(task['id']) != task['revision']:
+                if task['status'] != 'accepted' or revisions.get(task['id']) != task['revision']:
                     raise TaskError(409, '仅可交付版本一致且已验收的任务')
             fields = ['video_id','collector_id','uploader_id','final_version_id','task_type','rule_id','axis','segment_id','lane','start_seconds','end_seconds','start_ms','end_ms','label','transport_type','annotators','reviewer','adjudicator']
             fields += ['collection_id','collection_name','video_ids','recording_start']

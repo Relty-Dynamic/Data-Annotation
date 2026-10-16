@@ -72,11 +72,11 @@ test('completed review is labeled waiting acceptance rather than still reviewing
 });
 
 
-test('waiting acceptance rows offer the right entry and explain self acceptance restriction',()=>{
+test('waiting acceptance rows offer managers acceptance even for their own annotations',()=>{
  const task=item('reviewed','reviewing',{review_complete:true});
  const props={...listProps,items:[task],isReview:()=>true,onReview(){}};
  const self=renderToStaticMarkup(createElement(TaskList,props));
- assert.match(self,/待验收/);assert.match(self,/本人参与标注，需其他管理人员验收/);assert.match(self,/查看复核结果/);
+ assert.match(self,/待验收/);assert.doesNotMatch(self,/本人参与标注/);assert.match(self,/验收任务/);
  const manager=renderToStaticMarkup(createElement(TaskList,{...props,userId:'other-admin'}));
  assert.match(manager,/验收任务/);assert.doesNotMatch(manager,/本人参与标注/);
 });
