@@ -118,6 +118,73 @@ class UploaderDistributionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):cached_download('https://official.invalid',checksum,cache)
         self.assertFalse((cache/(checksum+'.part')).exists())
 
+    def test_partial_dependency_download_resumes_from_the_exact_range(self):
+        cache=self.root/'resume';cache.mkdir();data=b'abcdefgh';checksum=hashlib.sha256(data).hexdigest()
+        (cache/(checksum+'.part')).write_bytes(data[:4])
+        response=io.BytesIO(data[4:]);response.status=206;response.headers={'Content-Range':'bytes 4-7/8'}
+        def fetch(request,**options):
+            self.assertEqual(request.get_header('Range'),'bytes=4-')
+            self.assertEqual(options['timeout'],30)
+            return response
+        with patch('urllib.request.urlopen',side_effect=fetch):
+            result=cached_download('https://official.invalid/runtime.tar.gz',checksum,cache)
+        self.assertEqual(result.read_bytes(),data)
+        self.assertFalse((cache/(checksum+'.part')).exists())
+
+    def test_ignored_range_restarts_instead_of_appending(self):
+        cache=self.root/'ignored-range';cache.mkdir();data=b'abcdefgh';checksum=hashlib.sha256(data).hexdigest()
+        (cache/(checksum+'.part')).write_bytes(data[:4])
+        response=io.BytesIO(data);response.status=200;response.headers={'Content-Length':str(len(data))}
+        with patch('urllib.request.urlopen',return_value=response):
+            self.assertEqual(cached_download('https://official.invalid/runtime.tar.gz',checksum,cache).read_bytes(),data)
+
+    def test_interrupted_read_retains_partial_bytes_and_retries_with_progress(self):
+        import itertools
+        data=b'abcdefgh';checksum=hashlib.sha256(data).hexdigest();cache=self.root/'interrupted'
+        class Interrupted(io.BytesIO):
+            status=200
+            headers={'Content-Length':str(len(data))}
+            def read(self,size=-1):
+                if self.tell():raise OSError('isolated connection loss')
+                return super().read(4)
+        resumed=io.BytesIO(data[4:]);resumed.status=206;resumed.headers={'Content-Range':'bytes 4-7/8'}
+        requests=[]
+        def fetch(request,**options):
+            requests.append(request)
+            return Interrupted(data) if len(requests)==1 else resumed
+        tick=itertools.count(0,6)
+        with patch('urllib.request.urlopen',side_effect=fetch),patch('backend.upload_dist.time.monotonic',side_effect=lambda:next(tick)),patch('builtins.print') as logs:
+            self.assertEqual(cached_download('https://official.invalid/runtime.tar.gz',checksum,cache).read_bytes(),data)
+        self.assertEqual(requests[1].get_header('Range'),'bytes=4-')
+        self.assertTrue(any('KiB/s' in call.args[0] for call in logs.call_args_list))
+        with patch('urllib.request.urlopen',side_effect=AssertionError('verified cache must not download')):
+            self.assertEqual(cached_download('https://official.invalid/runtime.tar.gz',checksum,cache).read_bytes(),data)
+
+    def test_unsatisfiable_partial_is_reset_and_verified_again(self):
+        import urllib.error
+        cache=self.root/'range-416';cache.mkdir();data=b'abcdefgh';checksum=hashlib.sha256(data).hexdigest()
+        (cache/(checksum+'.part')).write_bytes(b'oversized stale partial')
+        requests=[]
+        def fetch(request,**options):
+            requests.append(request)
+            if len(requests)==1:raise urllib.error.HTTPError(request.full_url,416,'fixture invalid range',{},None)
+            self.assertIsNone(request.get_header('Range'))
+            response=io.BytesIO(data);response.status=200;response.headers={'Content-Length':'8'}
+            return response
+        with patch('urllib.request.urlopen',side_effect=fetch):
+            self.assertEqual(cached_download('https://official.invalid/runtime.tar.gz',checksum,cache).read_bytes(),data)
+        self.assertEqual(len(requests),2)
+
+    def test_invalid_range_cannot_publish_and_keeps_partial_for_retry(self):
+        cache=self.root/'invalid-range';cache.mkdir();data=b'abcdefgh';checksum=hashlib.sha256(data).hexdigest()
+        partial=cache/(checksum+'.part');partial.write_bytes(data[:4])
+        def fetch(*args,**kwargs):
+            response=io.BytesIO(data[4:]);response.status=206;response.headers={'Content-Range':'bytes 3-6/8'}
+            return response
+        with patch('urllib.request.urlopen',side_effect=fetch),self.assertRaises(OSError):
+            cached_download('https://official.invalid/runtime.tar.gz',checksum,cache)
+        self.assertFalse((cache/checksum).exists());self.assertEqual(partial.read_bytes(),data[:4])
+
     def test_scripts_only_download_from_platform_and_preserve_scoped_install(self):
         kits={target:{'file':target+'-'+'a'*64+'.zip','sha256':'a'*64,'size':123} for target in TARGETS}
         for script in (shell('https://api.example.com','https://app.example.com','chrome',kits),

@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import os
+import re
+import time
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,6 +13,8 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+import urllib.error
+from urllib.parse import urlsplit, unquote
 import zipfile
 
 PYTHON_VERSION = '3.14.6'
@@ -28,24 +32,76 @@ def sha(path):
 
 
 def cached_download(url, checksum, cache):
-    path = cache / checksum
-    if path.is_file() and sha(path) == checksum:
-        return path
-    temporary = path.with_suffix('.part')
     cache.mkdir(parents=True, exist_ok=True)
+    path = cache / checksum
+    temporary = path.with_suffix('.part')
+    label = unquote(Path(urlsplit(url).path).name)
+    deadline = time.monotonic() + 900
     for attempt in range(3):
+        # A completed cache can also be supplied while an earlier attempt failed.
+        if path.is_file() and sha(path) == checksum:
+            print('复用已核验依赖：' + label, flush=True)
+            return path
+        if temporary.is_file() and sha(temporary) == checksum:
+            os.replace(temporary, path)
+            print('复用已完成下载：' + label, flush=True)
+            return path
+        offset = temporary.stat().st_size if temporary.is_file() else 0
+        print(f'下载 {label}：第 {attempt+1}/3 次，从 {offset/1024**2:.1f} MiB 继续', flush=True)
+        headers = {'User-Agent': 'DataMark-Packager/1.0'}
+        if offset:
+            headers['Range'] = f'bytes={offset}-'
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent':'DataMark-Packager/1.0'}), timeout=120) as source, temporary.open('wb') as output:
-                shutil.copyfileobj(source, output)
+            if time.monotonic() >= deadline:
+                raise TimeoutError('依赖下载超过 15 分钟，已保留断点，请检查构建机网络后重试。')
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as source:
+                status = getattr(source, 'status', 200)
+                response_headers = getattr(source, 'headers', {})
+                if status == 206:
+                    match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response_headers.get('Content-Range', ''))
+                    if not match or int(match[1]) != offset or not offset <= int(match[2]) < int(match[3]):
+                        raise OSError('依赖断点响应范围无效。')
+                    total = int(match[3])
+                elif status == 200:
+                    offset = 0  # An origin that ignores Range must replace, never append.
+                    total = int(response_headers.get('Content-Length', 0))
+                else:
+                    raise OSError('依赖下载响应状态无效。')
+                received = offset
+                started = last = time.monotonic()
+                with temporary.open('ab' if offset else 'wb') as output:
+                    while True:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('依赖下载超过 15 分钟，已保留断点，请检查构建机网络后重试。')
+                        block = source.read(64*1024)
+                        if not block:
+                            break
+                        output.write(block)
+                        received += len(block)
+                        now = time.monotonic()
+                        if now-last >= 10:
+                            size = f'{total/1024**2:.1f}' if total else '?'
+                            rate = (received-offset)/max(.001, now-started)/1024
+                            print(f'下载 {label}：{received/1024**2:.1f}/{size} MiB，{rate:.1f} KiB/s', flush=True)
+                            last = now
+                if total and received != total:
+                    raise OSError('依赖下载未完整结束，保留断点。')
             if sha(temporary) != checksum:
+                temporary.unlink(missing_ok=True)
                 raise RuntimeError('官方依赖包摘要不一致，停止构建。')
             os.replace(temporary, path)
+            print(f'下载并核验完成：{label}（{received/1024**2:.1f} MiB）', flush=True)
             return path
-        except OSError:
-            if attempt == 2:
+        except OSError as error:
+            # A stale/oversized partial can produce 416; restart safely next time.
+            invalid_partial=isinstance(error, urllib.error.HTTPError) and error.code == 416
+            if invalid_partial:
+                temporary.unlink(missing_ok=True)
+            reason = ('HTTP '+str(error.code)) if isinstance(error, urllib.error.HTTPError) else type(error).__name__
+            recovery='断点无效，下次从头下载' if invalid_partial else '已完成部分保留供重试'
+            print(f'依赖下载未完成：{label}，{reason}；{recovery}。', flush=True)
+            if attempt == 2 or time.monotonic() >= deadline:
                 raise
-        finally:
-            temporary.unlink(missing_ok=True)
 
 
 def python_archive(target, cache):
