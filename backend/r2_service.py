@@ -168,6 +168,9 @@ class R2ProjectService(ProjectService):
                                         claim_mode=body.get('claim_mode') if body.get('claim_mode') in ('continue', 'restart') else None)
             stored = self.load(project['id'])
             stored.update(_r2_prefix=prefix, _r2_capture_sha256=identity, _r2_manifest=manifest)
+            from .upload_playback import reference
+            for video in stored['videos']:
+                stored['_sources'][video['id']]['r2_playback'] = reference(prefix, manifest, video['name'])
             stored.setdefault('_r2_collection_named', False)
             if not stored['_r2_collection_named']:
                 stored['collection_folder_name'] = prefix.split('/')[-1]
@@ -191,6 +194,32 @@ class R2ProjectService(ProjectService):
                 stored['draft_dirty'] = True
             self.save(stored)
             return self.public(stored)
+
+    def uploaded_playback(self, source, directory, key):
+        from .upload_playback import hydrate
+        return hydrate(self.provider, source, directory, key)
+
+    def media_source(self, project, video_id):
+        path, metadata = super().media_source(project, video_id)
+        if 'r2_playback' not in metadata and project.get('_r2_manifest'):
+            from .upload_playback import reference
+            name = next(video['name'] for video in project['videos'] if video['id'] == video_id)
+            metadata = {**metadata, 'r2_playback': reference(project['_r2_prefix'], project['_r2_manifest'], name)}
+        return path, metadata
+
+    def start_session(self, ident, **kwargs):
+        from .upload_playback import reference
+        with self.lock:
+            project = self.load(ident)
+            changed = False
+            for video in project['videos']:
+                source = project['_sources'][video['id']]
+                if 'r2_playback' not in source and project.get('_r2_manifest'):
+                    source['r2_playback'] = reference(project['_r2_prefix'], project['_r2_manifest'], video['name'])
+                    changed = True
+            if changed:
+                self.save(project)
+        return super().start_session(ident, **kwargs)
 
     def editing(self, ident, actor, tab, *, leave=False):
         if not isinstance(tab, str) or not 1 <= len(tab) <= 200:
@@ -253,7 +282,13 @@ class R2ProjectService(ProjectService):
         video_names = {item['id']: item['name'] for item in project['videos']}
         for video in manifest['videos']:
             ident = video['id']
+            capture = project['_sources'][ident].get('r2_playback')
             def asset(kind, filename, index=None):
+                if capture:
+                    record = next((item for item in capture['manifest'].get('cache_files', [])
+                                   if item['video_name'] == capture['video_name'] and item['kind'] == kind and item['index'] == index), None)
+                    if record:
+                        return self.provider.signed_url(capture['prefix'] + '/' + record['key'])
                 path = service.sessions.asset(project_id, kind, ident, index, version=version)
                 if path is None:
                     raise HTTPException(409, '播放缓存尚未就绪。')
@@ -262,7 +297,10 @@ class R2ProjectService(ProjectService):
                 return self.provider.signed_url(key)
             sheets = [asset('sheet', f'sheet-{index}.jpg', index) for index in range(len(video['storyboard']['sheets']))]
             source = source_files.get(video_names[ident])
-            normal_url = self.provider.signed_url(project['_r2_prefix'] + '/' + source['key']) if source else asset('normal', 'normal.mp4')
+            if capture:
+                source = next(item for item in capture['manifest']['files'] if item['name'] == capture['video_name'])
+            prefix = capture['prefix'] if capture else project.get('_r2_prefix')
+            normal_url = self.provider.signed_url(prefix + '/' + source['key']) if source else asset('normal', 'normal.mp4')
             if source:
                 normal_records[video['url']] = source
             value = {**video, 'url': normal_url, 'fast_url': asset('fast', 'fast.mp4'),

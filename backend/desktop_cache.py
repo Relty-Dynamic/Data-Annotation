@@ -132,13 +132,15 @@ class DesktopCache:
         owner = str(self.service.root.resolve()) + ':' + project_id
         return '.datamark-ref.' + hashlib.sha256(owner.encode()).hexdigest() + '.json'
 
-    def retain_upload(self, prefix: str, video_name: str, source: Path) -> Path:
+    def retain_upload(self, prefix: str, video_name: str, source: Path, *, kind='normal') -> Path:
         """Keep the uploader's verified compressed video independently of staging."""
         project = {'id': hashlib.sha256(('upload:' + prefix).encode()).hexdigest()[:32],
                    'collection_folder_name': prefix.rsplit('/', 1)[-1]}
         directory = self.directory(project)
         digest = sha256_file(source)
-        filename = safe_name(Path(video_name).stem) + '.' + digest + '.normal.mp4'
+        if not re.fullmatch(r'normal|fast|thumbnail|storyboard-\d+', kind):
+            raise HTTPException(422, '上传缓存类型无效。')
+        filename = safe_name(Path(video_name).stem) + '.' + digest + '.' + kind + ('.mp4' if kind in ('normal', 'fast') else '.jpg')
         target = directory / filename
         with LOCK:
             if is_reparse(target):

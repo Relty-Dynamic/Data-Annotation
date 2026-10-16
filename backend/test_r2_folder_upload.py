@@ -22,6 +22,7 @@ from backend.r2_upload_helper import create_app
 from backend.r2_uploads import R2Uploads
 from backend.r2_service import R2ProjectService
 from backend.service import ProjectService, document_bytes
+from backend.storyboards import StoryboardCache
 from backend.test_r2_integration import MultipartObjects, USER, OTHER, NAME, PREFIX
 
 
@@ -181,7 +182,8 @@ class PublicationConfirmationTests(unittest.TestCase):
         with httpx.Client(base_url='https://api.example.com', timeout=30,
                           transport=httpx.MockTransport(handle)) as client:
             target = RemoteCaptureTarget(client, service, progress=self.progress.append)
-            target.publish_capture(PREFIX, Path('/unused'), {'files': [{'key': 'FPV/clip.mp4'}]}, service)
+            with patch('backend.upload_playback.build'):
+                target.publish_capture(PREFIX, Path('/unused'), {'files': [{'key': 'FPV/clip.mp4'}]}, service)
 
     def test_long_publication_wait_and_explicit_progress(self):
         self.publish()
@@ -377,10 +379,66 @@ class FolderUploadRoundTripTests(unittest.TestCase):
             self.assertEqual(job['prefix'], 'daily/20261015/1015lixin')
             manifest = provider.optional_json(job['prefix'] + '/manifest.json')[0]
             compressed = provider.get(job['prefix'] + '/' + manifest['files'][0]['key'])
+            self.assertEqual({item['kind'] for item in manifest['cache_files']}, {'fast', 'thumbnail', 'sheet'})
+            self.assertEqual(len(manifest['cache_files']), 3)
             cache = list((root / 'desktop/dataMarkProject/1015lixin').glob('*.normal.mp4'))
             self.assertEqual(len(cache), 1)
             self.assertEqual(cache[0].read_bytes(), compressed)
             self.assertEqual(video.read_bytes(), original)
+            for item in manifest['cache_files']:
+                label = f"storyboard-{item['index']:03d}" if item['kind']=='sheet' else item['kind']
+                local_cache = list((root / 'desktop/dataMarkProject/1015lixin').glob('*.' + label + ('.mp4' if item['kind']=='fast' else '.jpg')))
+                self.assertEqual(len(local_cache), 1)
+                self.assertEqual(local_cache[0].read_bytes(), provider.get(job['prefix']+'/'+item['key']))
+            opened = public.open_capture(job['prefix'], actor=USER)
+            from backend.session_cache import SessionCache
+            from backend.r2_routes import R2Media
+            from backend.tasks.workspace import Workspaces
+            task = {'id':'fixture', 'video':{'id':'clip','duration_ms':1000,
+                    'source':{'backend':'s3','key':opened['id']+'/v0001'}}, 'task_type':'state',
+                    'rule':{'axes':[{'id':'posture','name':'姿势','mode':'state','labels':['站']}]},
+                    'revision':0,'status':'annotating','annotator_ids':[USER['id']]}
+            workspace = Workspaces(root/'task-workspace',SimpleNamespace(get_task=lambda actor,ident:task),R2Media(public))
+            self.addCleanup(workspace.close)
+            task_project = workspace.project(USER,'fixture')
+            with patch.object(SessionCache, '_render_compact', side_effect=AssertionError('server must not compress')), \
+                 patch('backend.session_cache.render_local_fast', side_effect=AssertionError('server must not render fast')), \
+                 patch('backend.session_cache.render_local_thumbnail', side_effect=AssertionError('server must not render jpg')), \
+                 patch.object(StoryboardCache, 'render', side_effect=AssertionError('server must not render sheets')):
+                for svc, project in ((public, opened), (workspace.service, task_project)):
+                    svc.start_session(project['id'])
+                    deadline=time.monotonic()+15
+                    while time.monotonic()<deadline:
+                        state=svc.sessions.status(project['id'])
+                        if state['state'] in ('ready','partial','error'):break
+                        time.sleep(.02)
+                    self.assertEqual(state['state'],'ready',state)
+                    download = public.media_manifest(svc,svc.sessions.manifest(project['id']))
+                    self.assertTrue(all('/'+job['prefix']+'/' in asset['url'] for asset in download['assets']))
+            self.assertFalse(any(key.startswith('media/') for key in provider.objects))
+            # A fresh server must reject a missing/corrupt uploaded derivative,
+            # retaining the collection instead of generating a replacement.
+            broken = R2ProjectService(root/'broken-server',provider)
+            broken.tool = public.tool
+            self.addCleanup(broken.sessions.close)
+            self.addCleanup(broken.previews.close)
+            damaged = broken.open_capture(job['prefix'],actor=USER)
+            cache_key=job['prefix']+'/'+manifest['cache_files'][-1]['key']
+            saved_object=provider.objects[cache_key]
+            provider.objects[cache_key]=(b'corrupt-fixture','corrupt')
+            try:
+                with patch.object(SessionCache,'_render_compact',side_effect=AssertionError('no server fallback')), \
+                     patch.object(StoryboardCache,'render',side_effect=AssertionError('no server image fallback')):
+                    broken.start_session(damaged['id'])
+                    deadline=time.monotonic()+15
+                    while time.monotonic()<deadline:
+                        state=broken.sessions.status(damaged['id'])
+                        if state['state'] in ('ready','partial','error'):break
+                        time.sleep(.02)
+                    self.assertEqual(state['state'],'partial',state)
+                    self.assertNotIn('no server',str(state))
+            finally:
+                provider.objects[cache_key]=saved_object
             for item in manifest['attachments']:
                 self.assertEqual(provider.get(job['prefix'] + '/' + item['key']), data[item['name']])
             project = public.open_capture(job['prefix'], actor=USER)
