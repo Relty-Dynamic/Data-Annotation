@@ -353,6 +353,9 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
             if not session:
                 return JSONResponse(status_code=401, content={"detail": "请先登录。"}, headers={"Cache-Control": "no-store"})
             user, csrf_hash = session
+            from .tasks.track_policy import is_legacy_track_mutation
+            if tasks_enabled() and user['role'] != 'admin' and is_legacy_track_mutation(path, request.method):
+                return JSONResponse(status_code=403, content={'detail': '任务时间轴由标注规则统一管理，不能使用旧时间轴库自定义。'})
             request.state.user = user
             request.state.csrf_hash = csrf_hash
             if request.method not in {"GET", "HEAD", "OPTIONS"}:

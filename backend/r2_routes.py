@@ -139,6 +139,9 @@ def install(app, session, accounts, provider, root):
     @router.delete('/account/track-library/{track_id}')
     @router.post('/account/track-library/{track_id}/default')
     async def edit_library(request: Request, track_id: str = '', default: bool = False):
+        from .tasks.routes import enabled
+        if enabled() and actor(request)['role'] != 'admin':
+            raise HTTPException(403, '任务时间轴由标注规则统一管理，不能使用旧时间轴库自定义。')
         body = await request.json()
         return accounts.request('POST', '/v1/library-edit', json={
             'token': request.cookies.get('datamark_session'), 'csrf': request.cookies.get('datamark_csrf'),
@@ -159,6 +162,9 @@ def install(app, session, accounts, provider, root):
 
     @router.put('/projects/{ident}/track-selection')
     def tracks(ident: str, body: TrackSelectionRequest, request: Request):
+        from .tasks.routes import enabled
+        if enabled() and actor(request)['role'] != 'admin':
+            raise HTTPException(403, '任务时间轴由标注规则统一管理，不能自行更改。')
         body = body.model_dump()
         with service.lock:
             project(ident, request)

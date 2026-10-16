@@ -348,6 +348,33 @@ class TaskHostTests(unittest.TestCase):
         headers = self.login(client, 'a')
         self.request(client, 'POST', '/collections', body, headers, 403)
 
+    def test_task_workers_cannot_mutate_legacy_track_libraries_or_project_axes(self):
+        app, client = self.host()
+        task = self.initialize(app, client)
+        project = app.state.service.load(self.project['id'])
+        from backend.track_library import TrackLibrary
+        library = TrackLibrary(self.auth)
+        for name in ('a','reviewer','lead'):
+            library.save(self.users[name]['id'], 'oldaxis', '历史轴', 'state', ['旧标签'], create=True)
+            headers = self.login(client, name)
+            for method,path,body in [
+                ('POST','/api/account/track-library',{'id':'newaxis','name':'新轴','labels':['新标签']}),
+                ('PUT','/api/account/track-library/oldaxis',{'id':'oldaxis','name':'修改','labels':['修改']}),
+                ('DELETE','/api/account/track-library/oldaxis',{'confirmed':True}),
+                ('POST','/api/account/track-library/scene/default',{'is_default':False}),
+                ('PUT','/api/account/track-templates',{'json_name':'newaxis','name':'新轴','labels':[]}),
+                ('DELETE','/api/account/fixed-track-templates/scene',None),
+                ('PUT',f"/api/projects/{project['id']}/track-selection",{'tracks':[], 'expected_revision':project['revision']}),
+            ]:
+                response = client.request(method,path,json=body,headers=headers)
+                self.assertEqual(403,response.status_code,response.text)
+                self.assertIn('标注规则',response.json()['detail'])
+            self.assertEqual(['旧标签'],next(axis for axis in library.list(self.users[name]['id']) if axis['id']=='oldaxis')['labels'])
+        self.assertEqual(project,app.state.service.load(project['id']))
+        headers = self.login(client,'admin')
+        self.assertEqual(200,client.post('/api/account/track-library',json={'id':'adminaxis','name':'管理轴','labels':['管理']},headers=headers).status_code)
+        self.assertEqual(task['id'],self.request(client,'GET','/items/'+task['id'])['id'])
+
     def test_task_audit_scope_library_and_batch_outcomes(self):
         app, client = self.host()
         task = self.initialize(app, client)

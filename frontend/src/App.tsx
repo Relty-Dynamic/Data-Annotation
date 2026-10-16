@@ -1,6 +1,10 @@
 import TaskPanel from './tasks/TaskPanel';
 import TaskFields from './tasks/TaskFields';
+import TaskWorkbenchReview from './tasks/TaskWorkbenchReview';
+import {canUseLegacyTrackTools} from './tasks/permissions';
+import type {TaskVersion} from './tasks/types';
 import {taskFromSearch} from './tasks/transport.ts';
+import {saveBeforeNavigation} from './tasks/saveBeforeNavigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {authFetch, type Account} from './auth';
 import {apiUrl, separateApiOrigin} from './apiOrigin.ts';
@@ -20,6 +24,8 @@ import PlaybackSpeed from './PlaybackSpeed';
 import DeleteProjectDialog from './DeleteProjectDialog';
 import RenameProjectDialog from './RenameProjectDialog';
 import ProjectPicker from './ProjectPicker';
+import TaskPicker from './tasks/TaskPicker';
+import type {TaskChoice} from './tasks/taskChoices';
 import {chooseJsonExportDirectory, saveJsonDocuments, type TimelineDocument} from './localJsonExport';
 import SubmitProjectDialog from './SubmitProjectDialog';
 import ResetAnnotationsDialog from './ResetAnnotationsDialog';
@@ -70,7 +76,12 @@ async function requireProjectNaming(){
 export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=>void}){
  const sharedServer=window.location.protocol==='https:';
  const taskId=taskFromSearch(window.location.search);
+ const reviewMode=!!taskId&&new URLSearchParams(window.location.search).get('review')==='1';
+ const reviewDirty=useRef(false),reviewBusy=useRef(false);
  const [tasksAvailable,setTasksAvailable]=useState(false),[tasksOpen,setTasksOpen]=useState(new URLSearchParams(window.location.search).get('tasks')==='1');
+ const [tasksChecked,setTasksChecked]=useState(false);
+ const assignedTaskMode=tasksAvailable&&user.role!=='admin';
+ const legacyTrackTools=(user.role==='admin'||tasksChecked)&&canUseLegacyTrackTools(user,tasksAvailable)&&!taskId;
  const [taskErrors,setTaskErrors]=useState<{axis?:string;segment_id?:string;reason?:string}[]>([]);
  const lastProjectKey=`datamark-user-${user.id}-last-project`;
  const removedProjectsKey=`datamark-user-${user.id}-removed-projects`;
@@ -78,7 +89,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const previewsClearedKey=`datamark-user-${user.id}-previews-cleared`;
  useWorkspaceGestures();
  const [project,setProject]=useState<Project|null>(null), projectRef=useRef<Project|null>(null);
- const taskReadOnly=!!(project as (Project & {task_readonly?:boolean})|null)?.task_readonly;
+ const taskReadOnly=reviewMode||!!(project as (Project & {task_readonly?:boolean})|null)?.task_readonly;
  const [adminOpen,setAdminOpen]=useState(false);
  const [passwordOpen,setPasswordOpen]=useState(false);
  const [auditOpen,setAuditOpen]=useState(false);
@@ -119,7 +130,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[saveState,setSaveState]=useState('已保存到平台');
  const [saveFailed,setSaveFailed]=useState(false),saveFailedRef=useRef(false),pendingSaves=useRef(0),saveQueue=useRef<Promise<void>>(Promise.resolve()),serverRevision=useRef(0);
  useEffect(()=>{if(!sharedServer)void api<{connected:boolean}>('/api/cloud/status').then(status=>setCloudConnected(status.connected)).catch(()=>setCloudConnected(false));},[sharedServer]);
- useEffect(()=>{void api<{capabilities:string[];storage_backend?:'s3-mock'|'nas'|'s3'}>('/api/health').then(health=>{setTasksAvailable(health.capabilities.includes('task-management'));setMockMode(health.capabilities.includes('s3-mock'));setMockCatalogAvailable(health.capabilities.includes('s3-mock-catalog'));setMockNasAvailable(health.capabilities.includes('s3-mock')&&health.capabilities.includes('nas-source-browser'));setActiveStorage(health.storage_backend??(health.capabilities.includes('s3-mock')?'s3-mock':'nas'));}).catch(()=>{});},[]);
+ useEffect(()=>{void api<{capabilities:string[];storage_backend?:'s3-mock'|'nas'|'s3'}>('/api/health').then(health=>{setTasksAvailable(health.capabilities.includes('task-management'));setTasksChecked(true);setMockMode(health.capabilities.includes('s3-mock'));setMockCatalogAvailable(health.capabilities.includes('s3-mock-catalog'));setMockNasAvailable(health.capabilities.includes('s3-mock')&&health.capabilities.includes('nas-source-browser'));setActiveStorage(health.storage_backend??(health.capabilities.includes('s3-mock')?'s3-mock':'nas'));}).catch(()=>{});},[]);
  const [selectedId,setSelectedId]=useState<string|null>(null),[label,setLabel]=useState(''),[startText,setStartText]=useState(''),[endText,setEndText]=useState(''),[manual,setManual]=useState(false);
  const [selectedBoundary,setSelectedBoundary]=useState<AnnotationBoundary|null>(null);
  const boundaryRef=useRef<BoundarySelection|null>(null),boundaryGesture=useRef<BoundaryGesture|null>(null);
@@ -193,9 +204,9 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const editorLabelOptions=project&&!eventTrack?projectAnnotationLabels(project,activeTrack):[];
  const currentStates=activeSegments.filter(s=>s.start_ms<=time&&(s.end_ms===null||time<s.end_ms));
  const refresh=()=>api<Project[]>('/api/projects').then(setProjects).catch(e=>setError(e.message));
- useEffect(()=>{(taskId?api('/api/health'):requireSourceCapabilities()).then(()=>api<Project[]>('/api/projects')).then(ps=>{setProjects(ps);if(taskId&&ps[0]){adopt(ps[0],true);return;}const last=readRestorableProjectPreference(lastProjectKey,previewsClearedKey);if(last&&!readRemovedProjects(removedProjectsKey).includes(last)&&ps.some(p=>p.id===last))api<Project>(`/api/projects/${last}`).then(p=>{if(!projectRef.current&&!readRemovedProjects(removedProjectsKey).includes(p.id)&&readRestorableProjectPreference(lastProjectKey,previewsClearedKey)===p.id)adopt(p,true);}).catch(e=>setError(e.message));}).catch(e=>setError(e.message));},[]);
+ useEffect(()=>{api<{capabilities:string[]}>('/api/health').then(health=>{if(!taskId&&user.role!=='admin'&&health.capabilities.includes('task-management'))return [];return (taskId?Promise.resolve():requireSourceCapabilities()).then(()=>api<Project[]>('/api/projects'));}).then(ps=>{setProjects(ps);if(taskId&&ps[0]){adopt(ps[0],true);return;}const last=readRestorableProjectPreference(lastProjectKey,previewsClearedKey);if(last&&!readRemovedProjects(removedProjectsKey).includes(last)&&ps.some(p=>p.id===last))api<Project>(`/api/projects/${last}`).then(p=>{if(!projectRef.current&&!readRemovedProjects(removedProjectsKey).includes(p.id)&&readRestorableProjectPreference(lastProjectKey,previewsClearedKey)===p.id)adopt(p,true);}).catch(e=>setError(e.message));}).catch(e=>setError(e.message));},[]);
  useEffect(()=>{if(notice&&!prepareOpen&&!importOpen&&!busy){const t=setTimeout(()=>setNotice(''),9000);return()=>clearTimeout(t);}},[notice,prepareOpen,importOpen,busy]);
- useEffect(()=>{const warn=(e:BeforeUnloadEvent)=>{if(boundaryGesture.current||pendingSaves.current||saveFailedRef.current||busyRef.current||hasPendingEdit){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);},[hasPendingEdit]);
+ useEffect(()=>{const warn=(e:BeforeUnloadEvent)=>{if(boundaryGesture.current||pendingSaves.current||saveFailedRef.current||busyRef.current||hasPendingEdit||reviewDirty.current||reviewBusy.current){e.preventDefault();e.returnValue='';}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);},[hasPendingEdit]);
  function resetEditorFields(){exitBoundary();selectId(null);setLabel('');setStartText('');setEndText('');setManual(false);}
  function clearEditor(){resetEditorFields();if(selectedRange){setStartText(formatTime(selectedRange.start_ms));setEndText(formatTime(selectedRange.end_ms));}}
  function selectTrack(t:Track){if(t===activeTrack){setTrackRevealVersion(value=>value+1);return;}if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再切换类型；当前输入已保留。');return;}setError('');setTrackRevealVersion(value=>value+1);setActiveTrack(t);resetEditorFields();if(selectedRange){setStartText(formatTime(selectedRange.start_ms));setEndText(formatTime(selectedRange.end_ms));}}
@@ -369,6 +380,20 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   setNotice(`已将 ${file.name} 导入姿势轴：${imported.importedCount} 段，共 ${formatTime(imported.importedDurationMs)}${imported.discardedDurationMs?`；舍弃无视频部分 ${formatTime(imported.discardedDurationMs)}`:''}${imported.replacedCount?`；覆盖 ${imported.replacedCount} 条已有主轴标注的重叠部分`:''}。可撤销本次导入。`);
  }
  async function flush(){finishBoundaryGesture();await saveQueue.current;if(saveFailedRef.current)throw new Error('请先重试保存平台草稿，再继续操作。');}
+ async function chooseAssignedTask(choice:TaskChoice){
+  if(choice.id===taskId&&(choice.kind==='review')===reviewMode)return;
+  if(busyRef.current||reviewBusy.current)return;
+  if(hasPendingEdit||reviewDirty.current){setError('请先保存或清空未提交的填写，再切换任务。');return;}
+  pausePlayback();
+  await saveBeforeNavigation(action=>doBusy('正在保存草稿…',action),flush,()=>window.location.assign(choice.url));
+ }
+ async function returnToTaskManagement(){
+  if(busyRef.current||reviewBusy.current)return;
+  if(reviewDirty.current){setError('请先提交或清空未提交的复核填写，再返回任务管理。');return;}
+  if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再返回任务管理；当前输入已保留。');return;}
+  pausePlayback();
+  await saveBeforeNavigation(action=>doBusy('正在保存草稿…',action),flush,()=>window.location.assign('?tasks=1'));
+ }
  async function connectCloud(username:string,password:string){
   await doBusy('正在连接 Ubuntu 公网账号…',async()=>{
    try{
@@ -826,17 +851,24 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const anchorInterval=availableAnchorRange?formatTime(availableAnchorRange.end_ms-availableAnchorRange.start_ms).split('.')[0]:'--:--:--';
  const anchorControls=<div className="anchor-toolbar" title={anchors.map(value=>`锚点：${annotationTime(value)}`).join("；")}><button className="secondary" title="添加或移除当前位置的锚点，最多保留最近两个（Ctrl + 空格）" onClick={addAnchor}><Bookmark size={14}/>添加锚点</button><button className="secondary anchor-pair-button" aria-label={`选中区间，间隔 ${anchorInterval}`} aria-pressed={!!selectedRange} disabled={!availableAnchorRange} onClick={selectAnchorRange}><ScanLine size={14}/><span>选中区间</span><strong>{anchorInterval}</strong></button>{anchors.length>0&&<div className="anchor-metrics"><output className="anchor-duration" aria-label="当前时间到前一锚点的间隔" title="当前时间到最近一个锚点的时长">距前锚点 {formatTime(Math.abs(time-(latestAnchor??time))).split('.')[0]}</output></div>}{anchors.length>0&&<button className="text-button anchor-clear" aria-label="清空全部锚点" title="一次清空全部锚点" onClick={()=>{setAnchors([]);cancelRange();}}><Trash2 size={14}/></button>}</div>;
  const taskFeedback=(project as (Project & {task_feedback?:import('./tasks/types').TaskIssue[]})|null)?.task_feedback??[];
- const taskBar=taskId&&<><div className="task-workspace-bar"><button className="secondary" onClick={()=>void doBusy('正在保存草稿…',async()=>{await flush();window.location.assign('?tasks=1');})}>返回任务管理</button><span>{taskReadOnly?'该提交版本只读，返修时会创建新版本。':'任务草稿独立保存；允许空白和子轴重叠。'}</span>{!taskReadOnly&&<button className="primary" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>void submitTask()}>提交任务</button>}</div>{taskFeedback.length>0&&<details className="task-rework-notes" open><summary>返修意见 · {taskFeedback.length} 处</summary>{taskFeedback.map(issue=><button className="secondary" key={issue.id} onClick={()=>{const record=project?.annotations[issue.axis]?.find(item=>item.id===issue.segment_id);if(record)selectSegment(issue.axis,record);else if(issue.start_ms!==undefined)seek(issue.start_ms);}}>{project?trackName(project,issue.axis):issue.axis}{issue.start_ms!==undefined?` · ${formatTime(issue.start_ms)}`:''}：{issue.reason}</button>)}</details>}</>;
+ const taskBar=taskId&&<><div className="task-workspace-bar"><button className="secondary" disabled={!!busy} onClick={()=>void returnToTaskManagement()}>返回任务管理</button><span>{reviewMode?'复核工作台：提交版本只读，复核结论在右侧填写。':taskReadOnly?'该提交版本只读，返修时会创建新版本。':'任务草稿独立保存；允许空白和子轴重叠。'}</span>{!taskReadOnly&&<button className="primary" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>void submitTask()}>提交任务</button>}</div>{taskFeedback.length>0&&<details className="task-rework-notes" open><summary>返修意见 · {taskFeedback.length} 处</summary>{taskFeedback.map(issue=><button className="secondary" key={issue.id} onClick={()=>{const record=project?.annotations[issue.axis]?.find(item=>item.id===issue.segment_id);if(record)selectSegment(issue.axis,record);else if(issue.start_ms!==undefined)seek(issue.start_ms);}}>{project?trackName(project,issue.axis):issue.axis}{issue.start_ms!==undefined?` · ${formatTime(issue.start_ms)}`:''}：{issue.reason}</button>)}</details>}</>;
+ function previewReviewVersion(version:TaskVersion){
+  const current=projectRef.current;if(!current)return;
+  const annotations=Object.fromEntries(Object.keys(current.annotations).map(axis=>[axis,version.annotations[axis]??[]]));
+  const next={...current,annotations};projectRef.current=next;setProject(next);clearEditor();updateHistory([],[]);
+ }
  const taskFields=taskId&&project&&!taskReadOnly&&<TaskFields project={project} axes={(project as Project & {task_rule?:{axes:import('./tasks/types').TaskAxis[]}}).task_rule?.axes} selectedId={selectedId} onChange={annotations=>{commit(annotations);setTaskErrors([]);}} onSelect={(axis,id)=>{const record=project.annotations[axis]?.find(item=>item.id===id);if(record)selectSegment(axis,record);}} errors={taskErrors.map(error=>({...error,message:error.reason??'标注不符合规则'}))}/>;
  const workspaceTools=<>
-  <section className="sidebar-module project-management" aria-label="项目管理">
+  {!reviewMode&&<section className="sidebar-module project-management" aria-label="项目管理">
    <div className="panel-heading"><h2>项目管理</h2></div>
    <div className="module-content">
-    {!taskId&&<ProjectPicker projects={projects.filter(item=>!removedProjects.includes(item.id))} currentId={project?.id??null} disabled={!!busy||deleting||renaming} canRename={user.role==='admin'} showStorageMode={mockMode&&mockNasAvailable} onChoose={id=>void chooseProject(id)} onRename={id=>void askRenameProject(id)} onRemove={id=>void askDeleteProject(id)} onCreate={()=>void beginImport('new')}/>}
+    {(assignedTaskMode||!!taskId)&&<TaskPicker user={user} currentTask={taskId} review={reviewMode} disabled={!!busy} onChoose={choice=>void chooseAssignedTask(choice)}/>}
+    {!taskId&&!assignedTaskMode&&tasksChecked&&<ProjectPicker projects={projects.filter(item=>!removedProjects.includes(item.id))} currentId={project?.id??null} disabled={!!busy||deleting||renaming} canRename={user.role==='admin'} showStorageMode={mockMode&&mockNasAvailable} onChoose={id=>void chooseProject(id)} onRename={id=>void askRenameProject(id)} onRemove={id=>void askDeleteProject(id)} onCreate={()=>void beginImport('new')}/>}
     <button className="secondary prepare-action" title="检查全部精简播放缓存、封面和悬停图片" onClick={openPreparation} disabled={!project||!!busy||preparation.busy}>{preparation.status?.state==='ready'?<Check size={15}/>:preparation.status?.state==='running'&&preparation.status.requested?<LoaderCircle className="spin" size={15}/>:<Film size={15}/>}<span>{!project?'尚未选择项目':preparation.status?.checking?'检查缓存中':preparation.status?.state==='ready'?'本机播放就绪':preparation.status?.state==='running'&&preparation.status.requested?`准备中 ${preparation.status.ready}/${preparation.status.total}`:'准备全部预览'}</span></button>
    </div>
-  </section>
-  {!taskId&&<section className="sidebar-module annotation-output" aria-label="标注输出">
+  </section>}
+  {reviewMode&&<section className="sidebar-module task-review-task" aria-label="当前复核任务"><div className="module-content"><TaskPicker user={user} currentTask={taskId} review disabled={!!busy} onChoose={choice=>void chooseAssignedTask(choice)}/></div></section>}
+  {!taskId&&!assignedTaskMode&&<section className="sidebar-module annotation-output" aria-label="标注输出">
    <div className="panel-heading"><h2>标注输出</h2></div>
    <div className="module-content output-actions">
     <input ref={postureImportInput} type="file" accept=".json,application/json" aria-label="导入姿势 JSON 文件" hidden onChange={event=>{const file=event.target.files?.[0];event.target.value='';if(file)void importPostureFile(file);}}/>
@@ -847,13 +879,13 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
    </div>
   </section>}
  </>;
- return <div data-task-workspace={taskId?'true':undefined} className={'app-shell '+(user.role==='admin'?'is-admin':'is-annotator')}>
+ return <div data-task-review={reviewMode?'true':undefined} data-task-workspace={taskId?'true':undefined} className={'app-shell '+(user.role==='admin'?'is-admin':'is-annotator')}>
   {tasksAvailable&&tasksOpen&&<TaskPanel user={user} onClose={()=>setTasksOpen(false)} onOpenTask={id=>{window.location.assign('?task='+id);}}/>}
   {adminOpen&&(tasksAvailable?<TaskAccounts onClose={()=>setAdminOpen(false)}/>:<AdminPanel s3Mode={activeStorage==='s3'} projects={projects} mockMode={mockMode} onClose={()=>setAdminOpen(false)}/>)}
   {passwordOpen&&<PasswordDialog onClose={()=>setPasswordOpen(false)} onChanged={logoutNow}/>}
   {auditOpen&&project&&<HistoryPanel projectId={project.id} onClose={()=>setAuditOpen(false)}/>}
-  {libraryOpen&&<TrackLibraryDialog admin={user.role==='admin'} onClose={()=>setLibraryOpen(false)}/>}
-  {selectionOpen&&project&&!taskId&&<TrackSelectionDialog project={project} onClose={()=>setSelectionOpen(false)} onSave={saveTrackSelection}/>}
+  {legacyTrackTools&&libraryOpen&&<TrackLibraryDialog admin={user.role==='admin'} onClose={()=>setLibraryOpen(false)}/>}
+  {legacyTrackTools&&selectionOpen&&project&&<TrackSelectionDialog project={project} onClose={()=>setSelectionOpen(false)} onSave={saveTrackSelection}/>}
   {cacheLocationOpen&&<CacheLocationDialog project={project} onClose={()=>setCacheLocationOpen(false)} onChanged={updated=>{if(updated&&projectRef.current?.id===updated.id){serverRevision.current=updated.revision;projectRef.current={...projectRef.current,collection_folder_name:updated.collection_folder_name,revision:updated.revision,updated_at:updated.updated_at};setProject(projectRef.current);}pausePlayback();setSessionEntered(false);preparation.refresh();setNotice('缓存位置已设置，请重新准备播放素材。');}}/>}
   {settingsOpen&&<SeekSettingsDialog value={seekSettings} onCancel={()=>setSettingsOpen(false)} onSave={saveSeekSettings}/>}
   {renameProject&&<RenameProjectDialog name={renameProject.name} saving={renaming} error={renameError} onCancel={()=>{setRenameProject(null);setRenameError('');}} onConfirm={confirmRenameProject}/>}
@@ -861,7 +893,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   {resetAnnotationsOpen&&project&&<ResetAnnotationsDialog projectName={project.name} resetting={!!busy} onCancel={()=>setResetAnnotationsOpen(false)} onConfirm={()=>void resetAnnotationsFromEmptySource()}/>}
   {cloudDialogOpen&&<CloudAccountDialog busy={!!busy} error={cloudDialogError} onCancel={()=>setCloudDialogOpen(false)} onConnect={(username,password)=>void connectCloud(username,password)}/>}
   {deleteProject&&<DeleteProjectDialog project={deleteProject} deleting={deleting} error={deleteError} onCancel={()=>{setDeleteProject(null);setDeleteError('');}} onConfirm={confirmDeleteProject}/>}
-  <header className="topbar" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||prepareOpen||settingsOpen||cacheLocationOpen||adminOpen||passwordOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions"><button className="secondary" hidden={!!taskId} aria-haspopup="dialog" onClick={()=>{pausePlayback();setLibraryOpen(true);}}><Layers3 size={16}/>时间轴库</button><span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><span>{user.display_name}</span>{!taskId&&!sharedServer&&!mockMode&&<button className='quiet' onClick={()=>{setCloudDialogError('');setCloudDialogOpen(true);}}>{cloudConnected?'Ubuntu 已连接':'连接 Ubuntu 账号'}</button>}{tasksAvailable&&!taskId&&<button className="quiet" onClick={()=>{pausePlayback();setTasksOpen(true);}}>任务管理</button>}{user.role==='admin'&&!taskId&&<button className="quiet" onClick={()=>setAdminOpen(true)}>账号管理</button>}<button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} title="请先保存或取消当前编辑" onClick={()=>setPasswordOpen(true)}>修改密码</button><button className="quiet" onClick={()=>void onLogout()}>退出登录</button><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>{pausePlayback();setCacheLocationOpen(true);}}>缓存位置</button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>{taskBar}
+  <header className="topbar" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||prepareOpen||settingsOpen||cacheLocationOpen||adminOpen||passwordOpen}><div className="brand"><img src="/favicon.svg" alt=""/><span>DataMark</span></div><h1 className="compact-project-name" title={project?`${project.name} · ${project.videos.length} 段视频 · 录制起点 ${project.recording_start??'未设置'}`:'视频标注工作台'}>{project?.name??'视频标注工作台'}</h1><div className="top-actions">{legacyTrackTools&&<button className="secondary" aria-haspopup="dialog" onClick={()=>{pausePlayback();setLibraryOpen(true);}}><Layers3 size={16}/>时间轴库</button>}<span className="save-indicator" role="status" title={project?saveState:'就绪'}><span className={saveFailed?'status-dot bad':'status-dot'}/>{project?saveState:'就绪'}</span><span>{user.display_name}</span>{!taskId&&!sharedServer&&!mockMode&&<button className='quiet' onClick={()=>{setCloudDialogError('');setCloudDialogOpen(true);}}>{cloudConnected?'Ubuntu 已连接':'连接 Ubuntu 账号'}</button>}{tasksAvailable&&!taskId&&<button className="quiet" onClick={()=>{pausePlayback();setTasksOpen(true);}}>任务管理</button>}{user.role==='admin'&&!taskId&&<button className="quiet" onClick={()=>setAdminOpen(true)}>账号管理</button>}<button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} title="请先保存或取消当前编辑" onClick={()=>setPasswordOpen(true)}>修改密码</button><button className="quiet" onClick={()=>void onLogout()}>退出登录</button><button className="quiet icon-button workspace-fullscreen-button" aria-label="切换工作台全屏" title="工作台全屏（全屏时按 Esc 退出）" onClick={toggleWorkspaceFullscreen}><Maximize className="workspace-fullscreen-enter" size={16}/><Minimize className="workspace-fullscreen-exit" size={16}/></button><button className="quiet icon-button" aria-label="操作帮助" title="操作帮助" onClick={()=>setHelp(!help)}><Keyboard size={16}/></button><button className="quiet" disabled={hasPendingEdit||pendingSaves.current>0||saveFailed||!!busy} onClick={()=>{pausePlayback();setCacheLocationOpen(true);}}>缓存位置</button><button className="quiet icon-button" aria-label="进度快捷键设置" title="设置视频进度快捷键" aria-haspopup="dialog" onClick={()=>{pausePlayback();setHelp(false);setSettingsOpen(true);}}><Settings size={16}/></button></div></header>{taskBar}
   {project&&(editingPresence.others.length>0||editingPresence.error)&&<div className="editing-presence-warning" role="status">{editingPresence.others.length>0?`正在同时编辑：${editingPresence.others.map(item=>item.display_name).join('、')}。保存时如有冲突，平台会保留本页改动并提示恢复。`:editingPresence.error}</div>}
   {project?.source_dir&&project.warnings?.some(warning=>warning.includes('原目录 JSON 已被修改'))&&<div className="editing-presence-warning" role="status"><span>原目录的时间轴文件已变化，平台保留了尚未写回的草稿。若已主动删除 NAS 中的时间轴文件，可以保存旧草稿后重新标注。</span><button className="secondary" disabled={!!busy} onClick={()=>{if(hasPendingEdit){setError('请先保存或取消正在编辑的标注，再清空旧标注。');return;}pausePlayback();setResetAnnotationsOpen(true);}}>清空旧标注并重来</button></div>}
   {!taskId&&!sharedServer&&project&&(cloudSyncError||!cloudConnected)&&<div className="editing-presence-warning" role="status">{cloudSyncError||'本机项目尚未连接 Ubuntu 公网账号；管理员暂时看不到进度。'}{cloudConnected&&<button className="secondary" disabled={!!busy} onClick={()=>void retryCloudSync()}>重新同步</button>}</div>}
@@ -876,7 +908,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   </div>
   {project?<Timeline project={playbackProject!} currentTime={time} activeTrack={activeTrack} trackRevealVersion={trackRevealVersion} selectedId={selectedId} selectedBoundary={selectedBoundary} onBoundarySelect={selectBoundary} onBoundaryDismiss={exitBoundary} anchors={anchors} selectedRange={selectedRange} anchorControls={anchorControls} onRangeDismiss={dismissTimelineRange} onSeek={seek} onScrubStart={beginScrub} onScrubEnd={endScrub} onTrackSelect={selectTrack} onSegmentSelect={selectSegment}/>:<div className="empty-timeline"><div className="panel-heading"><div><Layers3 size={16}/><h2>标注时间线</h2></div><span>导入视频后开始标注</span></div>{(['scene','posture','category'] as const).map((t,i)=><div className={'placeholder-track '+t} key={t}><span><i/>{names[t]}</span><div><span>{['室内 / 室外 / 半开放 / 隧道 / 电梯 / 交通工具内 / Unknown','坐 / 站 / 躺 / 移动 / 骑行 / 交通工具坐 / 交通工具站 / 交通工具躺 / Unknown','工作学习 / 运动锻炼 / 饮食 / 出行 / 社交 / 休闲娱乐 / 休息 / 日常事务 / Unknown'][i]}</span></div></div>)}</div>}
   </section>}
-  <aside className="workspace-sidebar">{workspaceTools}{sessionEntered&&project&&projectTracks(project).length>0&&<section className="annotation-panel" inert={taskReadOnly}><div className="panel-heading"><div><span className="heading-mark"/><h2>标注面板</h2></div><div className="panel-heading-actions"><span className="small-badge">{count} 条</span><button className="icon-button" aria-label="查看项目操作记录" title="查看项目操作记录" onClick={()=>setAuditOpen(true)}><History size={15}/></button></div></div><div className="track-tabs" role="tablist" aria-label="标注轨道">{projectTracks(project).map(t=><button key={t} role="tab" aria-selected={activeTrack===t} className={activeTrack===t?'active '+(customTrack(project,t)?'custom':t):''} onClick={()=>selectTrack(t)}><i/>{trackName(project,t)}</button>)}<button className="add-custom-track" aria-label="选择时间轴" title="选择本项目使用的时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setSelectionOpen(true);}}><Layers3 size={14}/>选择时间轴</button></div>
+  <aside className="workspace-sidebar">{workspaceTools}{!reviewMode&&sessionEntered&&project&&projectTracks(project).length>0&&<section className="annotation-panel" inert={taskReadOnly}><div className="panel-heading"><div><span className="heading-mark"/><h2>标注面板</h2></div><div className="panel-heading-actions"><span className="small-badge">{count} 条</span><button className="icon-button" aria-label="查看项目操作记录" title="查看项目操作记录" onClick={()=>setAuditOpen(true)}><History size={15}/></button></div></div><div className="track-tabs" role="tablist" aria-label="标注轨道">{projectTracks(project).map(t=><button key={t} role="tab" aria-selected={activeTrack===t} className={activeTrack===t?'active '+(customTrack(project,t)?'custom':t):''} onClick={()=>selectTrack(t)}><i/>{trackName(project,t)}</button>)}{legacyTrackTools&&<button className="add-custom-track" aria-label="选择时间轴" title="选择本项目使用的时间轴" disabled={!!busy||hasPendingEdit||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setSelectionOpen(true);}}><Layers3 size={14}/>选择时间轴</button>}</div>
    <div className="annotation-content"><div className="section-caption"><span>{trackName(project,activeTrack)}标注</span><span className="accent-text">可留空 · 支持多状态</span></div>
     {selectedRange&&<div className="selected-range-card"><span>选中区间</span><strong>{annotationTime(selectedRange.start_ms)} → {annotationTime(selectedRange.end_ms)}</strong><button className="text-button" onClick={cancelRange}>取消选区</button></div>}
     {selected&&<p className="input-hint">在下方编辑模块修改当前色块的标签和备注。</p>}
@@ -892,9 +924,9 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
      {!manual&&<><label className="field-label" htmlFor="behavior-label">事件内容</label><input id="behavior-label" placeholder="例如：抽烟、喝咖啡、使用手机" value={label} maxLength={500} onChange={e=>setLabel(e.target.value)} disabled={!project}/><div className="capture-fields"><label>开始时间<input aria-label="事件开始时间" placeholder="00:00:00.000" readOnly={!!selectedRange} value={startText} onChange={e=>editStart(e.target.value)}/><button className="secondary" disabled={!project||!!selectedRange} onClick={()=>editStart(formatTime(time))}>标记开始</button></label><label>结束时间<input aria-label="事件结束时间" placeholder="00:00:00.000" readOnly={!!selectedRange} value={endText} onChange={e=>editEnd(e.target.value)}/><button className="secondary" disabled={!project||!!selectedRange} onClick={()=>editEnd(formatTime(time))}>标记结束</button></label></div><button className="primary wide" disabled={!project||!label.trim()||!startText||!endText} onClick={saveSegment}><Check size={15}/>保存标注</button><p className="input-hint">{selectedRange?'按两锚点确定区间；取消选区后可手动修改时间。':'跨越录制间隔的标注会在断档处分段保存。'}</p></>}
     </>}
    </div>
-  </section>}{sessionEntered&&project&&projectTracks(project).length===0&&<section className="annotation-panel" inert={taskReadOnly}><div className="panel-heading"><h2>标注面板</h2></div><p className="instruction">当前项目没有勾选时间轴。已有标注保留，可重新选择时间轴继续标注。</p>{!taskId&&<button className="primary wide" disabled={!!busy||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setSelectionOpen(true);}}><Layers3 size={15}/>选择时间轴</button>}</section>}
-  {(!project||!sessionEntered)&&<section className="sidebar-module annotation-panel"><div className="panel-heading"><h2>标注面板</h2></div><p className="module-placeholder">{project?'播放素材就绪后开始标注。':'选择项目后开始标注。'}</p></section>}
-  <section className="sidebar-module annotation-editor" aria-label="编辑标注" inert={taskReadOnly}>
+  </section>}{!reviewMode&&sessionEntered&&project&&projectTracks(project).length===0&&<section className="annotation-panel" inert={taskReadOnly}><div className="panel-heading"><h2>标注面板</h2></div><p className="instruction">{legacyTrackTools?'当前项目没有勾选时间轴。已有标注保留，可重新选择时间轴继续标注。':'当前项目没有可用时间轴，请联系管理员检查标注规则。'}</p>{legacyTrackTools&&<button className="primary wide" disabled={!!busy||pendingSaves.current>0||saveFailed} onClick={()=>{pausePlayback();setSelectionOpen(true);}}><Layers3 size={15}/>选择时间轴</button>}</section>}
+  {!reviewMode&&(!project||!sessionEntered)&&<section className="sidebar-module annotation-panel"><div className="panel-heading"><h2>标注面板</h2></div><p className="module-placeholder">{project?'播放素材就绪后开始标注。':'选择项目后开始标注。'}</p></section>}
+  {!reviewMode&&<section className="sidebar-module annotation-editor" aria-label="编辑标注" inert={taskReadOnly}>
    <div className="panel-heading"><h2>编辑标注</h2>{manual&&<button className="icon-button" aria-label="关闭编辑标注" onClick={clearEditor}><X size={15}/></button>}</div>
    {sessionEntered&&project&&manual&&selected?<div className="module-content segment-editor" ref={segmentEditorRef}>
     <div className="section-caption"><span>{trackName(project,activeTrack)} · {selected.lane?`子轴 ${selected.lane}`:'主轴'}</span><button className="danger-icon" aria-label="删除此标注" title="删除此标注（Delete）" onClick={remove}><Trash2 size={15}/></button></div>
@@ -910,8 +942,8 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
     <p className="input-hint">选择标签立即替换；备注按 Enter 或离开输入框保存。<br/>{selectedBoundary?`已选中${selectedBoundary==='start'?'左':'右'}边界；拖动竖线或用快捷键调整，点击时间轴其他位置或 Esc 退出。`:'再次点击色块边缘，可拖动或用进度快捷键调整区间。'}</p>
     <div className="annotation-author" role="status">创建人 {selected.created_by_name??'未知（旧标注）'}{selected.updated_by_name&&<> · 最近编辑 {selected.updated_by_name}</>}</div>
    </div>:<p className="module-placeholder">点击时间轴上的标注色块进行编辑。</p>}
-  </section>
-  {sessionEntered&&taskFields}</aside></main>
+  </section>}
+  {sessionEntered&&taskFields}{reviewMode&&taskId&&project&&<TaskWorkbenchReview taskId={taskId} user={user} time={time} onSeek={seek} onPreview={previewReviewVersion} onDirty={value=>{reviewDirty.current=value;}} onBusy={value=>{reviewBusy.current=value;}} selection={selected?{axis:activeTrack,start_ms:selected.start_ms,end_ms:selected.end_ms??selected.start_ms}:undefined}/>}</aside></main>
   {saveFailed&&<div className="save-recovery" role="alert" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||cloudDialogOpen||prepareOpen||settingsOpen}><span>{saveState}</span><button className="text-button" disabled={!!busy} onClick={retrySave}>重试保存</button><button className="text-button" disabled={!!busy} title="先下载包含本页未保存改动的恢复 JSON，再读取服务器草稿" onClick={recoverAndReload}>保存恢复副本并重新载入</button></div>}
   {importOpen&&<div className="modal-backdrop" inert={!!pendingClaim} onClick={()=>!busy&&!mockUploading&&setImportOpen(false)}><section ref={importDialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="import-title" className={'import-modal'+(nasPickerKind||mockListing?' nas-picker-open':'')} onClick={e=>e.stopPropagation()}>
    <button className="modal-close icon-button" aria-label="关闭导入" disabled={!!busy||mockUploading} onClick={()=>setImportOpen(false)}><X size={20}/></button><div className="modal-icon"><FolderOpen size={24}/></div>
