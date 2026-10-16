@@ -545,6 +545,10 @@ class ProjectService:
         result["needs_source_relink"] = any(not item.get("cache_directory") and self.is_managed_copy(Path(item["path"]))
                                              for item in project["_sources"].values())
         result["warnings"] = list(dict.fromkeys(project.get("warnings", []) + project.get("_cache_warnings", [])))
+        from .prediction_import import warning as prediction_warning
+        prediction_notice = prediction_warning(project.get('prediction_import'))
+        if prediction_notice and prediction_notice not in result['warnings']:
+            result['warnings'].append(prediction_notice)
         result["recording_runs"], result["continuity_bridges"], result["gaps"] = selected_recording_layout(project)
         # Presentation and export share the same normalization. Reading a legacy
         # draft never rewrites its database record or changes its revision.
@@ -1638,6 +1642,7 @@ class ProjectService:
             fresh["track_labels"] = imported_labels
             self.apply_imported_track_metadata(fresh)
             fresh["_external_hashes"] = hashes
+            fresh['_prediction_eligible'] = imported is None and claim_mode != 'restart'
             if claim_mode == "restart":
                 fresh["draft_dirty"] = True
             self.attach_source_caches(fresh)
@@ -1832,6 +1837,8 @@ class ProjectService:
                 project["selected_tracks"] = list(dict.fromkeys([
                     *[track["id"] for track in defaults if track["id"] in attached], *previous_selection]))
         project["_library_initialized"] = True
+        from .prediction_import import initialize as initialize_prediction
+        initialize_prediction(self, project)
         if project == previous:
             return self.public(project)
         # Keep updated legacy buttons when the old external JSON is reopened.
@@ -1840,6 +1847,53 @@ class ProjectService:
         project.update(revision=project["revision"] + 1, updated_at=now())
         self.save(project, actor=actor)
         return self.public(project)
+
+    def read_prediction(self, project):
+        """Read a local/NAS prediction without touching human timeline files."""
+        from .source_cache import is_reparse
+        from .prediction_import import MAX_BYTES, verify_inputs
+        source = project.get('source_dir')
+        if not source:
+            return None
+        root = Path(source)
+        parents = [p for p in root.iterdir() if p.name.casefold() == 'prediction']
+        if not parents:
+            return None
+        if len(parents) != 1 or is_reparse(parents[0]) or not parents[0].is_dir():
+            raise ValueError('prediction 目录无效，未自动导入。')
+        files = [p for p in parents[0].iterdir() if p.name.casefold() == 'posture.json']
+        if not files:
+            return None
+        if len(files) != 1 or is_reparse(files[0]) or not files[0].is_file():
+            raise ValueError('姿势预标注文件无效，未自动导入。')
+        before = files[0].stat()
+        if before.st_size > MAX_BYTES:
+            raise ValueError('预标注超过 20 MiB，未自动导入。')
+        with files[0].open('rb') as stream:
+            raw = stream.read(MAX_BYTES + 1)
+        after = files[0].stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            raise ValueError('预标注读取期间发生变化，未自动导入。')
+        def input_hash(key):
+            path = root
+            for part in key.split('/'):
+                matches = [p for p in path.iterdir() if p.name.casefold() == part.casefold()]
+                if len(matches) != 1 or is_reparse(matches[0]):
+                    raise ValueError('预标注对应的 IMU 文件不存在或不是普通文件。')
+                path = matches[0]
+            if not path.is_file():
+                raise ValueError('预标注对应的 IMU 不是普通文件。')
+            before = path.stat()
+            value = hashlib.sha256()
+            with path.open('rb') as stream:
+                for block in iter(lambda: stream.read(1024**2), b''):
+                    value.update(block)
+            after = path.stat()
+            if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                raise ValueError('IMU 读取期间发生变化，未自动导入。')
+            return value.hexdigest()
+        verify_inputs(raw, input_hash)
+        return raw
 
     @project_locked
     def select_library_tracks(self, ident: str, ids: list[str], library: list[dict], expected_revision: int,

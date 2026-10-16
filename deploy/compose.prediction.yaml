@@ -1,0 +1,47 @@
+# Optional overlay for the isolated public S3 API, after compose.r2-public.yaml.
+# Provision the protected credential and UID 1000 job directory before enabling.
+services:
+  api:
+    environment:
+      DATAMARK_PREDICTION_URL: http://imu-prediction:8778
+      DATAMARK_PREDICTION_TOKEN_FILE: /run/secrets/imu-prediction-token
+    volumes:
+      - type: bind
+        source: ${DATAMARK_PREDICTION_TOKEN_FILE:?Protected worker credential file is required}
+        target: /run/secrets/imu-prediction-token
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      imu-prediction:
+        condition: service_healthy
+  imu-prediction:
+    image: ${DATAMARK_PREDICTION_IMAGE:?Use an immutable IMU_posture prediction image tag}
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 2
+    mem_limit: 4g
+    pids_limit: 256
+    command: [--jobs, /jobs, --token-file, /run/secrets/imu-prediction-token, --host, 0.0.0.0, --port, "8778"]
+    volumes:
+      - type: bind
+        source: ${DATAMARK_PREDICTION_JOBS_DIR:?Private persistent worker directory is required}
+        target: /jobs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_PREDICTION_TOKEN_FILE:?Protected worker credential file is required}
+        target: /run/secrets/imu-prediction-token
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=256m,uid=1000,gid=1000,mode=0700"]
+    networks: [private]
+    healthcheck:
+      test: [CMD, /opt/venv/bin/python, -c, "import json,pathlib,urllib.request; token=pathlib.Path('/run/secrets/imu-prediction-token').read_text().strip(); r=urllib.request.Request('http://127.0.0.1:8778/v1/capabilities',headers={'Authorization':'Bearer '+token}); assert json.load(urllib.request.urlopen(r,timeout=5))['protocol']==1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

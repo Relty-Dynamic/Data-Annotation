@@ -38,7 +38,7 @@ def validate_prediction(path):
     if not isinstance(document, (dict, list)):
         raise HTTPException(422, '预测 JSON 必须为对象或数组。')
     # Preserve original algorithm output byte for byte. Interpretation and
-    # applying predictions to an axis are a separate, future operation.
+    # initializing a posture draft is a separate operation after publication.
 
 
 def snapshot(path, key):
@@ -97,9 +97,65 @@ class FolderUploadManager(MockUploadManager):
         selection = scan_collection(raw)
         ident = uuid.uuid4().hex
         with self.lock:
-            self.selections[ident] = {'owner': user_id, 'files': selection['videos'], 'selected_at': time.time()}
+            self.selections[ident] = {'owner': user_id, 'files': selection['videos'], 'selected_at': time.time(),
+                                      'root': str(Path(raw).expanduser().absolute()), 'folder': selection}
         return {**selection, 'selection_id': ident,
                 'capture_date': min(item['date'] for item in selection['videos'])}
+
+    def start(self, user, collector_name, uploader_name, note, selection_id, *, prediction=None):
+        options = prediction or {}
+        mode = options.get('prediction', 'keep')
+        if mode not in ('generate', 'keep'):
+            raise HTTPException(422, '预标注处理方式无效。')
+        if mode == 'generate' and (not all(isinstance(options.get(k), str) and options[k].strip()
+                                          for k in ('chest_device', 'thigh_device'))
+                                   or options['chest_device'].strip() == options['thigh_device'].strip()):
+            raise HTTPException(422, '请确认不同的胸部和大腿 IMU 设备编号。')
+        with self.lock:
+            selected = self.selections.get(selection_id)
+            if any(job['state'] == 'preparing_prediction' for job in self.jobs.values()):
+                raise HTTPException(409, '本机正在准备预标注，请等待完成。')
+            result = super().start(user, collector_name, uploader_name, note, selection_id)
+            self.jobs[result['id']]['folder_selection'] = selected
+            self.jobs[result['id']]['prediction_options'] = dict(options)
+        return result
+
+    def finish(self, ident, user_id, service, can_upload):
+        job = self._job(ident, user_id)
+        options = job.get('prediction_options', {})
+        if options.get('prediction') == 'generate':
+            if not can_upload(user_id):
+                raise HTTPException(403, '上传权限已关闭。')
+            from .prediction_prepare import prepare_prediction
+            with self.lock:
+                if job['state'] not in ('ready_to_compress', 'error'):
+                    raise HTTPException(409, '预标注任务正在处理。')
+                job.update(state='preparing_prediction', detail='正在准备姿势预标注。')
+            def progress(detail):
+                with self.lock:
+                    job['detail'] = detail
+                self.store.progress(detail)
+            try:
+                selection = job['folder_selection']
+                refreshed, result = prepare_prediction(self.store, service, selection['root'], selection['folder'],
+                    {role: options[role + '_device'].strip() for role in ('chest', 'thigh')}, progress=progress)
+                selection['folder'] = refreshed
+                job['prediction_result'] = result
+                with self.lock:
+                    job['state'] = 'ready_to_compress'
+            except Exception as error:
+                detail = error.detail if isinstance(error, HTTPException) and isinstance(error.detail, str) else '预标注准备失败，尚未上传；请检查素材和设备角色后重新选择。'
+                with self.lock:
+                    job.update(state='error', detail=detail)
+                raise
+        return super().finish(ident, user_id, service, can_upload)
+
+    def status(self, ident, user_id):
+        result = super().status(ident, user_id)
+        prediction = self._job(ident, user_id).get('prediction_result')
+        if prediction:
+            result['prediction'] = {key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review')}
+        return result
 
 
 def attachment_manifest(records):

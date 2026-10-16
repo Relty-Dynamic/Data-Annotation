@@ -469,8 +469,32 @@ class TaskStore:
             errors = validate_annotations(annotations, self._read(db, 'rules', task['rule_id']), self._task_video(db, task)['duration_ms'], draft=True, recording_runs=task.get('collection', {}).get('recording_runs'))
             if errors:
                 raise TaskError(422, {'errors': errors})
-            db.execute('INSERT INTO drafts VALUES (?,?,?) ON CONFLICT(task_id,user_id) DO UPDATE SET body=excluded.body', (id, actor['id'], json.dumps({'annotations': annotations}, ensure_ascii=False)))
+            row = db.execute('SELECT body FROM drafts WHERE task_id=? AND user_id=?', (id, actor['id'])).fetchone()
+            previous = json.loads(row[0]) if row else {}
+            saved = {'annotations': annotations}
+            if 'prediction_import' in previous:
+                saved['prediction_import'] = previous['prediction_import']
+            db.execute('INSERT INTO drafts VALUES (?,?,?) ON CONFLICT(task_id,user_id) DO UPDATE SET body=excluded.body', (id, actor['id'], json.dumps(saved, ensure_ascii=False)))
             return self._finish(db, actor, task, 'save_draft')
+
+    def initialize_prediction(self, actor, id, body):
+        """Internal first-draft initialization with normal revision/role checks."""
+        with self.db() as db:
+            task = self._mutation(db, actor, id, body)
+            self._require(db, actor, 'annotator')
+            if (actor['id'] not in task['annotator_ids'] or task['status'] != 'annotating'
+                    or actor['id'] in task['current_submissions']):
+                raise TaskError(403, '当前任务不能初始化预标注')
+            if db.execute('SELECT 1 FROM drafts WHERE task_id=? AND user_id=?', (id, actor['id'])).fetchone():
+                return self._view(db, actor, task)
+            annotations = body['annotations']
+            errors = validate_annotations(annotations, self._read(db, 'rules', task['rule_id']),
+                self._task_video(db, task)['duration_ms'], draft=True, recording_runs=task.get('collection', {}).get('recording_runs'))
+            if errors:
+                raise TaskError(422, {'errors': errors})
+            saved = {'annotations': annotations, 'prediction_import': body['prediction_import']}
+            db.execute('INSERT INTO drafts VALUES (?,?,?)', (id, actor['id'], json.dumps(saved, ensure_ascii=False)))
+            return self._finish(db, actor, task, 'initialize_prediction', prediction_sha256=body['prediction_import']['sha256'])
 
     def _quality(self, db, task):
         if self._task_video(db, task)['quality'] != 'passed':

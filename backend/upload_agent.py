@@ -21,14 +21,16 @@ from .service import ProjectService
 
 
 class AgentTarget(RemoteCaptureTarget):
-    def request(self, method, path, **kwargs):
+    def response(self, method, path, **kwargs):
         if path == '/api/auth/me':
             path = '/api/r2/helper/identity'
+        elif path.startswith('/api/prediction/'):
+            path = path.replace('/api/prediction/','/api/r2/helper/prediction/',1)
         elif path.startswith('/api/r2/uploads'):
             path = path.replace('/api/r2/uploads','/api/r2/helper/transfer/uploads',1)
         else:
             raise RuntimeError('本机组件不允许访问此接口。')
-        return super().request(method,path,**kwargs)
+        return super().response(method,path,**kwargs)
 
 
 class AgentEngine:
@@ -94,7 +96,7 @@ class AgentEngine:
                 if not getattr(self,'selection',None):
                     raise HTTPException(422,'请先在网页选择本机采集文件夹。')
                 fields = command.get('fields',{})
-                job = self.manager.start(user,fields.get('collector',''),fields.get('uploader'),fields.get('note'),self.selection['selection_id'])
+                job = self.manager.start(user,fields.get('collector',''),fields.get('uploader'),fields.get('note'),self.selection['selection_id'], prediction=fields)
                 self.job = {**job,'owner':user['id']}
                 def progress(detail):
                     with self.manager.lock:

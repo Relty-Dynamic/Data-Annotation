@@ -2,7 +2,7 @@ import {authFetch} from './auth.ts';
 import {apiOrigin} from './apiOrigin.ts';
 
 export const helperStorageKey='datamark.public-upload.helper.'+apiOrigin;
-export type UploadReport={busy?:boolean;error?:string;selection?:{name:string;capture_date:string;videos:string[];attachments:string[];ignored:string[]};job?:{id?:string;state:string;prefix:string;progress:number;detail:string}};
+export type UploadReport={busy?:boolean;error?:string;selection?:{name:string;capture_date:string;videos:string[];attachments:string[];ignored:string[]};job?:{id?:string;state:string;prefix:string;progress:number;detail:string;prediction?:{sha256:string;segments:number;needs_alignment_review:boolean}}};
 export type HelperStatus={id:string;online:boolean;platform:string;command:{id:string;action:string}|null;report:UploadReport};
 export async function bridgeRequest<T>(path:string,body?:unknown):Promise<T>{
  const response=await authFetch('/api/r2/'+path,{method:body===undefined?'GET':'POST',headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});

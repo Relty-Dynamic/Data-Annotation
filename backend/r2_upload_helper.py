@@ -211,7 +211,7 @@ def create_app(*, api='https://api-annotate.reltydynamic.com:8443', root=None, p
             if any(not isinstance(body.get(key, ''), str) for key in ('collector', 'uploader', 'note')):
                 raise HTTPException(422, '采集人、上传人和备注须为文字。')
             manager = state['manager']
-            job = manager.start(user, body.get('collector', ''), body.get('uploader'), body.get('note'), state['selection']['selection_id'])
+            job = manager.start(user, body.get('collector', ''), body.get('uploader'), body.get('note'), state['selection']['selection_id'], prediction=body)
             state.update(job=job['id'], busy=True)
             threading.Thread(target=work, args=(state, job, user), daemon=True).start()
         return job
