@@ -108,6 +108,29 @@ class Workspaces:
         result['task_feedback'] = project['task_feedback']
         return self.urls(result, task_id, project['id'])
 
+    def direct_session(self, project):
+        return self.media.direct_session(project) if hasattr(self.media, 'direct_session') else None
+
+    def session_status(self, project, *, start=False, retry_failed=False):
+        if self.direct_session(project) is not None:
+            from ..session_cache import SessionCache
+            status = SessionCache._initial(project)
+            status.update(state='ready', stage='ready', operation='reuse', ready=status['total'],
+                          queued=0, progress=100, detail='上传缓存清单已就绪，正在交由浏览器校验本机文件。')
+            for item in status['items']:
+                item.update(state='ready', operation='reuse', progress=100, detail=None)
+            return status
+        return (self.service.sessions.start(project['id'], retry_failed=retry_failed) if start
+                else self.service.sessions.status(project['id']))
+
+    def session_manifest(self, project, task_id):
+        direct = self.direct_session(project)
+        if direct is not None:
+            return direct
+        manifest = self.service.sessions.manifest(project['id'])
+        return (self.media.media_manifest(self.service, manifest) if hasattr(self.media, 'media_manifest')
+                else self.urls(manifest, task_id, project['id']))
+
     @staticmethod
     def urls(value, task_id, ident):
         if isinstance(value, list):

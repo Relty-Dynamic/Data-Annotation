@@ -30,3 +30,7 @@ export function videoCsvTemplate(sources:Array<{id:string;name:string;collection
 export function issueRange(issue:TaskIssue):{start_ms:number;end_ms:number}|null {return Number.isFinite(issue.start_ms)&&Number.isFinite(issue.end_ms)&&issue.end_ms!>issue.start_ms!?{start_ms:issue.start_ms!,end_ms:issue.end_ms!}:null;}
 
 export function taskTitle(task:TaskItem):string{return task.collection?.name??task.video?.video_name??task.video_id}
+
+export function taskStatusName(task:{status:string;review_complete?:boolean}):string{
+ return task.status==='reviewing'&&task.review_complete?'待验收':statusNames[task.status]??task.status;
+}

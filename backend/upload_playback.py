@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from .desktop_cache import sha256_file
+from .desktop_cache import sha256_file, safe_name, collection_name
 from .local_playback import render_local_fast, render_local_thumbnail
 from .session_cache import PROFILE, SessionCache
 from .storyboards import StoryboardCache
@@ -112,3 +112,47 @@ def reference(prefix, manifest, name):
         **({'cache_profile': manifest['cache_profile']} if 'cache_profile' in manifest else {}),
         'files': [dict(item, name=name) for item in manifest['files'] if item.get('name', Path(item['key']).name) == name],
         'cache_files': [item for item in manifest.get('cache_files', []) if item['video_name'] == name]}}
+
+
+def direct_manifest(provider, project):
+    """Describe published upload objects; the browser verifies the actual bytes.
+
+    Publication already validates the complete upload. Task actors must not each
+    download another server copy just to obtain the same immutable cache list.
+    Legacy captures without an upload bundle keep their existing preparation.
+    """
+    captures = [project['_sources'][video['id']].get('r2_playback') for video in project['videos']]
+    if any(not capture or 'cache_profile' not in capture['manifest'] for capture in captures):
+        return None
+    videos, assets, identities = [], [], []
+    for video, capture in zip(project['videos'], captures):
+        manifest = capture['manifest']
+        records = validate(manifest)
+        normal = next((item for item in manifest['files'] if item['name'] == capture['video_name']), None)
+        if normal is None or normal['duration_ms'] != video['duration_ms']:
+            raise HTTPException(409, '任务视频与上传缓存清单不一致。')
+        own = [dict(normal, kind='normal', index=None),
+               *[item for item in records if item['video_name'] == capture['video_name']]]
+        urls, sheets = {}, []
+        for item in own:
+            kind, index = item['kind'], item['index']
+            label = f'storyboard-{index:03d}' if kind == 'sheet' else kind
+            key = capture['prefix'] + '/' + item['key']
+            url = provider.signed_url(key)
+            filename = (safe_name(Path(video['name']).stem) + '.' + item['sha256'] + '.' + label
+                        + ('.mp4' if kind in ('normal', 'fast') else '.jpg'))
+            assets.append({'file_name': filename, 'sha256': item['sha256'], 'size': item['size'],
+                           'url': url, 'media_type': 'video/mp4' if kind in ('normal', 'fast') else 'image/jpeg'})
+            identities.append((video['id'], kind, index, key, item['size'], item['sha256']))
+            if kind == 'sheet':
+                sheets.append((index, url))
+            else:
+                urls[kind] = url
+        videos.append({'id': video['id'], 'url': urls['normal'], 'fast_url': urls['fast'],
+                       'thumbnail_url': urls['thumbnail'], 'storyboard': {
+                           **SessionCache._storyboard_metadata(video['duration_ms']),
+                           'state': 'ready', 'detail': None, 'sheets': [url for _, url in sorted(sheets)]}})
+    from .service import digest, document_bytes
+    return {'project_id': project['id'], 'version': digest(document_bytes([PROFILE, identities]))[:24],
+            'profile': PROFILE, 'collection_name': collection_name(project), 'videos': videos,
+            'assets': assets, 'cache_location': {'mode': 'browser', 'root': None}}
