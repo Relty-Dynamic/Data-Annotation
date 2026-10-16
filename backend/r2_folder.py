@@ -150,6 +150,11 @@ class FolderUploadManager(MockUploadManager):
                 with self.lock:
                     job.update(state='error', detail=detail)
                 raise
+        if hasattr(self.store, 'transfer_progress'):
+            def transfer_progress(values):
+                with self.lock:
+                    job.update(values)
+            self.store.transfer_progress = transfer_progress
         return super().finish(ident, user_id, service, can_upload)
 
     def status(self, ident, user_id):

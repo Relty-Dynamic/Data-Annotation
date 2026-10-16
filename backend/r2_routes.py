@@ -298,19 +298,21 @@ def install(app, session, accounts, provider, root):
 
     @router.get('/r2/uploads/{ident}')
     def upload_status(ident: str, request: Request):
-        return uploads.public(uploads.load(ident, actor(request)))
+        return uploads.status(ident, actor(request))
 
     @router.get('/r2/uploads/{ident}/files/{index}')
-    def upload_plan(ident: str, index: int, request: Request):
-        return uploads.plan(ident, index, actor(request))
+    def upload_plan(ident: str, index: int, request: Request, single: bool = False):
+        return uploads.plan(ident, index, actor(request), single=single)
 
     @router.post('/r2/uploads/{ident}/files/{index}/complete')
     def upload_complete(ident: str, index: int, request: Request):
         return uploads.complete_file(ident, index, actor(request))
 
     @router.post('/r2/uploads/{ident}/finish')
-    def upload_finish(ident: str, request: Request):
-        return uploads.finish(ident, actor(request))
+    def upload_finish(ident: str, request: Request, background: bool = False):
+        if background:
+            return uploads.begin_finish(ident, actor(request), lambda: session(request))
+        return uploads.finish(ident, actor(request), authorize=lambda: session(request))
 
     app.include_router(router)
     app.state.r2_service, app.state.r2_uploads = service, uploads

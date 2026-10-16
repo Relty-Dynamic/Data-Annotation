@@ -362,12 +362,20 @@ class FolderUploadRoundTripTests(unittest.TestCase):
             public.tool = local.tool
             real_client = httpx.Client
             original_signed = provider.signed_url
+            single_keys = {}
             def signed(key, **kwargs):
+                if kwargs.get('operation') == 'put_object':
+                    token = hashlib.sha256(key.encode()).hexdigest()
+                    single_keys[token] = key
+                    return f'https://small.invalid/{token}'
                 if kwargs.get('operation') == 'upload_part':
                     return f"https://parts.invalid/{kwargs['UploadId']}/{kwargs['PartNumber']}"
                 return original_signed(key, **kwargs)
             provider.signed_url = signed
             def direct(request):
+                if request.url.host == 'small.invalid':
+                    provider.put(single_keys[request.url.path[1:]], request.content, create=True)
+                    return httpx.Response(200)
                 ident, number = request.url.path.strip('/').split('/')
                 provider.uploads[ident]['parts'][int(number)] = request.content
                 return httpx.Response(200)
@@ -376,15 +384,17 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                     if path=='/api/r2/helper/identity':
                         return httpx.Response(200,json=USER)
                     path=path.replace('/api/r2/helper/transfer/uploads','/api/r2/uploads',1)
-                    parts = path.split('/')
+                    parts = path.split('?', 1)[0].split('/')
                     if path == '/api/r2/uploads':
                         value = uploads.start(USER, kwargs['json'])
                     elif parts[-1] == 'finish':
-                        value = uploads.finish(parts[4], USER)
+                        value = uploads.begin_finish(parts[4], USER, lambda: USER) if use_agent else uploads.finish(parts[4], USER)
+                    elif len(parts) == 5 and method == 'GET':
+                        value = uploads.status(parts[4], USER)
                     elif parts[-1] == 'complete':
                         value = uploads.complete_file(parts[4], int(parts[6]), USER)
                     else:
-                        value = uploads.plan(parts[4], int(parts[6]), USER)
+                        value = uploads.plan(parts[4], int(parts[6]), USER, single=use_agent)
                     return httpx.Response(200, json=value)
             if use_agent:
                 from backend.upload_agent import AgentEngine

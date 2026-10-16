@@ -181,18 +181,22 @@ def install(app, router, actor, accounts, uploads):
 
     @app.get('/api/r2/helper/transfer/uploads/{ident}')
     def upload_status(ident: str, request: Request):
-        return uploads.public(uploads.load(ident, bridge.actor(bridge.agent(request))))
+        return uploads.status(ident, bridge.actor(bridge.agent(request)))
 
     @app.get('/api/r2/helper/transfer/uploads/{ident}/files/{index}')
-    def plan(ident: str,index: int,request: Request):
-        return uploads.plan(ident,index,bridge.actor(bridge.agent(request)))
+    def plan(ident: str,index: int,request: Request,single: bool = False):
+        return uploads.plan(ident,index,bridge.actor(bridge.agent(request)),single=single)
 
     @app.post('/api/r2/helper/transfer/uploads/{ident}/files/{index}/complete')
     def complete(ident: str,index: int,request: Request):
         return uploads.complete_file(ident,index,bridge.actor(bridge.agent(request)))
 
     @app.post('/api/r2/helper/transfer/uploads/{ident}/finish')
-    def finish(ident: str,request: Request):
-        return uploads.finish(ident,bridge.actor(bridge.agent(request)))
+    def finish(ident: str,request: Request,background: bool = False):
+        authorize = lambda: bridge.actor(bridge.agent(request))
+        user = authorize()
+        if background:
+            return uploads.begin_finish(ident,user,authorize)
+        return uploads.finish(ident,user,authorize=authorize)
 
     return bridge

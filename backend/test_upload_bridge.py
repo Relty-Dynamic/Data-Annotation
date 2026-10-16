@@ -16,7 +16,7 @@ from backend.upload_bridge import UploadBridge, install
 from backend.upload_agent import AgentEngine, AgentTarget
 from backend.upload_bootstrap import unpack_source
 from backend.upload_install import bundle, shell, powershell
-from backend.test_r2_integration import USER, OTHER
+from backend.test_r2_integration import USER, OTHER, PREFIX, NAME
 from backend.test_r2_integration import MemoryObjects
 
 
@@ -156,7 +156,8 @@ class PublicBridgeRouteTests(unittest.TestCase):
             api='https://api.example.com:8443';origin='https://app.example.com'
             env={'DATAMARK_PUBLIC_ORIGIN':origin,'DATAMARK_PUBLIC_API_ORIGIN':api,
                  'DATAMARK_R2_CONFIG':'/fixture/config','DATAMARK_R2_STATE':str(root/'public'),'DATAMARK_TASKS_ENABLED':'0'}
-            with patch.dict(os.environ,env),patch('backend.r2_store.R2Store',return_value=MemoryObjects()):
+            provider=MemoryObjects()
+            with patch.dict(os.environ,env),patch('backend.r2_store.R2Store',return_value=provider):
                 bridge_client=TestClient(accounts_app(root/'accounts'),base_url='http://accounts:8766')
                 with TestClient(create_app(accounts=AccountClient(bridge_client)),base_url=api) as browser:
                     agent=TestClient(browser.app,base_url=api)
@@ -178,6 +179,32 @@ class PublicBridgeRouteTests(unittest.TestCase):
                         self.assertEqual(agent.get('/api/users',headers=headers).status_code,401)
                         self.assertEqual(agent.post('/api/r2/helper/transfer/uploads',headers=headers,json={}).status_code,422)
                         self.assertEqual(agent.get('/api/r2/helper/transfer/uploads/missing',headers=headers).status_code,404)
+                        # New single PUT/background paths retain real session, CSRF and helper ownership checks.
+                        import hashlib
+                        import time
+                        data=b'isolated-video-fixture'
+                        manifest=dict(prefix=PREFIX,collector_name='Collector',uploader_name='Worker',files=[dict(
+                            key='FPV/'+NAME,size=len(data),sha256=hashlib.sha256(data).hexdigest(),duration_ms=1000)])
+                        job=browser.post('/api/r2/uploads',headers=csrf,json=manifest).json()
+                        path='/api/r2/uploads/'+job['id']
+                        plan=agent.get('/api/r2/helper/transfer/uploads/'+job['id']+'/files/0?single=1',headers=headers)
+                        self.assertEqual(plan.status_code,200,plan.text)
+                        self.assertEqual(plan.json()['mode'],'single')
+                        raw=browser.app.state.r2_uploads.load(job['id'],logged.json()['user'])
+                        item=raw['manifest']['files'][0]
+                        provider.put(PREFIX+'/'+item['key'],data,create=True)
+                        self.assertEqual(browser.post(path+'/finish?background=1',headers={'Origin':origin}).status_code,403)
+                        with patch.object(browser.app.state.r2_service,'probe',return_value=dict(codec='h264',duration_ms=1000)):
+                            response=agent.post('/api/r2/helper/transfer/uploads/'+job['id']+'/finish?background=1',headers=headers)
+                            self.assertEqual(response.status_code,200,response.text)
+                            deadline=time.monotonic()+5
+                            while True:
+                                state=browser.get(path).json()
+                                if state['state'] in ('ready','validation_error'):break
+                                self.assertLess(time.monotonic(),deadline)
+                                time.sleep(.01)
+                            self.assertEqual(state['state'],'ready',state)
+                        self.assertIsNotNone(provider.optional_json(PREFIX+'/manifest.json')[0])
                         auth.set_upload_permission(user['id'],False)
                         self.assertEqual(agent.get('/api/r2/helper/prediction/capabilities',headers=headers).status_code,403)
                         self.assertEqual(agent.get('/api/r2/helper/identity',headers=headers).status_code,403)

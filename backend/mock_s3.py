@@ -419,6 +419,7 @@ class MockUploadManager:
                     "progress": job["progress"], "detail": job["detail"],
                     "collector_name": job["collector_name"], "uploader_name": job["uploader_name"],
                     "uploaded_by_username": job["uploaded_by_username"], "note": job["note"],
+                    **{key: job[key] for key in ("bytes_uploaded", "total_bytes", "speed_bps", "files_done", "files_total", "verified_files") if key in job},
                     "selected": len(job["records"]),
                     "total": len(job["records"])}
 

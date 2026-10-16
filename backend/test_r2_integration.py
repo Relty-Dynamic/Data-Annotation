@@ -40,6 +40,11 @@ class MemoryObjects:
         self.objects[key] = (payload, version)
         return version
 
+    def head(self, key):
+        data = self.get(key)
+        return {'ContentLength': len(data), 'Metadata': {'sha256': hashlib.sha256(data).hexdigest()},
+                'ETag': self.objects[key][1]}
+
     def get(self, key):
         if key not in self.objects:
             raise HTTPException(404)
@@ -534,6 +539,11 @@ class R2StoreTests(unittest.TestCase):
         self.assertEqual(query['uploadId'], ['fixture'])
         self.assertEqual(query['partNumber'], ['1'])
         self.assertEqual(len(query['X-Amz-Signature'][0]), 64)
+        signed_put = store.signed_url('daily/small.jpg', operation='put_object', expires=900,
+                                     Metadata={'sha256': hashlib.sha256(payload).hexdigest()})
+        signed_headers = parse_qs(urlsplit(signed_put).query)['X-Amz-SignedHeaders'][0]
+        self.assertIn('x-amz-meta-sha256', signed_headers)
+
 
     def test_failed_download_keeps_existing_file_and_removes_partial(self):
         destination = self.path.parent / 'media.mp4'
