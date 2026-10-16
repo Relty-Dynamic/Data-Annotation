@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import httpx
 from fastapi import HTTPException
 
-from .mock_s3 import MockUploadManager
 from .native_picker import choose_local_paths
 from .public_setup import public_origin
 from .service import ProjectService
@@ -22,6 +21,7 @@ class RemoteCaptureTarget:
         self.client, self.service = client, service
         self.attachments = attachments
         self.progress = progress or (lambda value: None)
+        self.transfer_progress = lambda value: None
 
     def response(self, method, path, **kwargs):
         response = self.client.request(method, path, **kwargs)
@@ -49,38 +49,12 @@ class RemoteCaptureTarget:
         manifest.pop('created_at', None)
         if self.attachments:
             manifest['attachments'] = attachment_manifest(self.attachments)
-        items = manifest['files'] + manifest.get('attachments', []) + manifest.get('cache_files', [])
         job = self.request('POST', '/api/r2/uploads', json=manifest)
-        for index, item in enumerate(items):
-            offset = index - len(manifest['files'])
-            record = self.attachments[offset] if 0 <= offset < len(self.attachments) else None
-            source = MockUploadManager._check_local_source(record) if record else prepared / item['key']
-            self.progress(f"正在上传 {index + 1}/{len(items)}：{item['key']}")
-            for attempt in range(3):
-                plan = self.request('GET', f"/api/r2/uploads/{job['id']}/files/{index}")
-                if plan['complete']:
-                    break
-                try:
-                    with source.open('rb') as stream, httpx.Client(timeout=180, follow_redirects=False) as direct:
-                        for part in plan['parts']:
-                            if part['uploaded']:
-                                continue
-                            stream.seek((part['number'] - 1) * plan['part_size'])
-                            payload = stream.read(plan['part_size'])
-                            response = direct.put(part['url'], content=payload)
-                            if not response.is_success:
-                                raise RuntimeError('R2 分片上传未确认成功。')
-                    self.request('POST', f"/api/r2/uploads/{job['id']}/files/{index}/complete")
-                    break
-                except (httpx.HTTPError, RuntimeError):
-                    if attempt == 2:
-                        raise RuntimeError('分片上传中断，可重新运行上传工具续传。') from None
-                    time.sleep(1)
-            if record:
-                MockUploadManager._check_local_source(record)
+        from .upload_transfer import transfer_files
+        transfer_files(self, job, prepared, manifest)
         self.progress('文件已传输，正在校验并发布采集目录，请稍候。')
         try:
-            result = self.request('POST', f"/api/r2/uploads/{job['id']}/finish", timeout=600)
+            result = self.request('POST', f"/api/r2/uploads/{job['id']}/finish?background=1", timeout=600)
         except (httpx.TransportError, HTTPException) as error:
             if isinstance(error, HTTPException) and error.status_code not in {502, 503, 504}:
                 raise
@@ -90,8 +64,23 @@ class RemoteCaptureTarget:
                 result = self.request('GET', f"/api/r2/uploads/{job['id']}")
             except (httpx.HTTPError, HTTPException):
                 result = None
-            if not result or result.get('state') != 'ready':
+            if not result or result.get('state') not in {'ready', 'validating'}:
                 raise HTTPException(504, '文件已传输，但尚未确认采集目录发布结果。请稍后重试，已上传内容可续传，不会覆盖已有目录。') from None
+        deadline = time.monotonic() + 7200
+        while result.get('state') == 'validating':
+            checked, total = result.get('verified_files', 0), result.get('file_count', 0)
+            self.transfer_progress(dict(state='validating', progress=round(checked / max(1,total) * 100,1),
+                                        verified_files=checked, files_total=total))
+            self.progress(f'文件已传输，正在校验并发布采集目录：{checked}/{total} 个文件。')
+            if time.monotonic() >= deadline:
+                raise HTTPException(504, '后台仍在核验，请稍后重试继续；已上传内容保留。')
+            time.sleep(2)
+            result = self.request('GET', f"/api/r2/uploads/{job['id']}", timeout=30)
+            if result.get('state') == 'validating' and result.get('validation_active') is False:
+                # Resume after an API restart; errors remain visible until an explicit retry.
+                result = self.request('POST', f"/api/r2/uploads/{job['id']}/finish?background=1", timeout=30)
+        if result.get('state') == 'validation_error':
+            raise HTTPException(422, result.get('error') or '采集目录核验失败，可重试。')
         if result.get('state') != 'ready':
             raise HTTPException(502, '服务端尚未确认采集目录发布成功，请稍后重试。')
 

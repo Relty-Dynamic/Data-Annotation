@@ -4,7 +4,7 @@ import {completedUpload,claimUploadCompletion,uploadStateName} from '../src/uplo
 const complete=()=>({id:'helper-one',online:true,platform:'darwin',command:null,report:{busy:false,job:{id:'job-one',state:'ready',prefix:'daily/20261014/1014test',progress:100,detail:'published'}}});
 test('only a confirmed, idle and error-free published upload can trigger success',()=>{
  const helper=complete();assert.deepEqual(completedUpload(helper),{key:'helper-one:job-one',prefix:'daily/20261014/1014test'});
- for(const state of ['compressing','uploading','error','ready_to_compress'])assert.equal(completedUpload({...helper,report:{job:{...helper.report.job,state,progress:100}}}),null);
+ for(const state of ['compressing','uploading','validating','validation_error','error','ready_to_compress'])assert.equal(completedUpload({...helper,report:{job:{...helper.report.job,state,progress:100}}}),null);
  assert.equal(completedUpload({...helper,online:false}),null);
  assert.equal(completedUpload({...helper,command:{id:'command',action:'start'}}),null);
  assert.equal(completedUpload({...helper,report:{...helper.report,busy:true}}),null);
@@ -19,5 +19,5 @@ test('polling and reopening notify once per job while a different finished job c
 });
 test('unpublished progress does not consume the later success notification',()=>{
  const seen=new Set(),helper=complete();assert.equal(claimUploadCompletion({...helper,report:{...helper.report,busy:true}},seen),null);assert.equal(seen.size,0);assert.ok(claimUploadCompletion(helper,seen));
- assert.equal(uploadStateName('ready'),'上传完成');assert.equal(uploadStateName('error'),'上传未完成');
+ assert.equal(uploadStateName('validating'),'正在核验并发布');assert.equal(uploadStateName('ready'),'上传完成');assert.equal(uploadStateName('error'),'上传未完成');
 });

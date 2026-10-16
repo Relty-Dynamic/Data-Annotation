@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import uuid
+import weakref
 from contextlib import closing
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from fastapi import HTTPException
 
 from .r2_service import capture_prefix
 from .service import document_bytes, now, parse_recording_start
-from .r2_folder import attachment_key, validate_prediction
+from .r2_folder import attachment_key
 from .upload_playback import validate as validate_playback
 
 
@@ -26,10 +27,24 @@ class R2Uploads:
         root.mkdir(parents=True, exist_ok=True)
         self.provider, self.service = provider, service
         self.lock = threading.RLock()
+        self.locks_guard = threading.RLock()
+        self.job_locks = weakref.WeakValueDictionary()
+        self.validations = set()
+        self.validation_slots = threading.BoundedSemaphore(2)
         with closing(sqlite3.connect(self.path)) as con, con:
             con.execute('CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, owner TEXT NOT NULL, digest TEXT NOT NULL, document TEXT NOT NULL)')
             con.execute('CREATE UNIQUE INDEX IF NOT EXISTS upload_request ON uploads(owner,digest)')
         self.path.chmod(0o600)
+
+    def job_lock(self, ident, scope='state'):
+        with self.locks_guard:
+            return self.job_locks.setdefault((ident, scope), threading.RLock())
+
+    def save_file(self, ident, index, record, user):
+        with self.job_lock(ident):
+            current = self.load(ident, user)
+            current['files'][index] = dict(record)
+            self.save(current)
 
     def save(self, job):
         with closing(sqlite3.connect(self.path)) as con, con:
@@ -114,14 +129,15 @@ class R2Uploads:
 
     @staticmethod
     def public(job):
-        return {'id': job['id'], 'prefix': job['manifest']['prefix'], 'state': job['state'], 'file_count': len(job['files'])}
+        return {'id': job['id'], 'prefix': job['manifest']['prefix'], 'state': job['state'], 'file_count': len(job['files']),
+                'verified_files': len(job.get('verified', {})), 'error': job.get('validation_error', '')}
 
     @staticmethod
     def items(job):
         return job['manifest']['files'] + job['manifest'].get('attachments', []) + job['manifest'].get('cache_files', [])
 
-    def plan(self, ident, index, user):
-        with self.lock:
+    def plan(self, ident, index, user, *, single=False):
+        with self.job_lock(ident, index):
             job = self.load(ident, user)
             if not 0 <= index < len(job['files']):
                 raise HTTPException(404, '上传文件不存在。')
@@ -138,12 +154,20 @@ class R2Uploads:
                 if head['ContentLength'] != item['size'] or head.get('Metadata', {}).get('sha256') != item['sha256']:
                     raise HTTPException(409, '已有缓存与上传清单不一致。')
                 return {'complete': True, 'parts': []}
+            cache = index >= len(job['manifest']['files']) + len(job['manifest'].get('attachments', []))
+            content_type = ('video/mp4' if index < len(job['manifest']['files']) or cache and item.get('kind') == 'fast'
+                            else 'image/jpeg' if cache and item.get('kind') in ('thumbnail', 'sheet') else 'application/octet-stream')
+            if single and item['size'] <= self.PART_SIZE:
+                record['single'] = True
+                self.save_file(ident, index, record, user)
+                return {'complete': False, 'mode': 'single',
+                        'url': self.provider.signed_url(key, operation='put_object', expires=900,
+                            Metadata={'sha256': item['sha256']}, ContentType=content_type),
+                        'headers': {'x-amz-meta-sha256': item['sha256'], 'Content-Type': content_type}}
             for attempt in range(2):
                 if 'upload_id' not in record:
-                    content_type = ('video/mp4' if index < len(job['manifest']['files']) or item.get('kind') == 'fast'
-                                    else 'image/jpeg' if item.get('kind') in ('thumbnail', 'sheet') else 'application/octet-stream')
                     record['upload_id'] = self.provider.call('create_multipart_upload', Key=key, ContentType=content_type, Metadata={'sha256': item['sha256']})['UploadId']
-                    self.save(job)
+                    self.save_file(ident, index, record, user)
                 completed, marker = {}, 0
                 try:
                     while True:
@@ -159,7 +183,7 @@ class R2Uploads:
                     # Expired/aborted multipart state must not permanently trap
                     # the persistent request in an unresumable upload ID.
                     record.clear()
-                    self.save(job)
+                    self.save_file(ident, index, record, user)
             count = math.ceil(item['size'] / self.PART_SIZE)
             return {'complete': False, 'part_size': self.PART_SIZE, 'parts': [
                 {'number': number, 'uploaded': number in completed,
@@ -168,7 +192,7 @@ class R2Uploads:
                 for number in range(1, count + 1)]}
 
     def complete_file(self, ident, index, user):
-        with self.lock:
+        with self.job_lock(ident, index):
             job = self.load(ident, user)
             if not 0 <= index < len(job['files']):
                 raise HTTPException(404, '上传文件不存在。')
@@ -193,37 +217,41 @@ class R2Uploads:
                 raise HTTPException(409, '上传视频大小不一致。')
             return {'ok': True}
 
-    def finish(self, ident, user):
-        with self.lock:
-            job = self.load(ident, user)
-            if job['state'] == 'ready':
-                return self.public(job)
-            manifest = job['manifest']
-            prefix = manifest['prefix']
-            for item in manifest['files']:
-                destination = self.service.local / 'upload-validation' / item['sha256'] / item['name']
-                self.provider.download(prefix + '/' + item['key'], destination, item['sha256'], item['size'])
-                info = self.service.probe(destination)
-                if info['codec'] != 'h264' or abs(info['duration_ms'] - item['duration_ms']) > 250:
-                    raise HTTPException(422, '仅允许上传经本机压缩且时长校验通过的 H.264 视频。')
-            for item in manifest.get('attachments', []):
-                destination = self.service.local / 'upload-validation' / item['sha256'] / Path(item['key']).name
-                self.provider.download(prefix + '/' + item['key'], destination, item['sha256'], item['size'])
-                if item['name'].startswith('prediction/'):
-                    validate_prediction(destination)
-            for item in validate_playback(manifest):
-                destination = self.service.local / 'upload-validation' / item['sha256'] / Path(item['key']).name
-                self.provider.download(prefix + '/' + item['key'], destination, item['sha256'], item['size'])
-                if item['kind'] == 'fast':
-                    duration = next(video['duration_ms'] for video in manifest['files'] if video['name'] == item['video_name'])
-                    info = self.service.probe(destination)
-                    if info['codec'] != 'h264' or abs(info['duration_ms'] - duration / 20) > 70 or abs(info.get('media_start_seconds', 0)) >= .001:
-                        raise HTTPException(422, '上传的倍速缓存时间或格式无效。')
-                elif not self.service.valid_thumbnail(destination):
-                    raise HTTPException(422, '上传的 JPG 缓存无效。')
-            # Manifest is the publication point. Files from an interrupted or
-            # revoked upload are never listed as a usable collection.
-            self.provider.put_if_absent(prefix + '/manifest.json', document_bytes(manifest))
-            job['state'] = 'ready'
-            self.save(job)
-            return self.public(job)
+    def finish(self, ident, user, *, authorize=None):
+        from .upload_validation import validate_upload
+        with self.job_lock(ident, 'validation'), self.validation_slots:
+            return validate_upload(self, ident, user, authorize)
+
+    def status(self, ident, user):
+        result = self.public(self.load(ident, user))
+        with self.locks_guard:
+            result['validation_active'] = ident in self.validations
+        return result
+
+    def begin_finish(self, ident, user, authorize):
+        # Authentication runs both before enqueue and again throughout publication.
+        with self.job_lock(ident):
+            current = self.load(ident, user)
+            with self.locks_guard:
+                if current['state'] == 'ready' or ident in self.validations:
+                    return self.public(current)
+                if len(self.validations) >= 8:
+                    raise HTTPException(429, '核验队列繁忙，请稍后重试；已上传内容保留。')
+                self.validations.add(ident)
+            try:
+                current.update(state='validating', validation_error='')
+                self.save(current)
+                def work():
+                    try:
+                        self.finish(ident, user, authorize=authorize)
+                    except Exception:
+                        pass  # Persisted, sanitized errors are returned by status.
+                    finally:
+                        with self.locks_guard:
+                            self.validations.discard(ident)
+                threading.Thread(target=work, daemon=True, name='upload-validation').start()
+            except BaseException:
+                with self.locks_guard:
+                    self.validations.discard(ident)
+                raise
+            return self.public(current)
