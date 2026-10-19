@@ -605,3 +605,15 @@ html, body, #root { background: var(--bg); }
 .annotation-editor input, .annotation-editor select { min-height: 32px; padding: 7px 9px; font-size: 12px; }
 .annotation-editor .input-hint { color: #91a6b4; font-size: 10px; line-height: 1.5; }
 .annotation-editor .annotation-author { font-size: 10px; color: #8295a3; margin-top: 6px; }
+
+/* Let the frame set its height instead of squeezing it above the timeline. */
+.app-shell.video-workspace { overflow-y: auto; overflow-x: hidden; }
+.video-workspace .editor-grid { flex: 0 0 auto; grid-template-rows: auto auto; align-items: start; overflow: visible; }
+.video-workspace .preview-panel { width: 100%; max-width: calc(min(70vh, 640px) * var(--video-aspect, 1.777777778) + 2px); max-width: calc(min(70dvh, 640px) * var(--video-aspect, 1.777777778) + 2px); justify-self: center; }
+.video-workspace .video-stage { flex: 0 0 auto; display: block; }
+.video-workspace .video-stage video { position: static; display: block; width: 100%; height: auto; aspect-ratio: auto 16 / 9; }
+.video-workspace .video-stage video:fullscreen { width: 100%; height: 100%; aspect-ratio: auto; }
+.video-workspace .play-controls, .video-workspace .play-options { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.video-workspace .playback-speed { min-width: 0; max-width: 100%; flex: 1 1 180px; }
+.video-workspace .playback-speed-segments { min-width: 0; max-width: 100%; flex: 1 1 auto; }
+.video-workspace .workspace-sidebar { position: sticky; top: 8px; align-self: start; max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); }
