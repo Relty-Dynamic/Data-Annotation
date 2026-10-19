@@ -464,6 +464,23 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                     self.assertEqual(state['state'],'ready',state)
                     self.assertTrue(all('/'+job['prefix']+'/' in asset['url'] for asset in download['assets']))
             self.assertFalse(any(key.startswith('media/') for key in provider.objects))
+            # Legacy S3 session hydration must also bypass NAS sharing, even if
+            # an intranet configuration leaks into the public process.
+            with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND':'nas', 'DATAMARK_SOURCE_ROOT':str(root)}), \
+                 patch.object(public, 'uploaded_playback', wraps=public.uploaded_playback) as hydrate, \
+                 patch.object(SessionCache, '_find_nas_entry', side_effect=AssertionError('S3 must not search NAS')), \
+                 patch.object(SessionCache, '_publish_nas_entry', side_effect=AssertionError('S3 must not publish NAS')), \
+                 patch.object(SessionCache, '_render_compact', side_effect=AssertionError('S3 must not compress')):
+                public.sessions.start(opened['id'])
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    state = public.sessions.status(opened['id'])
+                    if state['state'] in {'ready', 'failed', 'partial', 'error'}:
+                        break
+                    time.sleep(.01)
+                self.assertEqual(state['state'], 'ready', state)
+                self.assertEqual(hydrate.call_count, 1)
+            self.assertFalse(list(root.rglob('ubuntu-playback-v1')))
             # A fresh server must reject a missing/corrupt uploaded derivative,
             # retaining the collection instead of generating a replacement.
             broken = R2ProjectService(root/'broken-server',provider)
