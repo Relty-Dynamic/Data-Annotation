@@ -94,6 +94,21 @@ class BridgeTests(unittest.TestCase):
         self.bridge.poll(value,{'report':{'busy':False}})
         self.assertTrue(self.bridge.public(value)['online'])
 
+    def test_imu_mode_and_empty_selection_date_relay_without_local_paths(self):
+        self.pair()
+        value = self.bridge.agent(self.request)
+        selected = dict(name='IMU', upload_kind='imu', capture_date='', videos=[],
+                        attachments=['IMU/device.wplay'], ignored=[])
+        self.bridge.poll(value, {'report': {'busy': False, 'selection': selected}})
+        fields = dict(upload_kind='imu', capture_date='20261015', collector='test', prediction='keep')
+        result = self.bridge.command(USER, value['id'], dict(action='start', fields=fields))
+        self.assertEqual(self.bridge.poll(value, {})['command']['fields'], fields)
+        self.assertEqual(result['report']['selection'], selected)
+        for bad in ({**selected, 'upload_kind': []}, {**selected, 'upload_kind': 'video'},
+                    {**selected, 'attachments': ['/private/source.wplay']}):
+            with self.assertRaises(HTTPException):
+                self.bridge.poll(value, {'report': {'selection': bad}})
+
 
 class InstallerTests(unittest.TestCase):
     def test_package_excludes_credentials_cache_and_test_data(self):

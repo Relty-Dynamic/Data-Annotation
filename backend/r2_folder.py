@@ -95,17 +95,31 @@ def scan_collection(raw):
 
 
 class FolderUploadManager(MockUploadManager):
-    def select_folder(self, user_id, raw):
-        selection = scan_collection(raw)
+    def select_folder(self, user_id, raw, *, upload_kind='video'):
+        if upload_kind == 'imu':
+            from .imu_upload import scan_imu
+            selection = scan_imu(raw)
+        elif upload_kind == 'video':
+            selection = scan_collection(raw)
+        else:
+            raise HTTPException(422, '上传素材类型无效。')
         ident = uuid.uuid4().hex
         with self.lock:
             self.selections[ident] = {'owner': user_id, 'files': selection['videos'], 'selected_at': time.time(),
                                       'root': str(Path(raw).expanduser().absolute()), 'folder': selection}
         return {**selection, 'selection_id': ident,
-                'capture_date': min(item['date'] for item in selection['videos'])}
+                'capture_date': min((item['date'] for item in selection['videos']), default='')}
 
     def start(self, user, collector_name, uploader_name, note, selection_id, *, prediction=None):
         options = prediction or {}
+        with self.lock:
+            selected = self.selections.get(selection_id)
+            kind = selected.get('folder', {}).get('upload_kind', 'video') if selected else 'video'
+            if options.get('upload_kind', 'video') != kind:
+                raise HTTPException(422, '素材类型已变化，请重新选择文件夹。')
+            if kind == 'imu':
+                from .imu_upload import start
+                return start(self, user, collector_name, uploader_name, note, selection_id, options)
         mode = options.get('prediction', 'keep')
         if mode not in ('generate', 'keep'):
             raise HTTPException(422, '预标注处理方式无效。')
@@ -128,6 +142,9 @@ class FolderUploadManager(MockUploadManager):
             with self.store.hash_guard:
                 self.store.source_hashes.clear()
                 self.store.source_hash_locks.clear()
+        if job.get('upload_kind') == 'imu':
+            from .imu_upload import finish
+            return finish(self, job, service, can_upload)
         options = job.get('prediction_options', {})
         if getattr(self.store,'pipeline_enabled',False):
             from .upload_pipeline import run
@@ -174,6 +191,8 @@ class FolderUploadManager(MockUploadManager):
         job = self._job(ident, user_id)
         with self.lock:
             result.update({key:job[key] for key in ('clips_total','clips_verified','prediction_detail') if key in job})
+            if job.get('upload_kind') == 'imu':
+                result.update(upload_kind='imu', selected=len(job['attachments']), total=len(job['attachments']))
         prediction = job.get('prediction_result')
         if prediction:
             result['prediction'] = {key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review')}

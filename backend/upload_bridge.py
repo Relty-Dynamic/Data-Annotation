@@ -95,8 +95,10 @@ class UploadBridge:
         fields = body.get('fields', {})
         if action not in {'select', 'start'} or not isinstance(fields, dict):
             raise HTTPException(422, '上传操作无效。')
-        if set(fields)-{'collector','uploader','note','prediction','chest_device','thigh_device'} or any(not isinstance(v,str) or len(v)>500 for v in fields.values()):
+        if set(fields)-{'collector','uploader','note','prediction','chest_device','thigh_device','upload_kind','capture_date'} or any(not isinstance(v,str) or len(v)>500 for v in fields.values()):
             raise HTTPException(422, '只允许采集信息，不允许远程指定本机路径或命令。')
+        if fields.get('upload_kind', 'video') not in {'video', 'imu'}:
+            raise HTTPException(422, '上传素材类型无效。')
         with self.lock:
             if self.clock()-value['seen'] >= 15:
                 raise HTTPException(409, '本机组件已离线，请按安装／启动命令重新启动。')
@@ -122,9 +124,12 @@ class UploadBridge:
                 raise HTTPException(422, '组件错误信息无效。')
             selected=report.get('selection')
             if selected is not None:
-                if (not isinstance(selected,dict) or set(selected)!={'name','capture_date','videos','attachments','ignored'}
+                if (not isinstance(selected,dict) or set(selected)-{'upload_kind'}!={'name','capture_date','videos','attachments','ignored'}
                         or not isinstance(selected['name'],str) or '/' in selected['name'] or '\\' in selected['name']
-                        or not isinstance(selected['capture_date'],str) or not selected['capture_date'].isdigit() or len(selected['capture_date'])!=8):
+                        or selected.get('upload_kind', 'video') not in ('video', 'imu')
+                        or not isinstance(selected['capture_date'],str)
+                        or not (selected.get('upload_kind') == 'imu' and selected['capture_date'] == ''
+                                or selected['capture_date'].isdigit() and len(selected['capture_date']) == 8)):
                     raise HTTPException(422, '组件文件选择信息无效。')
                 for key in ('videos','attachments','ignored'):
                     items=selected[key]

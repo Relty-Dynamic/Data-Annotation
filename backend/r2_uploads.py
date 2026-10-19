@@ -1,4 +1,4 @@
-"""Resumable, account-authorized multipart uploads of compressed videos only."""
+"""Resumable uploads of compressed video collections or standalone IMU data."""
 import copy
 import hashlib
 import json
@@ -17,6 +17,7 @@ from .r2_service import capture_prefix
 from .service import document_bytes, now, parse_recording_start
 from .r2_folder import attachment_key
 from .upload_playback import validate as validate_playback
+from .capture_publication import manifest_key, check_compatible
 
 
 class R2Uploads:
@@ -71,7 +72,23 @@ class R2Uploads:
         manifest.pop('media_metadata',None)  # Only server verification can publish media metadata.
         prefix = capture_prefix(manifest.get('prefix'))
         files = manifest.get('files')
-        if not isinstance(files, list) or not 1 <= len(files) <= 1000:
+        kind = manifest.get('upload_kind', 'video')
+        if not isinstance(kind, str) or kind not in {'video', 'imu'}:
+            raise HTTPException(422, '上传素材类型无效。')
+        if kind == 'imu':
+            from datetime import datetime
+            if files != [] or manifest.get('cache_files') or 'cache_profile' in manifest:
+                raise HTTPException(422, '仅 IMU 上传不能包含视频或播放缓存。')
+            date = manifest.get('capture_date', '')
+            try:
+                if not isinstance(date, str) or not re.fullmatch(r'[0-9]{8}', date):
+                    raise ValueError()
+                datetime.strptime(date, '%Y%m%d')
+            except ValueError:
+                raise HTTPException(422, '请填写有效的 IMU 采集日期。') from None
+            if prefix != f"daily/{date}/{date[4:]}{manifest.get('collector_name', '')}":
+                raise HTTPException(422, 'IMU 保存目录与采集日期或采集人不一致。')
+        elif not isinstance(files, list) or not 1 <= len(files) <= 1000:
             raise HTTPException(422, '请选择 1–1000 个压缩视频。')
         names = set()
         for item in files:
@@ -99,6 +116,8 @@ class R2Uploads:
                 raise HTTPException(422, '附属数据文件名称重复。')
             attachment_names.add(key.casefold())
             item['name'] = key
+        if kind == 'imu' and (not attachments or any(not item['name'].startswith('IMU/') for item in attachments)):
+            raise HTTPException(422, '仅 IMU 上传必须包含 IMU 数据，不能混入心率、视频或预测文件。')
         cache_files = validate_playback(manifest)
         all_files = files + attachments + cache_files
         if sum(item['size'] for item in all_files) > 100 * 1024**3:
@@ -115,9 +134,10 @@ class R2Uploads:
                 previous = con.execute('SELECT document FROM uploads WHERE owner=? AND digest=?', (user['id'], request_digest)).fetchone()
             if previous:
                 return self.public(json.loads(previous[0]))
-            current, _ = self.provider.optional_json(prefix + '/manifest.json')
+            check_compatible(self.provider, manifest)
+            current, _ = self.provider.optional_json(manifest_key(manifest))
             if current:
-                raise HTTPException(409, '采集目录已存在，未覆盖。')
+                raise HTTPException(409, '该采集目录已有同类素材，未覆盖；可上传缺少的另一类素材。')
             ident = uuid.uuid4().hex
             manifest.update(schema_version=1, uploaded_by=user['id'], uploaded_by_username=user['username'], created_at=now())
             for item in all_files:
