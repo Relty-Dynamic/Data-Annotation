@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -79,7 +80,14 @@ def _publish(path, raw):
 
 def prepare_prediction(target, service, root, selection, roles, *, progress=lambda detail: None,
                        wait=time.sleep, clock=time.monotonic, cancel=lambda: None):
-    if not all(isinstance(roles.get(k), str) and roles[k].strip() for k in ('chest', 'thigh')) or roles['chest'] == roles['thigh']:
+    if not all(isinstance(roles.get(k), str) and roles[k].strip() for k in ('chest', 'thigh')):
+        raise HTTPException(422, '请明确填写不同的胸部和大腿 IMU 设备编号。')
+    # WPLAY filenames use underscores in BLE addresses; the WT901 TXT device
+    # column uses colons. Preserve the rest of the name and the original files.
+    roles = {role: re.sub(r'\((?:[0-9a-fA-F]{2}[_:]){5}[0-9a-fA-F]{2}\)$',
+                          lambda match: match[0].replace('_', ':'), roles[role].strip())
+             for role in ('chest', 'thigh')}
+    if roles['chest'] == roles['thigh']:
         raise HTTPException(422, '请明确填写不同的胸部和大腿 IMU 设备编号。')
     root = Path(root).absolute()
     current = scan_collection(root)

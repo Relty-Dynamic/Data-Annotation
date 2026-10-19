@@ -155,6 +155,7 @@ class DesktopPreparationTests(unittest.TestCase):
         self.raw = document(project())
         self.result = dict(size_bytes=len(self.raw), sha256=hashlib.sha256(self.raw).hexdigest(), segments=1, needs_alignment_review=True)
         self.calls = []
+        self.manifests = []
         self.target = SimpleNamespace(request=self.request, response=self.response, attachments=[])
         self.module = SimpleNamespace(probe=lambda path: dict(name=path.name, start=epoch_ms('2026-10-15T12:00:00+08:00') / 1000, duration=8))
         self.patcher = patch('backend.prediction_prepare.sampler', return_value=self.module)
@@ -164,14 +165,41 @@ class DesktopPreparationTests(unittest.TestCase):
         self.calls.append((method, path))
         if path.endswith('capabilities'):
             return dict(enabled=True, implementation_sha256='a' * 64)
+        if method == 'POST' and path == '/api/prediction/jobs':
+            self.manifests.append(kwargs['json'])
         return dict(id='b' * 64, implementation_sha256='a' * 64, state='completed', missing_inputs=[], result=self.result)
 
     def response(self, method, path, **kwargs):
         return httpx.Response(200, content=self.raw)
 
-    def prepare(self, selection=None):
+    def prepare(self, selection=None, roles=None):
         return prepare_prediction(self.target, SimpleNamespace(local=self.root / 'cache'), self.capture,
-            selection or self.selection, dict(chest='chest-device', thigh='thigh-device'))
+            selection or self.selection, roles if roles is not None else dict(chest='chest-device', thigh='thigh-device'))
+
+    def test_device_address_separators_produce_the_same_worker_manifest(self):
+        expected = dict(chest='WT901BLE68(F0:46:23:95:C9:F0)', thigh='WT901BLE67(F9:07:E6:4C:66:D3)')
+        for separator in (':', '_'):
+            with self.subTest(separator=separator):
+                roles = {role: ' ' + name.replace(':', separator) + ' ' for role, name in expected.items()}
+                original = dict(roles)
+                self.prepare(scan_collection(self.capture), roles)
+                self.assertEqual(self.manifests[-1]['roles'], expected)
+                self.assertEqual(roles, original)
+        self.assertEqual(self.manifests[0], self.manifests[1])
+
+    def test_same_device_with_different_separators_is_rejected_before_remote_calls(self):
+        with self.assertRaises(HTTPException) as error:
+            self.prepare(roles=dict(chest='WT901BLE67(F9_07_E6_4C_66_D3)',
+                                    thigh='WT901BLE67(F9:07:E6:4C:66:D3)'))
+        self.assertEqual(error.exception.status_code, 422)
+        self.assertEqual(self.calls, [])
+        self.assertFalse((self.capture / 'prediction/posture.json').exists())
+
+    def test_device_names_keep_underscores_outside_the_address(self):
+        roles = dict(chest='chest_sensor(F0_46_23_95_C9_F0)', thigh='thigh_sensor')
+        self.prepare(roles=roles)
+        self.assertEqual(self.manifests[-1]['roles'],
+                         dict(chest='chest_sensor(F0:46:23:95:C9:F0)', thigh='thigh_sensor'))
 
     def test_new_prediction_is_rescanned_and_retries_reuse_identical_artifact(self):
         selected, _ = self.prepare()
