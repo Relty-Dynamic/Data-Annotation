@@ -21,6 +21,7 @@ import zipfile
 from fastapi import HTTPException
 from .mock_s3 import MockUploadManager, file_sha256
 from .r2_folder import scan_collection
+from .prediction_metadata import metadata as prediction_metadata
 
 
 def sampler(target, directory, capabilities):
@@ -79,7 +80,9 @@ def _publish(path, raw):
 
 
 def prepare_prediction(target, service, root, selection, roles, *, progress=lambda detail: None,
-                       wait=time.sleep, clock=time.monotonic, cancel=lambda: None):
+                       wait=time.sleep, clock=time.monotonic, cancel=lambda: None, clock_group=None):
+    if clock_group is not None and (not isinstance(clock_group, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,120}', clock_group)):
+        raise HTTPException(422, '连续时钟批次标识无效。')
     if not all(isinstance(roles.get(k), str) and roles[k].strip() for k in ('chest', 'thigh')):
         raise HTTPException(422, '请明确填写不同的胸部和大腿 IMU 设备编号。')
     # WPLAY filenames use underscores in BLE addresses; the WT901 TXT device
@@ -96,6 +99,8 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
     capabilities = target.request('GET', '/api/prediction/capabilities')
     if not capabilities.get('enabled'):
         raise HTTPException(503, '姿势预标注服务尚未启用，可取消预标注后仅上传素材。')
+    if clock_group and capabilities.get('same_day_clock_group_supported') is not True:
+        raise HTTPException(422, '当前算法服务不支持跨记录校时，请更新服务或取消连续时钟确认。')
     module = sampler(target, service.local / 'prediction-tools', capabilities)
     inputs = [r for r in current['attachments'] if r['output'].startswith('IMU/') and Path(r['name']).suffix.lower() == '.txt']
     if not inputs:
@@ -114,6 +119,8 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
         else:
             records.append(dict(path=record['output'], size=record['size'], sha256=digest))
     manifest = dict(protocol=1, collection=current['name'], subject=current['name'], roles=roles, inputs=records, videos=videos)
+    if clock_group:
+        manifest['clock_group'] = clock_group
     job = target.request('POST', '/api/prediction/jobs', json=manifest)
     if job['implementation_sha256'] != capabilities['implementation_sha256']:
         raise HTTPException(409, '算法版本在准备期间发生变化，请重新开始以使用一致版本。')
@@ -136,7 +143,7 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
             raise HTTPException(504, '预标注仍在处理，可稍后重试继续同一任务。')
         state = job['state']
         if state == 'failed':
-            raise HTTPException(422, job['error'])
+            raise HTTPException(422, f'{job["error"]}（预标注任务：{job["id"]}）')
         if state == 'awaiting_motion':
             curves = []
             # The same video window may support multiple IMU sessions.
@@ -159,6 +166,23 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
     result = job['result']
     if len(raw) > 20 * 1024**2 or len(raw) != result['size_bytes'] or hashlib.sha256(raw).hexdigest() != result['sha256']:
         raise HTTPException(502, '预标注下载校验失败，可重试同一任务。')
+    try:
+        summary = prediction_metadata(json.loads(raw.decode('utf-8-sig')))
+        if summary.get('batch_status'):
+            excluded_ids = result.get('excluded_record_ids')
+            if (result.get('batch_status') != summary['batch_status'] or not isinstance(excluded_ids, list)
+                    or any(not isinstance(i, str) for i in excluded_ids)
+                    or sorted(excluded_ids) != summary['excluded_record_ids']):
+                raise ValueError('预标注任务与文件的批次状态不一致。')
+            from .prediction_import import verify_inputs
+            expected = {r['path']: r['sha256'] for r in records}
+            verify_inputs(raw, expected.get)
+            if (summary['total_records'] != len(records)
+                    or any(row['path'] not in expected for row in summary['excluded_records'])):
+                raise ValueError('预标注未完成记录与本次输入清单不一致。')
+    except (ValueError, TypeError, KeyError, UnicodeError) as error:
+        raise HTTPException(502, f'预标注结果未通过校验：{error}') from None
+    result = {**result, **summary, 'job_id': job['id']}
     latest = scan_collection(root)
     if _inventory(latest) != _inventory(current):
         raise HTTPException(409, '预标注期间素材发生变化，未发布预测，请重新选择。')
@@ -178,5 +202,7 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
     if rescanned['videos'] != current['videos'] or before != after:
         raise HTTPException(409, '素材清单发生变化，上传已停止。')
     target.attachments = rescanned['attachments']
-    progress('预标注已生成，将与压缩视频一并上传。' + ('校时结果需要人工复核。' if result['needs_alignment_review'] else ''))
+    detail = (f'部分预标注已生成（{summary["validated_records"]}/{summary["total_records"]} 段）；未完成记录保留原文件并留待人工标注。'
+              if summary.get('batch_status') == 'partial' else '预标注已生成，将与压缩视频一并上传。')
+    progress(detail + ('校时结果需要人工复核。' if result['needs_alignment_review'] else ''))
     return rescanned, result
