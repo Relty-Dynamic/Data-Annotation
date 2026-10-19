@@ -109,6 +109,14 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaises(HTTPException):
                 self.bridge.poll(value, {'report': {'selection': bad}})
 
+    def test_explicit_clock_group_is_relayed_with_the_upload_command(self):
+        self.pair()
+        value = self.bridge.agent(self.request)
+        fields = dict(collector='test', prediction='generate', chest_device='chest', thigh_device='thigh',
+                      clock_group='confirmed-current-collection')
+        self.bridge.command(USER, value['id'], dict(action='start', fields=fields))
+        self.assertEqual(self.bridge.poll(value, {})['command']['fields'], fields)
+
 
 class InstallerTests(unittest.TestCase):
     def test_package_excludes_credentials_cache_and_test_data(self):

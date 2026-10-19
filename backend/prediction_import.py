@@ -12,6 +12,7 @@ from pathlib import PurePosixPath
 import re
 import uuid
 from fastapi import HTTPException
+from .prediction_metadata import metadata as prediction_metadata
 
 MAX_BYTES = 20 * 1024**2
 
@@ -61,9 +62,7 @@ def convert(raw, project):
         doc = json.loads(raw.decode('utf-8-sig'))
     except (ValueError, UnicodeError):
         raise ValueError('预标注不是有效的 UTF-8 JSON。') from None
-    if (not isinstance(doc, dict) or doc.get('axis') != 'posture'
-            or doc.get('export_profile') != 'imu_fusion_prediction_timeline/1.2.0'):
-        raise ValueError('预标注格式版本不受支持。')
+    prediction = prediction_metadata(doc)
     timebase, provenance = doc.get('timebase', {}), doc.get('provenance', {})
     if not isinstance(timebase, dict) or timebase.get('unit') != 'ms' or timebase.get('clock') != 'fpv_camera':
         raise ValueError('预标注必须使用已校时的相机毫秒坐标。')
@@ -129,12 +128,9 @@ def convert(raw, project):
         raise ValueError('预标注与实际视频没有交集。')
     if len(result) > 100000:
         raise ValueError('按视频拆分后的预标注超过平台片段上限。')
-    recordings = doc.get('recordings')
-    if not isinstance(recordings, list) or not recordings or any(not isinstance(r, dict) or type(r.get('needs_alignment_review')) is not bool for r in recordings):
-        raise ValueError('预标注缺少校时复核状态。')
     metadata = dict(state='applied', sha256=raw_hash, algorithm_version=provenance.get('version'),
         implementation_sha256=provenance.get('implementation_sha256'), source_fingerprint=project['source_fingerprint'],
-        imported_segments=len(result), needs_alignment_review=any(r['needs_alignment_review'] for r in recordings))
+        imported_segments=len(result), **prediction)
     return sorted(result, key=lambda r: (r['start_ms'], r['end_ms'])), metadata
 
 
@@ -164,6 +160,14 @@ def warning(metadata):
         return None
     if metadata.get('state') == 'rejected':
         return metadata['detail']
+    if metadata.get('batch_status') == 'partial':
+        reasons = {'inference_failed': 'IMU 推理未完成', 'invalid_prepared_prediction': '推理结果无法读取',
+                   'alignment_unresolved': '未获得可靠校时', 'failed': '校时或导出失败', 'no_video_overlap': '校时后与视频无交集'}
+        paths = '、'.join(f'{row["path"]}（{reasons.get(row["reason"], "预标注未完成")}）' for row in metadata['excluded_records'])
+        inherited = '部分结果使用了同日其他记录的校时偏移。' if metadata.get('inherited_record_ids') else ''
+        return f'姿势预标注仅完成 {metadata["validated_records"]}/{metadata["total_records"]} 段；未完成：{paths}。{inherited}缺失区间保留空白，请人工标注并复核校时。'
+    if metadata.get('inherited_record_ids'):
+        return '部分姿势预标注使用了同日其他记录的校时偏移，请结合视频人工复核。'
     if metadata.get('needs_alignment_review'):
         return '姿势预标注的相机校时尚需人工复核，请结合视频检查。'
     return None
