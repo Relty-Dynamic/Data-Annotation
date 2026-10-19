@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import errno
 import hashlib
 import json
@@ -10,6 +11,7 @@ import shutil
 import threading
 import time
 import uuid
+from weakref import WeakValueDictionary
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from pathlib import Path, PurePosixPath
 
@@ -28,6 +30,10 @@ from .video_selection import active_videos
 LOGGER = logging.getLogger('uvicorn.error')
 PROFILE = 'playback-480x270-256k32k-v1'
 RESERVE_BYTES = 256 * 1024 * 1024
+# NAS is served by one process. Coordinate all task/user ProjectService instances
+# without holding a service-wide lock or retaining locks for inactive materials.
+_NAS_LOCKS_GUARD = threading.Lock()
+_NAS_LOCKS = WeakValueDictionary()
 README = '''# DataMark 本机精简播放缓存
 
 这里保存本项目的精简播放视频、高倍速视频、时间轴封面和悬停图片。
@@ -207,6 +213,9 @@ class SessionCache:
 
     def _nas_playback_directory(self, project: dict, source: dict, *, create: bool = False) -> Path | None:
         """Use source-adjacent NAS storage only for the configured intranet tree."""
+        if (source.get('r2_playback') or source.get('storage') == 's3'
+                or project.get('_r2_prefix') or project.get('storage_mode') in {'s3', 's3-mock'}):
+            return None
         configured = os.getenv('DATAMARK_SOURCE_ROOT')
         if not configured or os.getenv('DATAMARK_STORAGE_BACKEND') != 'nas':
             return None
@@ -229,9 +238,10 @@ class SessionCache:
                     raise HTTPException(409, 'NAS 预览缓存目录异常，未读取或写入。')
                 if create:
                     directory.mkdir(exist_ok=True)
-            if not owned.is_dir():
-                return None
-            directory = checked_tree(owned / project['id'], owned)
+            # This key includes the source identity and playback profile, never
+            # the project, task, or user. Missing directories remain read-only
+            # paths until publication, so concurrent first prepares can lock it.
+            directory = checked_tree(owned / self._source_key(source), owned)
             if create:
                 directory.mkdir(exist_ok=True)
                 readme = owned / 'README.md'
@@ -244,6 +254,62 @@ class SessionCache:
             return directory
         except OSError as exc:
             raise HTTPException(503, 'NAS 预览缓存不可访问，请检查共享目录后重试。') from exc
+
+    @contextmanager
+    def _nas_preparation_lock(self, job: dict, video_id: str, directory: Path | None):
+        if directory is None:
+            yield
+            return
+        with _NAS_LOCKS_GUARD:
+            lock = _NAS_LOCKS.get(str(directory))
+            if lock is None:
+                lock = threading.Lock()
+                _NAS_LOCKS[str(directory)] = lock
+        acquired = lock.acquire(blocking=False)
+        try:
+            if not acquired:
+                self._progress(job, video_id, 'cache', 0, '等待同一素材的共享播放缓存准备完成。', operation='check')
+            while not acquired:
+                self._check(job)
+                acquired = lock.acquire(timeout=.1)
+            self._check(job)
+            yield
+        finally:
+            if acquired:
+                lock.release()
+
+    def _find_nas_entry(self, project: dict, source: dict, key: str,
+                        directory: Path | None) -> tuple[dict, Path] | None:
+        if directory is None:
+            return None
+        self.service.check_media_source(Path(source['path']), source)
+        root = directory.parent
+        expected = self._portable_source_identity(source, Path(source['path']),
+                                                  Path(os.environ['DATAMARK_SOURCE_ROOT']).resolve(strict=True))
+        def candidates():
+            yield directory
+            yield root / project['id']
+            if root.is_dir():
+                yield from sorted(root.iterdir())
+        seen = set()
+        for candidate in candidates():
+            if (candidate in seen or not PROJECT_ID.fullmatch(candidate.name)
+                    or is_reparse(candidate) or not candidate.is_dir()):
+                continue
+            seen.add(candidate)
+            candidate = checked_tree(candidate, root)
+            entry = self._read_entry(candidate, key, source)
+            if entry is None:
+                continue
+            identity = entry.get('source_identity')
+            if identity is not None and not self._portable_identity_matches(identity, expected):
+                continue
+            entry = self._nas_entry(candidate, key, source)
+            if entry is not None:
+                # Legacy project caches stay where they are. Their current URLs,
+                # mtimes and readers are preserved; no copying or relabeling.
+                return entry, candidate
+        return None
 
     def _nas_entry(self, directory: Path | None, key: str, source: dict) -> dict | None:
         if directory is None or not directory.is_dir():
@@ -274,7 +340,10 @@ class SessionCache:
         if directory is None:
             return entry, local
         existing = self._nas_entry(directory, key, source)
-        if existing is not None:
+        expected = self._portable_source_identity(source, Path(source['path']),
+                                                  Path(os.environ['DATAMARK_SOURCE_ROOT']).resolve(strict=True))
+        if (existing is not None and (existing.get('source_identity') is None
+                or self._portable_identity_matches(existing['source_identity'], expected))):
             return existing, directory
         records = [entry[kind] for kind in ('normal', 'fast', 'thumbnail')] + entry['sheets']
         hashes = {}
@@ -809,6 +878,16 @@ class SessionCache:
             temporary.unlink(missing_ok=True)
 
     def _prepare_video(self, job: dict, video: dict, directory: Path) -> tuple[dict, Path]:
+        self._check(job)
+        source = job['project']['_sources'][video['id']]
+        remote = getattr(self.service, 'remote', None)
+        nas_directory = (None if remote is not None and remote.map_path(source['path']) is not None
+                         else self._nas_playback_directory(job['project'], source))
+        with self._nas_preparation_lock(job, video['id'], nas_directory):
+            return self._prepare_video_locked(job, video, directory, nas_directory)
+
+    def _prepare_video_locked(self, job: dict, video: dict, directory: Path,
+                              nas_directory: Path | None) -> tuple[dict, Path]:
         project = job['project']
         self._check(job)
         clip_started = time.monotonic()
@@ -872,15 +951,15 @@ class SessionCache:
                     item.update(state='ready', progress=100, detail=None)
                     self._counts(job)
                 return entry, directory
-            nas_directory = self._nas_playback_directory(project, source)
-            nas_entry = self._nas_entry(nas_directory, key, source)
-            if nas_entry is not None:
+            found = self._find_nas_entry(project, source, key, nas_directory)
+            if found is not None:
+                nas_entry, cached_directory = found
                 self._progress(job, video_id, 'cache', 99, '复用 NAS 已保存的精简播放缓存。', operation='nas')
                 with self._condition:
                     item = next(item for item in job['status']['items'] if item['video_id'] == video_id)
                     item.update(state='ready', progress=100, detail=None)
                     self._counts(job)
-                return nas_entry, nas_directory
+                return nas_entry, cached_directory
             self._progress(job, video_id, 'cache', 0, '正在检查原视频身份和本机缓存。', operation='check')
             # An accessible but changed original fails validation. Offline
             # originals do not prevent reuse or repairs from a valid local normal.

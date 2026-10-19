@@ -5,6 +5,7 @@ import errno
 import json
 import ntpath
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -96,16 +97,17 @@ class PlaybackSessionTests(unittest.TestCase):
         target.write_bytes(MEDIA)
         update(99)
 
-    def wait_ready(self, service=None, timeout=5):
+    def wait_ready(self, service=None, timeout=5, ident=None):
         service = service or self.service
+        ident = ident or self.ident
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            status = service.sessions.status(self.ident)
+            status = service.sessions.status(ident)
             if status["state"] == "ready":
                 return status
             if status["state"] in {"error", "failed"} or (status["state"] == "partial" and status.get("failed", 0)):
                 logs = []
-                directory = service.storage.directory(self.ident) / "playback"
+                directory = service.storage.directory(ident) / "playback"
                 if directory.is_dir():
                     logs = [path.name + ": " + path.read_text(encoding="utf-8", errors="replace")[-2000:]
                             for path in directory.glob("*.log")]
@@ -132,6 +134,193 @@ class PlaybackSessionTests(unittest.TestCase):
                 raise AssertionError("Ready playback touched the original/NAS: " + str(path))
             return original(path, *args, **kwargs)
         return patch.object(Path, "stat", stat)
+
+    def other_workspace(self):
+        service = ProjectService(self.app_root)
+        service.probe = self.probe
+        service.tool = self.service.tool
+        self.services.append(service)
+        project = copy.deepcopy(self.project)
+        project['id'] = 'a' * 32
+        project['annotations'] = empty_annotations()
+        service.save(project)
+        return service, project
+
+    def legacy_nas_cache(self):
+        """Recreate the released per-project layout, including original mtimes."""
+        root = self.source / '.datamark-cache' / 'ubuntu-playback-v1'
+        legacy = root / self.ident
+        legacy.mkdir()
+        for source in self.project['_sources'].values():
+            key = self.service.sessions._source_key(source)
+            directory = root / key
+            for path in directory.iterdir():
+                shutil.move(str(path), legacy / path.name)
+            directory.rmdir()
+        return legacy
+
+    @staticmethod
+    def cache_snapshot(root):
+        return {str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in root.rglob('*') if path.is_file()}
+
+    def test_nas_cache_shared_between_workspaces_preserves_projects_and_old_urls(self):
+        other, project = self.other_workspace()
+        self.project['annotations']['posture'] = [{'id': 'human', 'label': '站', 'kind': 'interval',
+                                                 'lane': 0, 'start_ms': 0, 'end_ms': 1000}]
+        self.service.save(self.project)
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                    'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            manifest = self.prepare()
+            original = copy.deepcopy(self.service.load(self.ident))
+            other_original = copy.deepcopy(other.load(project['id']))
+            self.assertNotEqual(original['annotations'], other_original['annotations'])
+            root = self.source / '.datamark-cache' / 'ubuntu-playback-v1'
+            before = self.cache_snapshot(root)
+            with patch('backend.session_cache.run_ffmpeg', side_effect=AssertionError('must reuse NAS cache')):
+                other.sessions.start(project['id'])
+                self.wait_ready(other, ident=project['id'])
+            for video in project['videos']:
+                path = other.sessions.asset(project['id'], 'normal', video['id'])
+                self.assertEqual(path, self.asset('normal', video['id'], version=manifest['version']))
+                self.assertEqual(path.parent.name, other.sessions._source_key(project['_sources'][video['id']]))
+            self.assertEqual(before, self.cache_snapshot(root))
+            self.assertEqual(self.service.load(self.ident), original)
+            self.assertEqual(other.load(project['id']), other_original)
+
+    def test_nas_reuses_other_project_legacy_cache_without_writes(self):
+        other, project = self.other_workspace()
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                    'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            self.prepare()
+            legacy = self.legacy_nas_cache()
+            before = self.cache_snapshot(legacy.parent)
+            with patch('backend.session_cache.run_ffmpeg', side_effect=AssertionError('legacy must be reused')), \
+                 patch.object(other.sessions, '_publish_nas_entry', side_effect=AssertionError('no migration writes')):
+                other.sessions.start(project['id'])
+                self.wait_ready(other, ident=project['id'])
+            self.assertEqual(other.sessions.asset(project['id'], 'normal', 'v0001').parent, legacy)
+            self.assertEqual(before, self.cache_snapshot(legacy.parent))
+
+    def test_nas_legacy_lookup_rejects_changed_bytes_identity_and_original(self):
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                    'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            self.prepare()
+            legacy = self.legacy_nas_cache()
+            source = self.project['_sources']['v0001']
+            key = self.service.sessions._source_key(source)
+            directory = self.service.sessions._nas_playback_directory(self.project, source)
+            entry = self.service.sessions._find_nas_entry(self.project, source, key, directory)[0]
+            normal = legacy / entry['normal']['path']
+            stamp, content = normal.stat(), normal.read_bytes()
+            normal.write_bytes(content[:-1] + bytes([content[-1] ^ 1]))
+            os.utime(normal, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            self.assertIsNone(self.service.sessions._find_nas_entry(self.project, source, key, directory))
+            normal.write_bytes(content)
+            os.utime(normal, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            manifest = legacy / (key + '.assets.json')
+            entry['source_identity']['sample_sha256'] = '0' * 64
+            manifest.write_text(json.dumps(entry), encoding='utf-8')
+            self.assertIsNone(self.service.sessions._find_nas_entry(self.project, source, key, directory))
+            # A same-key shared entry with invalid identity must be repaired,
+            # rather than accepted by the publication shortcut.
+            directory.mkdir()
+            for path in legacy.iterdir():
+                shutil.copy2(path, directory / path.name)
+            local = self.service.storage.directory(self.ident) / 'playback'
+            local_entry = self.service.sessions._load_entry(local, key, source)
+            published, published_directory = self.service.sessions._publish_nas_entry(
+                self.project, source, key, local, local_entry)
+            self.assertEqual(published_directory, directory)
+            self.assertEqual(published['source_identity']['sample_sha256'], source['stamp']['sample_sha256'])
+            Path(source['path']).write_bytes(b'changed original')
+            with self.assertRaises(HTTPException) as caught:
+                self.service.sessions._find_nas_entry(self.project, source, key, directory)
+            self.assertEqual(caught.exception.status_code, 409)
+
+    def test_concurrent_nas_workspaces_encode_each_material_once(self):
+        other, project = self.other_workspace()
+        entered, release = threading.Event(), threading.Event()
+        def hold(args, stopping):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError('encode not released')
+        self.encoder_hook = hold
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                    'DATAMARK_SOURCE_ROOT': str(self.root)}), \
+             patch('backend.session_cache.run_ffmpeg', side_effect=self.encode):
+            self.service.sessions.start(self.ident)
+            try:
+                self.assertTrue(entered.wait(3))
+                other.sessions.start(project['id'])
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    status = other.sessions.status(project['id'])
+                    if any('等待同一素材' in (item.get('detail') or '') for item in status['items']):
+                        break
+                    time.sleep(.01)
+                else:
+                    self.fail('second workspace did not wait for material owner')
+            finally:
+                release.set()
+            self.wait_ready()
+            self.wait_ready(other, ident=project['id'])
+        self.assertEqual(sum(self.encodes.values()), 2)
+
+    def test_s3_sources_never_select_nas_cache_even_in_nas_environment(self):
+        source = self.project['_sources']['v0001']
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                    'DATAMARK_SOURCE_ROOT': str(self.root)}), \
+             patch('backend.session_cache.checked_tree', side_effect=AssertionError('public must not access NAS')):
+            for project, metadata in ((self.project, {**source, 'r2_playback': {'prefix': 'capture'}}),
+                                      (self.project, {**source, 'storage': 's3'}),
+                                      ({**self.project, 'storage_mode': 's3'}, source),
+                                      ({**self.project, 'storage_mode': 's3-mock'}, source)):
+                self.assertIsNone(self.service.sessions._nas_playback_directory(project, metadata, create=True))
+        self.assertFalse((self.source / '.datamark-cache' / 'ubuntu-playback-v1').exists())
+
+    def test_cancelling_nas_waiter_does_not_cancel_material_owner(self):
+        other, project = self.other_workspace()
+        entered, release = threading.Event(), threading.Event()
+        def hold(args, stopping):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError('encode not released')
+        self.encoder_hook = hold
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                    'DATAMARK_SOURCE_ROOT': str(self.root)}), \
+             patch('backend.session_cache.run_ffmpeg', side_effect=self.encode):
+            self.service.sessions.start(self.ident)
+            try:
+                self.assertTrue(entered.wait(3))
+                other.sessions.start(project['id'])
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    status = other.sessions.status(project['id'])
+                    if any('等待同一素材' in (item.get('detail') or '') for item in status['items']):
+                        break
+                    time.sleep(.01)
+                else:
+                    self.fail('no waiting request to cancel')
+                started = time.monotonic()
+                other.sessions.invalidate(project['id'])
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
+            self.wait_ready()
+        self.assertEqual(sum(self.encodes.values()), 2)
+
+    def test_nas_cache_key_separates_changed_source_and_encoding_profile(self):
+        source = self.project['_sources']['v0001']
+        with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
+                                    'DATAMARK_SOURCE_ROOT': str(self.root)}):
+            directory = self.service.sessions._nas_playback_directory(self.project, source)
+            changed = {**source, 'stamp': {**source['stamp'], 'mtime_ns': source['stamp']['mtime_ns'] + 1}}
+            self.assertNotEqual(directory, self.service.sessions._nas_playback_directory(self.project, changed))
+            with patch('backend.session_cache.PROFILE', 'future-encoding-profile'):
+                self.assertNotEqual(directory, self.service.sessions._nas_playback_directory(self.project, source))
+            self.assertFalse(directory.parent.exists())
 
     def test_ready_requires_every_local_video_fast_preview_thumbnail_and_sheet(self):
         entered, release = threading.Event(), threading.Event()
@@ -280,6 +469,7 @@ class PlaybackSessionTests(unittest.TestCase):
         with patch.dict(os.environ, {'DATAMARK_STORAGE_BACKEND': 'nas',
                                       'DATAMARK_SOURCE_ROOT': str(self.root)}):
             self.prepare()
+        self.legacy_nas_cache()
         nas = self.source / '.datamark-cache' / 'ubuntu-playback-v1'
         for source in self.project['_sources'].values():
             old_key = self.service.sessions._source_key(source)
