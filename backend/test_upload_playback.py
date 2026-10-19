@@ -1,14 +1,48 @@
 """Cache manifest validation uses isolated metadata, never production objects."""
 import copy
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from fastapi import HTTPException
 
 from backend.session_cache import PROFILE
-from backend.upload_playback import reference, validate
+from backend.upload_playback import reference, validate, direct_ready, direct_manifest
 
 
 class PlaybackManifestTests(unittest.TestCase):
+    def test_status_and_confirmation_validate_without_signing_downloads(self):
+        from backend.r2_service import R2ProjectService
+        from backend.r2_routes import R2Media
+        from backend.tasks.workspace import Workspaces
+        manifest = self.manifest()
+        normal = manifest['files'][0]
+        normal.update(size=100, sha256='c' * 64)
+        video = {'id': 'v0001', 'name': normal['name'], 'duration_ms': normal['duration_ms']}
+        project = {'id': 'a' * 32, 'videos': [video], 'collection_folder_name': 'test',
+                   '_sources': {'v0001': {'r2_playback': reference('daily/test', manifest, normal['name'])}}}
+        provider = SimpleNamespace(signed_url=Mock(side_effect=lambda key: 'https://objects.example/' + key))
+        service = object.__new__(R2ProjectService)
+        service.load = lambda ident: project
+        service.provider = provider
+        service.allowed = lambda *args: True
+        workspace = object.__new__(Workspaces)
+        workspace.media = R2Media(service)
+        self.assertEqual(service.session_status(project['id'])['state'], 'ready')
+        self.assertEqual(service.browser_ready(project['id']), {'released': False})
+        self.assertEqual(workspace.session_status(project)['state'], 'ready')
+        self.assertTrue(workspace.direct_ready(project))
+        provider.signed_url.assert_not_called()
+        self.assertEqual(len(direct_manifest(provider, project)['assets']), 5)
+        self.assertEqual(provider.signed_url.call_count, 5)
+        capture = project['_sources']['v0001']['r2_playback']['manifest']
+        capture['cache_files'].pop()
+        for operation in (lambda: direct_ready(project), lambda: service.session_status(project['id']),
+                          lambda: service.browser_ready(project['id']), lambda: workspace.session_status(project)):
+            with self.assertRaises(HTTPException):
+                operation()
+        self.assertEqual(provider.signed_url.call_count, 5)
+
     def manifest(self):
         name = 'A00001_20261015120000_0001.mp4'
         base = {'size': 100, 'sha256': 'a' * 64, 'video_name': name}

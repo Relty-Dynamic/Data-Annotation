@@ -410,7 +410,14 @@ class TaskHostTests(unittest.TestCase):
         task_id = task['id']
         url = f'/items/{task_id}/workspace/project'
         headers = self.login(client, 'a')
-        opened = self.request(client, 'GET', url)
+        workspace = app.state.task_workspaces
+        with patch.object(workspace, 'project', wraps=workspace.project) as resolve:
+            opened = self.request(client, 'GET', url)
+            self.assertEqual(resolve.call_count, 1, 'serialize the already-authorized project once per request')
+        with patch.object(workspace, 'project', wraps=workspace.project) as resolve:
+            listed = self.request(client, 'GET', f'/items/{task_id}/workspace/projects')
+            self.assertEqual(resolve.call_count, 1)
+            self.assertEqual(listed[0]['id'], opened['id'])
         self.assertFalse(opened['task_readonly'])
         self.assertEqual(['posture'], opened['selected_tracks'])
         annotations = {'posture': [{'id': 'one', 'label': '坐', 'start_ms': 100, 'end_ms': 900, 'lane': 0,

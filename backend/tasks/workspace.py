@@ -22,8 +22,10 @@ class Workspaces:
         capture = task.get('collection')
         members = capture['videos'] if capture else [task['video']]
         resolved = []
-        for index, member in enumerate(members):
-            path, metadata, original = self.media.resolve(member['source'])
+        sources = [member['source'] for member in members]
+        media = (self.media.resolve_many(sources) if hasattr(self.media, 'resolve_many')
+                 else [self.media.resolve(source) for source in sources])
+        for index, (member, (path, metadata, original)) in enumerate(zip(members, media)):
             if original['duration_ms'] != member['duration_ms']:
                 raise HTTPException(409, '任务素材时长已变化，无法恢复原标注坐标')
             start = member['start_ms'] if capture else 0
@@ -101,7 +103,10 @@ class Workspaces:
         return project
 
     def public(self, actor, task_id):
-        project = self.project(actor, task_id)
+        return self.public_project(self.project(actor, task_id), task_id)
+
+    def public_project(self, project, task_id):
+        """Serialize a project already authorized/resolved in this request."""
         result = self.service.public(project)
         # Legacy serialization deliberately strips task-only fields. The task
         # editor must keep its verified private draft and structured metadata.
@@ -150,8 +155,13 @@ class Workspaces:
     def direct_session(self, project):
         return self.media.direct_session(project) if hasattr(self.media, 'direct_session') else None
 
+    def direct_ready(self, project):
+        if hasattr(self.media, 'direct_ready'):
+            return self.media.direct_ready(project)
+        return self.direct_session(project) is not None
+
     def session_status(self, project, *, start=False, retry_failed=False):
-        if self.direct_session(project) is not None:
+        if self.direct_ready(project):
             from ..session_cache import SessionCache
             status = SessionCache._initial(project)
             status.update(state='ready', stage='ready', operation='reuse', ready=status['total'],

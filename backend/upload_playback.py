@@ -116,17 +116,12 @@ def reference(prefix, manifest, name):
         'cache_files': [item for item in manifest.get('cache_files', []) if item['video_name'] == name]}}
 
 
-def direct_manifest(provider, project):
-    """Describe published upload objects; the browser verifies the actual bytes.
-
-    Publication already validates the complete upload. Task actors must not each
-    download another server copy just to obtain the same immutable cache list.
-    Legacy captures without an upload bundle keep their existing preparation.
-    """
+def direct_sources(project):
+    """Validate every association without constructing or signing download URLs."""
     captures = [project['_sources'][video['id']].get('r2_playback') for video in project['videos']]
     if any(not capture or 'cache_profile' not in capture['manifest'] for capture in captures):
         return None
-    videos, assets, identities = [], [], []
+    sources = []
     for video, capture in zip(project['videos'], captures):
         manifest = capture['manifest']
         records = validate(manifest)
@@ -135,6 +130,21 @@ def direct_manifest(provider, project):
             raise HTTPException(409, '任务视频与上传缓存清单不一致。')
         own = [dict(normal, kind='normal', index=None),
                *[item for item in records if item['video_name'] == capture['video_name']]]
+        sources.append((video, capture, own))
+    return sources
+
+
+def direct_ready(project):
+    return direct_sources(project) is not None
+
+
+def direct_manifest(provider, project):
+    """Sign only the requested manifest; browsers still verify published bytes."""
+    sources = direct_sources(project)
+    if sources is None:
+        return None
+    videos, assets, identities = [], [], []
+    for video, capture, own in sources:
         urls, sheets = {}, []
         for item in own:
             kind, index = item['kind'], item['index']
