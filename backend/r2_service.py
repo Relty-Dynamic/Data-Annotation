@@ -92,16 +92,19 @@ class R2ProjectService(ProjectService):
                 entries.append({'name': key.split('/')[-1], 'path': key, 'kind': 'directory'})
         if not prefix:
             entries = [{'name': 'daily', 'path': 'daily', 'kind': 'directory'}]
-        manifest = None
+        manifest = capture = None
         if CAPTURE.fullmatch(prefix):
             manifest, _ = self.provider.optional_json(prefix + '/manifest.json')
-            if manifest:
-                entries = [{'name': item.get('name', Path(item['key']).name), 'path': prefix + '/' + item['key'],
-                            'kind': 'file', 'size': item['size']} for item in manifest.get('files', [])]
+            imu, _ = self.provider.optional_json(prefix + '/imu.manifest.json')
+            capture = manifest or imu
+            if capture:
+                files = (manifest or {}).get('files', []) + (manifest or {}).get('attachments', []) + (imu or {}).get('attachments', [])
+                entries = list({item['key']: {'name': item.get('name', Path(item['key']).name), 'path': prefix + '/' + item['key'],
+                            'kind': 'file', 'size': item['size']} for item in files}.values())
         return {'root': '', 'path': prefix, 'parent': '/'.join(prefix.split('/')[:-1]) if prefix else None,
                 'entries': sorted(entries, key=lambda item: item['name']), 'page': 0, 'has_more': False,
-                'can_open': manifest is not None, 'capture': {key: manifest.get(key) for key in
-                    ('collector_name','uploader_name','capture_date','note')} if manifest else None}
+                'can_open': manifest is not None, 'capture': {key: capture.get(key) for key in
+                    ('collector_name','uploader_name','capture_date','note')} if capture else None}
 
     def collection(self, prefix, *, download=True):
         prefix = capture_prefix(prefix)

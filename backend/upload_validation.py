@@ -7,7 +7,6 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from .r2_folder import validate_prediction
-from .service import document_bytes
 from .upload_playback import validate as validate_playback
 from .upload_proofs import policy
 
@@ -106,7 +105,8 @@ def validate_upload(uploads, ident, user, authorize=None, *, prepare=False):
             checked=uploads.load(ident,user)
             published=copy.deepcopy(manifest)
             published['media_metadata']={item['name']:checked['media_infos'][str(i)] for i,item in enumerate(manifest['files'])}
-            uploads.provider.put_if_absent(manifest['prefix'] + '/manifest.json', document_bytes(published))
+            from .capture_publication import publish
+            publish(uploads.provider, published)
             return uploads.public(update(state='ready', validation_error='',manifest=published))
         except Exception as error:
             detail = (error.detail if isinstance(error, HTTPException) and isinstance(error.detail, str)

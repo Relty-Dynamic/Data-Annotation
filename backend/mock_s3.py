@@ -355,15 +355,15 @@ class MockUploadManager:
         try:
             stat = source.stat()
         except OSError as error:
-            raise HTTPException(409, "采集设备已断开或视频不可读，请重新连接后重试。") from error
+            raise HTTPException(409, "采集设备已断开或文件不可读，请重新连接后重试。") from error
         if (source.is_symlink() or not source.is_file() or stat.st_size != record["size"]
                 or stat.st_mtime_ns != record["mtime_ns"] or stat.st_dev != record["device"]
                 or stat.st_ino != record["inode"]):
-            raise HTTPException(409, "所选 AVI 已变化，请重新选择后上传。")
+            raise HTTPException(409, "所选文件已变化，请重新选择后上传。")
         return source
 
-    def start(self, user: dict, collector_name: str, uploader_name: str | None,
-              note: str | None, selection_id: str) -> dict:
+    @staticmethod
+    def upload_metadata(user, collector_name, uploader_name, note):
         collector_name = collector_name.strip()
         uploader_name = (uploader_name or "").strip() or user["display_name"]
         note = (note or "").strip() or None
@@ -374,6 +374,11 @@ class MockUploadManager:
             raise HTTPException(422, "上传人姓名无效。")
         if note and (len(note) > 500 or any(ord(char) < 32 and char not in "\n\r\t" for char in note)):
             raise HTTPException(422, "备注无效或超过 500 字。")
+        return collector_name, uploader_name, note
+
+    def start(self, user: dict, collector_name: str, uploader_name: str | None,
+              note: str | None, selection_id: str) -> dict:
+        collector_name, uploader_name, note = self.upload_metadata(user, collector_name, uploader_name, note)
         with self.lock:
             selection = self.selections.get(selection_id)
         if not selection or selection["owner"] != user["id"] or time.time() - selection["selected_at"] >= 3600:

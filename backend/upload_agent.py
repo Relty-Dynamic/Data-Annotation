@@ -87,7 +87,8 @@ class AgentEngine:
             if command['action']=='select':
                 folders = self.picker(self.root,'directory')
                 if folders:
-                    selection = self.manager.select_folder(user['id'],folders[0])
+                    selection = self.manager.select_folder(user['id'],folders[0],
+                        upload_kind=command.get('fields', {}).get('upload_kind', 'video'))
                     self.target.attachments = selection['attachments']
                     self.selection = selection
                     self.job = None
@@ -95,6 +96,8 @@ class AgentEngine:
                         self.report['selection'] = {'name':selection['name'],'capture_date':selection['capture_date'],
                             'videos':[item['name'] for item in selection['videos']],
                             'attachments':[item['output'] for item in selection['attachments']], 'ignored':selection['ignored']}
+                        if selection.get('upload_kind') == 'imu':
+                            self.report['selection']['upload_kind'] = 'imu'
             elif command['action']=='start':
                 if not getattr(self,'selection',None):
                     raise HTTPException(422,'请先在网页选择本机采集文件夹。')
@@ -111,7 +114,8 @@ class AgentEngine:
                 self.manager.finish(job['id'],user['id'],self.service,
                     lambda ident:self.target.request('GET','/api/auth/me').get('can_upload') is True)
                 with self.manager.lock:
-                    self.manager.jobs[job['id']]['detail'] = 'S3 上传完成，压缩缓存已保留到桌面。'
+                    self.manager.jobs[job['id']]['detail'] = ('IMU 已原样上传并核验完成。' if job.get('upload_kind') == 'imu'
+                        else 'S3 上传完成，压缩缓存已保留到桌面。')
             else:
                 raise HTTPException(422,'不支持此上传操作。')
         except Exception as error:
