@@ -1,4 +1,14 @@
-import type {HelperStatus} from './uploadBridge';
+import type {HelperStatus,PredictionReport} from './uploadBridge';
+export function predictionMessage(prediction?:PredictionReport):string{
+ if(!prediction)return '';
+ const parts=[prediction.batch_status==='partial'?`部分姿势预标注已完成（${prediction.validated_records}/${prediction.total_records} 段），未完成区间需人工标注。`:'已携带姿势预标注。'];
+ if(prediction.inherited_record_ids?.length)parts.push(`${prediction.inherited_record_ids.length} 段使用了同日其他记录的校时偏移。`);
+ if(prediction.needs_alignment_review)parts.push('请结合视频人工复核校时。');
+ return parts.join('');
+}
+export function predictionFailureReason(reason:string):string{
+ return ({inference_failed:'IMU 推理未完成',invalid_prepared_prediction:'推理结果无法读取',alignment_unresolved:'未获得可靠校时',failed:'校时或导出失败',no_video_overlap:'校时后与视频无交集'} as Record<string,string>)[reason]??'预标注未完成';
+}
 export function completedUpload(helper:HelperStatus|null):{key:string;prefix:string}|null{
  const job=helper?.report.job;
  if(!helper?.online||helper.command||helper.report.busy||helper.report.error||!job?.id||!job.prefix||job.state!=='ready')return null;

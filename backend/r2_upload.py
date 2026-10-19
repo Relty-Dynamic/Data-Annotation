@@ -118,6 +118,7 @@ def main():
     parser.add_argument('--collector')
     parser.add_argument('--username')
     parser.add_argument('--predict', action='store_true', help='Generate posture prediction before compression')
+    parser.add_argument('--clock-group', help='Explicit continuous chest/camera clock group; omit after any restart or clock change')
     parser.add_argument('--chest-device')
     parser.add_argument('--thigh-device')
     args = parser.parse_args()
@@ -153,7 +154,7 @@ def main():
             selection = manager.select_folder(user['id'], folders[0])
             target.attachments = selection['attachments']
             job = manager.start(user, collector, None, None, selection['selection_id'], prediction={
-                'prediction': 'generate' if args.predict else 'keep',
+                'prediction': 'generate' if args.predict else 'keep', 'clock_group': args.clock_group or '',
                 'chest_device': args.chest_device, 'thigh_device': args.thigh_device})
             def permitted(ident):
                 return target.request('GET', '/api/auth/me').get('can_upload') is True

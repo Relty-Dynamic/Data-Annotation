@@ -95,7 +95,7 @@ class UploadBridge:
         fields = body.get('fields', {})
         if action not in {'select', 'start'} or not isinstance(fields, dict):
             raise HTTPException(422, '上传操作无效。')
-        if set(fields)-{'collector','uploader','note','prediction','chest_device','thigh_device','upload_kind','capture_date'} or any(not isinstance(v,str) or len(v)>500 for v in fields.values()):
+        if set(fields)-{'collector','uploader','note','prediction','chest_device','thigh_device','clock_group','upload_kind','capture_date'} or any(not isinstance(v,str) or len(v)>500 for v in fields.values()):
             raise HTTPException(422, '只允许采集信息，不允许远程指定本机路径或命令。')
         if fields.get('upload_kind', 'video') not in {'video', 'imu'}:
             raise HTTPException(422, '上传素材类型无效。')

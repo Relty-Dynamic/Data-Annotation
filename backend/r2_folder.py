@@ -169,7 +169,8 @@ class FolderUploadManager(MockUploadManager):
             try:
                 selection = job['folder_selection']
                 refreshed, result = prepare_prediction(self.store, service, selection['root'], selection['folder'],
-                    {role: options[role + '_device'].strip() for role in ('chest', 'thigh')}, progress=progress)
+                    {role: options[role + '_device'].strip() for role in ('chest', 'thigh')}, progress=progress,
+                    clock_group=options.get('clock_group') or None)
                 selection['folder'] = refreshed
                 job['prediction_result'] = result
                 with self.lock:
@@ -195,7 +196,9 @@ class FolderUploadManager(MockUploadManager):
                 result.update(upload_kind='imu', selected=len(job['attachments']), total=len(job['attachments']))
         prediction = job.get('prediction_result')
         if prediction:
-            result['prediction'] = {key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review')}
+            result['prediction'] = {key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review',
+                'job_id', 'export_profile', 'batch_status', 'validated_records', 'total_records',
+                'excluded_record_ids', 'excluded_records', 'inherited_record_ids') if key in prediction}
         return result
 
 

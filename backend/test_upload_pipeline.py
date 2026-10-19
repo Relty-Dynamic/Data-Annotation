@@ -84,6 +84,21 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(self.final),1)
         self.assertFalse((self.root/'staging'/job['id']).exists())
 
+    def test_partial_prediction_and_explicit_clock_group_reach_final_upload_status(self):
+        job=self.start()
+        self.manager.jobs[job['id']]['prediction_options']['clock_group']='confirmed-current-collection'
+        excluded=[dict(record_id='a'*16,path='IMU/short.txt',reason='alignment_unresolved')]
+        def partial(*args,**kwargs):
+            self.assertEqual(kwargs['clock_group'],'confirmed-current-collection')
+            selection,result=self.prediction(*args,**kwargs)
+            return selection,{**result,'batch_status':'partial','validated_records':2,'total_records':3,
+                              'excluded_records':excluded,'excluded_record_ids':['a'*16],'needs_alignment_review':True}
+        with patch('backend.prediction_prepare.prepare_prediction',side_effect=partial),patch.object(self.manager,'_compress_video',side_effect=self.compress),patch('backend.upload_pipeline.build',side_effect=self.build):
+            result=self.manager.finish(job['id'],USER['id'],self.service,lambda user:True)
+        self.assertEqual(result['state'],'ready')
+        self.assertEqual(result['prediction']['batch_status'],'partial')
+        self.assertEqual(result['prediction']['excluded_records'],excluded)
+
     def test_stage_failure_never_publishes_complete_capture(self):
         job=self.manager.start(USER,'test',None,None,self.selection['selection_id'])
         self.started.set()

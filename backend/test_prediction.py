@@ -12,7 +12,8 @@ import httpx
 from fastapi import HTTPException
 
 from backend.prediction_gateway import Gateway
-from backend.prediction_import import convert, epoch_ms, initialize
+from backend.prediction_import import convert, epoch_ms, initialize, warning
+from backend.prediction_metadata import metadata as prediction_metadata
 from backend.prediction_prepare import _publish
 from backend.prediction_prepare import prepare_prediction
 from backend.r2_folder import scan_collection
@@ -39,7 +40,72 @@ def project():
                      recording_start='2026-10-15T12:00:05+08:00', start_ms=5000, end_ms=8000, duration_ms=3000)])
 
 
+def v13_document(p, *, partial=False, inherited=False):
+    doc = json.loads(document(p))
+    doc['export_profile'] = 'imu_fusion_prediction_timeline/1.3.0'
+    first = hashlib.sha256(b'IMU/session.txt').hexdigest()[:16]
+    doc['provenance']['inputs'][0]['record_id'] = first
+    doc['recordings'][0].update(id=first, alignment_status='signal_supported')
+    excluded = []
+    if partial:
+        path = 'IMU/short.txt'
+        excluded = [dict(record_id=hashlib.sha256(path.encode()).hexdigest()[:16], path=path, reason='alignment_unresolved')]
+        doc['segments'] = [dict(start_ms=1000, end_ms=2000, label='坐')]
+    if inherited:
+        path = 'IMU/later.txt'; donor = hashlib.sha256(path.encode()).hexdigest()[:16]
+        doc['provenance']['inputs'].append(dict(path=path, sha256='a'*64, record_id=donor))
+        doc['recordings'].append(dict(id=donor, needs_alignment_review=False, alignment_status='signal_supported'))
+        doc['recordings'][0].update(alignment_status='same_day_inherited', alignment_source_record_id=donor,
+                                   needs_alignment_review=True)
+    doc['provenance']['upload_batch'] = dict(batch_status='partial' if partial else 'complete',
+        validated_records=len(doc['recordings']), total_records=len(doc['recordings'])+len(excluded),
+        excluded_records=excluded, excluded_record_ids=[r['record_id'] for r in excluded],
+        clock_group='confirmed-current-collection' if inherited else None)
+    return doc
+
+
 class ImportTests(unittest.TestCase):
+    def test_v13_partial_import_preserves_blank_ranges_and_exclusion_warning(self):
+        p = project(); doc = v13_document(p, partial=True)
+        rows, info = convert(json.dumps(doc).encode(), p)
+        self.assertEqual([(r['start_ms'], r['end_ms']) for r in rows], [(1000, 2000)])
+        self.assertEqual(info['batch_status'], 'partial')
+        self.assertTrue(info['needs_alignment_review'])
+        self.assertIn('IMU/short.txt', warning(info))
+        self.assertIn('1/2', warning(info))
+
+    def test_v13_inherited_alignment_remains_visible_without_reapplying_offset(self):
+        p = project(); doc = v13_document(p, inherited=True)
+        rows, info = convert(json.dumps(doc).encode(), p)
+        self.assertEqual([(r['start_ms'], r['end_ms']) for r in rows], [(0, 3000), (5000, 8000)])
+        self.assertEqual(len(info['inherited_record_ids']), 1)
+        self.assertIn('同日其他记录', warning(info))
+
+    def test_v13_complete_without_review_and_legacy_are_both_supported(self):
+        for raw in (document(project()), json.dumps(v13_document(project())).encode()):
+            rows, info = convert(raw, project())
+            self.assertEqual(len(rows), 2)
+            self.assertIsNone(warning(info))
+
+    def test_new_batch_metadata_cannot_be_disguised_as_legacy_format(self):
+        doc = v13_document(project(), partial=True)
+        doc['export_profile'] = 'imu_fusion_prediction_timeline/1.2.0'
+        with self.assertRaises(ValueError):
+            convert(json.dumps(doc).encode(), project())
+
+    def test_v13_inconsistent_partial_metadata_and_unreviewed_inheritance_are_rejected(self):
+        cases = []
+        for key, value in [('batch_status', 'complete'), ('total_records', 3), ('validated_records', True),
+                           ('excluded_record_ids', []), ('excluded_records', [])]:
+            doc = v13_document(project(), partial=True); doc['provenance']['upload_batch'][key] = value; cases.append(doc)
+        doc = v13_document(project(), partial=True); doc['provenance']['upload_batch']['excluded_records'][0]['path'] = '/private/short.txt'; cases.append(doc)
+        doc = v13_document(project(), inherited=True); doc['recordings'][0]['needs_alignment_review'] = False; cases.append(doc)
+        doc = v13_document(project(), inherited=True); doc['recordings'][0]['alignment_source_record_id'] = 'unknown'; cases.append(doc)
+        doc = v13_document(project()); doc['export_profile'] = 'imu_fusion_prediction_timeline/9.0.0'; cases.append(doc)
+        for doc in cases:
+            with self.subTest(doc=doc), self.assertRaises(ValueError):
+                convert(json.dumps(doc).encode(), project())
+
     def test_intersects_video_coverage_without_filling_real_gaps_or_applying_imu_offset_again(self):
         p = project()
         rows, metadata = convert(document(p, review=True), p)
@@ -225,6 +291,73 @@ class DesktopPreparationTests(unittest.TestCase):
             self.prepare(scan_collection(self.capture))
         self.assertEqual(destination.read_bytes(), b'{"human_supplied_prediction":true}')
 
+    def use_v13(self, *, partial=False):
+        doc = v13_document(project(), partial=partial)
+        doc['provenance']['inputs'][0]['sha256'] = hashlib.sha256((self.capture / 'IMU/session.txt').read_bytes()).hexdigest()
+        if partial:
+            (self.capture / 'IMU/short.txt').write_bytes(b'explicit-short-IMU-fixture')
+        self.raw = json.dumps(doc).encode()
+        self.result = dict(size_bytes=len(self.raw), sha256=hashlib.sha256(self.raw).hexdigest(), segments=len(doc['segments']),
+                           needs_alignment_review=partial, batch_status='partial' if partial else 'complete',
+                           excluded_record_ids=prediction_metadata(doc)['excluded_record_ids'])
+        return doc
+
+    def test_v13_partial_keeps_all_original_inputs_and_reports_exclusions(self):
+        self.use_v13(partial=True)
+        original = (self.capture / 'IMU/short.txt').read_bytes()
+        selected, result = self.prepare(scan_collection(self.capture))
+        self.assertEqual(result['batch_status'], 'partial')
+        self.assertEqual(result['excluded_records'][0]['path'], 'IMU/short.txt')
+        self.assertEqual(result['job_id'], 'b'*64)
+        self.assertEqual((self.capture / 'IMU/short.txt').read_bytes(), original)
+        self.assertIn('IMU/short.txt', {r['output'] for r in selected['attachments']})
+
+    def test_v13_job_file_disagreement_never_publishes(self):
+        self.use_v13(partial=True)
+        self.result['batch_status'] = 'complete'
+        with self.assertRaises(HTTPException):
+            self.prepare(scan_collection(self.capture))
+        self.assertFalse((self.capture / 'prediction/posture.json').exists())
+
+    def test_v13_changed_source_digest_is_rejected(self):
+        doc = self.use_v13()
+        doc['provenance']['inputs'][0]['sha256'] = 'f'*64
+        self.raw = json.dumps(doc).encode(); self.result.update(size_bytes=len(self.raw), sha256=hashlib.sha256(self.raw).hexdigest())
+        with self.assertRaises(HTTPException):
+            self.prepare()
+        self.assertFalse((self.capture / 'prediction/posture.json').exists())
+
+    def test_clock_group_is_sent_only_after_explicit_confirmation_and_capability(self):
+        original = self.target.request
+        def capable(method, path, **kwargs):
+            result = original(method, path, **kwargs)
+            return {**result, 'same_day_clock_group_supported': True} if path.endswith('capabilities') else result
+        self.target.request = capable
+        prepare_prediction(self.target, SimpleNamespace(local=self.root/'cache'), self.capture, self.selection,
+                           dict(chest='chest', thigh='thigh'), clock_group='confirmed-current-collection')
+        self.assertEqual(self.manifests[-1]['clock_group'], 'confirmed-current-collection')
+        self.target.request = original
+        with self.assertRaises(HTTPException):
+            prepare_prediction(self.target, SimpleNamespace(local=self.root/'cache'), self.capture, scan_collection(self.capture),
+                               dict(chest='chest', thigh='thigh'), clock_group='confirmed-current-collection')
+
+    def test_legacy_client_does_not_infer_clock_continuity(self):
+        self.prepare()
+        self.assertNotIn('clock_group', self.manifests[-1])
+
+    def test_algorithm_failure_exposes_diagnostic_job_id_without_publishing(self):
+        original = self.target.request
+        def failed(method, path, **kwargs):
+            value = original(method, path, **kwargs)
+            if path == '/api/prediction/jobs' or path.endswith('/start'):
+                value.update(state='failed', error='fixture inference failed')
+            return value
+        self.target.request = failed
+        with self.assertRaises(HTTPException) as error:
+            self.prepare()
+        self.assertIn('b'*64, error.exception.detail)
+        self.assertFalse((self.capture / 'prediction/posture.json').exists())
+
 
 class TaskPredictionTests(unittest.TestCase):
     def fixture(self, *, label='站', review=True):
@@ -270,6 +403,21 @@ class TaskPredictionTests(unittest.TestCase):
         p = f.workspace.public(f.a, task['id'])
         self.assertEqual(p['annotations']['posture'], [])
         self.assertEqual(p['prediction_import']['state'], 'rejected')
+
+    def test_partial_batch_warning_survives_task_draft_save_and_reopen(self):
+        f = self.fixture(); p = f.media_service.load(f.project['id'])
+        doc = v13_document(p, partial=True)
+        doc['segments'] = [dict(start_ms=0, end_ms=500, label='站')]
+        (Path(f.project['source_dir']) / 'prediction/posture.json').write_text(json.dumps(doc))
+        task = f.create(); opened = f.workspace.public(f.a, task['id'])
+        self.assertEqual(opened['prediction_import']['batch_status'], 'partial')
+        self.assertTrue(any('IMU/short.txt' in text for text in opened['warnings']))
+        saved = f.store.get_task(f.a, task['id'])
+        self.assertEqual(saved['draft']['prediction_import']['excluded_records'][0]['path'], 'IMU/short.txt')
+        f.store.save_draft(f.a, task['id'], dict(expected_revision=saved['revision'], annotations={'posture': []}))
+        again = f.workspace.public(f.a, task['id'])
+        self.assertEqual(again['annotations']['posture'], [])
+        self.assertEqual(again['prediction_import']['batch_status'], 'partial')
 
 
 if __name__ == '__main__':
