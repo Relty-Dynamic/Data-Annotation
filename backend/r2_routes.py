@@ -21,6 +21,10 @@ class R2Media(ProjectMedia):
     def media_manifest(self, service, manifest):
         return self.service.media_manifest(service, manifest)
 
+    def direct_ready(self, project):
+        from .upload_playback import direct_ready
+        return direct_ready(project)
+
     def direct_session(self, project):
         from .upload_playback import direct_manifest
         return direct_manifest(self.service.provider, project)

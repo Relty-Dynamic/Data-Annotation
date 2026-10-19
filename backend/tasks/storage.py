@@ -96,12 +96,21 @@ class ProjectMedia:
                 for video in project['videos']]
 
     def resolve(self, source):
+        return self.resolve_many([source])[0]
+
+    def resolve_many(self, sources):
+        projects = {}
+        return [self._resolve(source, projects) for source in sources]
+
+    def _resolve(self, source, projects):
         if source.get('backend') != self.backend:
             raise HTTPException(422, '任务素材存储不匹配。')
         match = re.fullmatch(r'([0-9a-f]{32})/(v[0-9]{4})', str(source.get('key', '')))
         if not match:
             raise HTTPException(422, '任务素材编号无效。')
-        project = self.service.load(match[1])
+        if match[1] not in projects:
+            projects[match[1]] = self.service.load(match[1])
+        project = projects[match[1]]
         video = next((v for v in project['videos'] if v['id'] == match[2]), None)
         if not video:
             raise HTTPException(404, '任务视频不存在。')

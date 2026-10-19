@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import {cacheProgressText} from '../src/cacheProgress.ts';
 
-function mountPreparation(responses, complete = false) {
+function mountPreparation(responses, complete = false, download) {
   const slots = [], timers = new Map(), requests = [];
   let cursor = 0, dirty = false, effects = [], nextTimer = 0, result;
   const same = (left, right) => left?.length === right?.length && left?.every((value, index) => Object.is(value, right[index]));
@@ -56,14 +57,15 @@ function mountPreparation(responses, complete = false) {
       onProgress(1, 1);
     }};
     if (name === './preparationErrors') return {preparationFailureMessage: (_, detail) => detail};
-    if (name === './browserVideoCache') return {forgetBrowserVideoUrls() {}, prepareBrowserVideos() {
+    if (name === './cacheProgress.ts') return {cacheProgressText};
+    if (name === './browserVideoCache') return {forgetBrowserVideoUrls() {}, prepareBrowserVideos: download ?? (() => {
       throw new Error('This polling test does not request a browser video download');
-    }};
+    })};
     throw new Error('Unexpected hook import: ' + name);
   }, module, module.exports);
   const render = () => {
     cursor = 0;dirty = false;effects = [];
-    result = module.exports.usePreparation('fixture-project', 7);
+    result = module.exports.usePreparation('fixture-project', 7, Boolean(download));
     for (const effect of effects) effect();
   };
   const settle = async () => {
@@ -118,6 +120,26 @@ test('a failed clip keeps polling active peers, then partial stops without expos
     assert.equal(hook.result.status.ready, 2);
     assert.equal(hook.result.status.state, 'running');
   } finally {hook.close();}
+});
+
+test('browser progress uses verified bytes and never enters annotation before completion',async()=>{
+  const status={project_id:'fixture-project',state:'ready',total:1,ready:1,items:[{video_id:'clip',state:'ready'}]};
+  const manifest={version:'ready-version',videos:[{id:'clip'}]};
+  let release;const gate=new Promise(resolve=>release=resolve);
+  const hook=mountPreparation([status,manifest,{released:false}],true,async(_id,_manifest,_signal,_progress,activity)=>{
+    activity('download',1,4,{totalBytes:100,readyBytes:80,downloadedBytes:90,checkedBytes:80,
+      downloading:1,checking:1,saving:false,elapsedMs:1000,downloadMs:500,checkMs:500,saveMs:20});
+    await gate;
+  });
+  try{
+    await hook.settle();
+    assert.equal(hook.result.status.state,'running');assert.equal(hook.result.status.progress,80);
+    assert.equal(hook.result.manifest,null);assert.match(hook.result.status.detail,/1\/4/);
+    assert.equal(hook.requests.length,2,'readiness confirmation waits for all bytes');
+    release();await hook.settle();
+    assert.equal(hook.result.status.state,'ready');assert.equal(hook.requests[2].method,'POST');
+    assert.match(hook.requests[2].url,/browser-ready$/);
+  }finally{release();hook.close();}
 });
 
 test('refreshing an already ready project reads its session without restarting preparation', async () => {

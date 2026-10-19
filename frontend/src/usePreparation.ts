@@ -5,6 +5,7 @@ import { forgetSessionAssets, isSessionManifest, prepareSessionAssets } from './
 import type { SessionManifest } from './sessionAssets';
 import { preparationFailureMessage } from './preparationErrors';
 import {forgetBrowserVideoUrls, prepareBrowserVideos} from './browserVideoCache';
+import {cacheProgressText} from './cacheProgress.ts';
 
 export function usePreparation(projectId: string | undefined, cacheGeneration = 0, downloadVideos = false) {
   const projectRef = useRef(projectId);
@@ -64,9 +65,10 @@ export function usePreparation(projectId: string | undefined, cacheGeneration = 
           }
           if (downloadVideos && manifest.cache_location?.mode !== 'native') {
             try {
-              await prepareBrowserVideos(id, manifest, abort.signal, () => {}, (operation, ready, total) => {
-                publish({...status, state: 'running', checking: false, stage: 'browser', progress: total ? ready / total * 100 : 100,
-                  operation, detail: ({check:'正在校验本机缓存',reuse:'已复用本机缓存',download:'正在补齐缺失或失效缓存'})[operation] + ' ' + ready + ' / ' + total});
+              await prepareBrowserVideos(id, manifest, abort.signal, () => {}, (operation, ready, total, metrics) => {
+                publish({...status, state: 'running', checking: false, stage: 'browser',
+                  progress: metrics.totalBytes ? metrics.readyBytes / metrics.totalBytes * 100 : 100,
+                  operation, detail: cacheProgressText(ready,total,metrics)});
               });
               const confirmed = await authFetch('/api/projects/' + id + '/session/browser-ready', {
                 method: 'POST', cache: 'no-store', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]),

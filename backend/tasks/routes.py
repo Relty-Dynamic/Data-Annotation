@@ -379,10 +379,10 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
         service = workspace.service
         body = await request.json() if request.method in ('POST','PUT') and request.headers.get('content-type','').startswith('application/json') else {}
         if resource == 'projects' and not tail and request.method == 'GET':
-            return [workspace.public(user, task_id)]
+            return [workspace.public_project(project, task_id)]
         if resource == 'project':
             if not tail and request.method == 'GET':
-                return workspace.public(user, task_id)
+                return workspace.public_project(project, task_id)
             if tail == 'draft' and request.method == 'PUT':
                 return workspace.save(user, task_id, body)
             if tail == 'editing':
@@ -394,7 +394,7 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
             if tail == 'session/manifest' and request.method == 'GET':
                 return workspace.session_manifest(project, task_id)
             if tail == 'session/browser-ready' and request.method == 'POST':
-                return {'released': False} if workspace.direct_session(project) is not None else service.sessions.browser_ready(ident)
+                return {'released': False} if workspace.direct_ready(project) else service.sessions.browser_ready(ident)
             if tail in ('history', 'operations') and request.method == 'GET':
                 return []
         if resource == 'previews' and any(video['id'] == tail for video in project['videos']):

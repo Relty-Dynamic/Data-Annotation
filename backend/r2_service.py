@@ -250,8 +250,12 @@ class R2ProjectService(ProjectService):
         from .upload_playback import direct_manifest
         return direct_manifest(self.provider,self.load(ident))
 
+    def direct_ready(self, ident):
+        from .upload_playback import direct_ready
+        return direct_ready(self.load(ident))
+
     def session_status(self, ident):
-        if self.direct_session(ident) is not None:
+        if self.direct_ready(ident):
             from .session_cache import SessionCache
             result=SessionCache._initial(self.load(ident))
             result.update(state='ready',stage='ready',operation='reuse',ready=result['total'],queued=0,progress=100,
@@ -261,14 +265,14 @@ class R2ProjectService(ProjectService):
         return self.sessions.status(ident)
 
     def browser_ready(self, ident):
-        return {'released':False} if self.direct_session(ident) is not None else self.sessions.browser_ready(ident)
+        return {'released':False} if self.direct_ready(ident) else self.sessions.browser_ready(ident)
 
     def session_manifest(self, ident):
         direct=self.direct_session(ident)
         return direct if direct is not None else self.media_manifest(self,self.sessions.manifest(ident))
 
     def start_session(self, ident, **kwargs):
-        if self.direct_session(ident) is not None:
+        if self.direct_ready(ident):
             return self.session_status(ident)
         from .upload_playback import reference
         with self.lock:

@@ -56,6 +56,21 @@ class CollectionTaskTests(unittest.TestCase):
         layout=self.media.task_collection(records) if key else None
         return self.store.create_task(self.admin,body,collection_layout=layout)
 
+    def test_batch_resolution_loads_each_source_project_once_and_checks_each_video(self):
+        sources = [record['source'] for record in self.records]
+        with patch.object(self.media_service, 'load', wraps=self.media_service.load) as load, \
+             patch.object(self.media_service, 'media_source', wraps=self.media_service.media_source) as resolve:
+            result = self.media.resolve_many(sources)
+            self.assertEqual(len(result), 2)
+            self.assertEqual(load.call_count, 1)
+            self.assertEqual(resolve.call_count, 2)
+            self.media.resolve_many(sources)
+            self.assertEqual(load.call_count, 2, 'no cache may leak into the next request')
+        with self.assertRaises(HTTPException):
+            self.media.resolve_many([sources[0], {**sources[1], 'backend': 's3'}])
+        with self.assertRaises(HTTPException):
+            self.media.resolve_many([sources[0], {**sources[1], 'key': self.project['id']+'/v9999'}])
+
     def mutate(self,method,actor,task,**body):
         return getattr(self.store,method)(actor,task['id'],{'expected_revision':task['revision'],**body})
 
