@@ -2,7 +2,8 @@ import {authFetch} from './auth.ts';
 import {apiOrigin} from './apiOrigin.ts';
 
 export const helperStorageKey='datamark.public-upload.helper.'+apiOrigin;
-export type UploadReport={busy?:boolean;error?:string;selection?:{upload_kind?:'video'|'imu';name:string;capture_date:string;videos:string[];attachments:string[];ignored:string[]};job?:{upload_kind?:'video'|'imu';id?:string;state:string;prefix:string;progress:number;detail:string;clips_total?:number;clips_verified?:number;prediction_detail?:string;prediction?:{sha256:string;segments:number;needs_alignment_review:boolean}}};
+export type PredictionReport={sha256:string;segments:number;needs_alignment_review:boolean;job_id?:string;export_profile?:string;batch_status?:'complete'|'partial';validated_records?:number;total_records?:number;excluded_records?:{record_id:string;path:string;reason:string}[];excluded_record_ids?:string[];inherited_record_ids?:string[]};
+export type UploadReport={busy?:boolean;error?:string;selection?:{upload_kind?:'video'|'imu';name:string;capture_date:string;videos:string[];attachments:string[];ignored:string[]};job?:{upload_kind?:'video'|'imu';id?:string;state:string;prefix:string;progress:number;detail:string;clips_total?:number;clips_verified?:number;prediction_detail?:string;prediction?:PredictionReport}};
 export type HelperStatus={id:string;online:boolean;update_available?:boolean;platform:string;command:{id:string;action:string}|null;report:UploadReport};
 export async function bridgeRequest<T>(path:string,body?:unknown):Promise<T>{
  const response=await authFetch('/api/r2/'+path,{method:body===undefined?'GET':'POST',headers:body===undefined?undefined:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});

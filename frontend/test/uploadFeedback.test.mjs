@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {completedUpload,claimUploadCompletion,uploadStateName} from '../src/uploadFeedback.ts';
+import {completedUpload,claimUploadCompletion,uploadStateName,predictionMessage,predictionFailureReason} from '../src/uploadFeedback.ts';
 const complete=()=>({id:'helper-one',online:true,platform:'darwin',command:null,report:{busy:false,job:{id:'job-one',state:'ready',prefix:'daily/20261014/1014test',progress:100,detail:'published'}}});
 test('only a confirmed, idle and error-free published upload can trigger success',()=>{
  const helper=complete();assert.deepEqual(completedUpload(helper),{key:'helper-one:job-one',prefix:'daily/20261014/1014test'});
@@ -20,4 +20,12 @@ test('polling and reopening notify once per job while a different finished job c
 test('unpublished progress does not consume the later success notification',()=>{
  const seen=new Set(),helper=complete();assert.equal(claimUploadCompletion({...helper,report:{...helper.report,busy:true}},seen),null);assert.equal(seen.size,0);assert.ok(claimUploadCompletion(helper,seen));
  assert.equal(uploadStateName('validating'),'正在核验并发布');assert.equal(uploadStateName('ready'),'上传完成');assert.equal(uploadStateName('error'),'上传未完成');
+});
+test('partial prediction and inherited clocks are visible even after material upload succeeds',()=>{
+ const partial={sha256:'a'.repeat(64),segments:2,needs_alignment_review:true,batch_status:'partial',validated_records:2,total_records:3,inherited_record_ids:['short']};
+ const message=predictionMessage(partial);
+ assert.match(message,/部分姿势预标注/);assert.match(message,/2\/3/);assert.match(message,/未完成区间需人工标注/);assert.match(message,/同日其他记录/);assert.match(message,/人工复核/);
+ assert.equal(predictionFailureReason('inference_failed'),'IMU 推理未完成');
+ assert.equal(predictionMessage(undefined),'');
+ assert.equal(predictionMessage({sha256:'a',segments:2,needs_alignment_review:false}),'已携带姿势预标注。');
 });

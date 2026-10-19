@@ -50,7 +50,7 @@ def run(manager, job, user_id, service, can_upload):
         from .prediction_prepare import prepare_prediction
         current,result=prepare_prediction(target,service,selection['root'],selection['folder'],
             {role:options[role+'_device'].strip() for role in ('chest','thigh')},
-            progress=prediction_progress,cancel=check)
+            progress=prediction_progress,cancel=check,clock_group=options.get('clock_group') or None)
         selection['folder']=current
         update(prediction_result=result)
         return current['attachments']
