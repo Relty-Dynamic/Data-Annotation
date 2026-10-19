@@ -137,7 +137,20 @@ class ValidationDownloadTests(unittest.TestCase):
         self.assertEqual(uploads.status(job['id'],USER)['validation_bytes'],len(self.data))
         service.probe=lambda path:dict(codec='h264',duration_ms=1000)
         self.assertEqual(uploads.finish(job['id'],USER)['state'],'ready')
-        self.assertEqual(len(published),1)
+        self.assertEqual([key for key,_ in published],[
+            PREFIX+'/capture.identity.json', PREFIX+'/manifest.json'])
+        identity=json.loads(published[0][1])
+        self.assertEqual(identity,dict(prefix=PREFIX,collector_name='Collector',capture_date='20261015'))
+        manifest=json.loads(published[1][1])
+        self.assertEqual(manifest['prefix'],PREFIX)
+        self.assertEqual(len(manifest['files']),1)
+        self.assertEqual(manifest['files'][0]['name'],NAME)
+        self.assertEqual(manifest['files'][0]['size'],len(self.data))
+        self.assertEqual(manifest['files'][0]['sha256'],hashlib.sha256(self.data).hexdigest())
+        self.assertEqual(manifest['media_metadata'][NAME],dict(codec='h264',duration_ms=1000))
+        before=list(published)
+        self.assertEqual(uploads.finish(job['id'],USER)['state'],'ready')
+        self.assertEqual(published,before)
 
     def test_client_reports_read_bytes_while_no_whole_file_has_finished(self):
         from backend.r2_upload import RemoteCaptureTarget
