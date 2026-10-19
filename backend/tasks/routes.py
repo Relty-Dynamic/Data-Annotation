@@ -27,7 +27,14 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     if any(p.is_symlink() for p in (Path(state), *Path(state).parents)):
         raise ValueError('Task state must not contain symlinks')
     from .store import TaskStore, TaskError
-    store = TaskStore(state, artifact_store or FileArtifacts(artifacts))
+    rule_setting = os.getenv('DATAMARK_TASK_RULES_PUBLIC', '0').strip()
+    if rule_setting not in ('0', '1', ''):
+        raise ValueError('DATAMARK_TASK_RULES_PUBLIC must be 0 or 1')
+    if rule_setting == '1' and os.getenv('DATAMARK_SHARED_ACCOUNTS') == '1':
+        raise ValueError('The public host must remain the authoritative local rule store')
+    from .public_rules import PublicRules
+    public_rules = PublicRules() if rule_setting == '1' else None
+    store = TaskStore(state, artifact_store or FileArtifacts(artifacts), public_rules=bool(public_rules))
     workspace = Workspaces(Path(state) / 'workspaces', store, media or UnavailableMedia())
     if hasattr(workspace.media,'collection_outputs'):
         store.outputs = workspace.media.collection_outputs(store,workspace.service)
@@ -145,6 +152,10 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
 
     @router.get('/rules')
     def rules(request: Request):
+        if public_rules:
+            if not store.roles(actor(request))['roles']:
+                raise HTTPException(403, '需要任务角色。')
+            return public_rules.request(request)
         return store.list_rules(actor(request))
 
     @router.get('/axis-library')
@@ -160,10 +171,18 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
 
     @router.post('/rules')
     def publish(body: dict, request: Request):
+        if public_rules:
+            if 'leader' not in store.roles(actor(request))['roles']:
+                raise HTTPException(403, '缺少任务角色：leader')
+            return public_rules.request(request, 'POST', body=body)
         return store.publish_rule(actor(request), body)
 
     @router.delete('/rules/{rule_id}')
     def delete_rule(rule_id: str, request: Request):
+        if public_rules:
+            if actor(request).get('role') != 'admin':
+                raise HTTPException(403, '只有超级管理员可删除已发布规则')
+            return public_rules.request(request, 'DELETE', rule_id=rule_id)
         return store.delete_rule(actor(request), rule_id)
 
     @router.get('/videos')
@@ -266,7 +285,8 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
         roster = require_participants(request, body)
         members, collection_key = store.task_materials(user, body)
         layout = workspace.media.task_collection(members) if collection_key else None
-        return store.create_task(user, body, participants=roster, collection_layout=layout)
+        rule = public_rules.for_task(request, body.get('rule_id')) if public_rules else None
+        return store.create_task(user, body, participants=roster, collection_layout=layout, rule_snapshot=rule)
 
     @router.get('/items/{task_id}')
     def task(task_id: str, request: Request):

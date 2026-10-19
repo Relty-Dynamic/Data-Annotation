@@ -1,0 +1,10 @@
+# NAS calls only the existing public rule API; no public container is recreated.
+services:
+  web:
+    environment:
+      DATAMARK_TASK_RULES_PUBLIC: "1"
+    networks: [private, public-rules]
+networks:
+  public-rules:
+    external: true
+    name: datamark-public-setup_private

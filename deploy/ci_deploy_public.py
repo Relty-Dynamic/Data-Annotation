@@ -144,7 +144,7 @@ class PublicDeployment:
         return ['docker', 'compose', '--env-file', str(env),
                 *[item for name in files for item in ('-f', str(release / 'deploy' / name))]]
 
-    def validate(self, rendered, old):
+    def validate(self, rendered, old, *, expected_image=None):
         services = rendered['services']
         gateway = services['gateway']
         ports = gateway.get('ports', [])
@@ -153,7 +153,7 @@ class PublicDeployment:
         self.bind_ip = ports[0]['host_ip']
         for name in ('api', 'accounts'):
             service = services[name]
-            if service['image'] != self.image or service.get('ports'):
+            if service['image'] != (expected_image or self.image) or service.get('ports'):
                 raise DeploymentError('public image or private-service port configuration is invalid')
             planned = {(str(Path(v['source']).resolve()), v['target'], v.get('read_only', False))
                        for v in service.get('volumes', []) if v['type'] == 'bind'}
@@ -204,7 +204,7 @@ class PublicDeployment:
         if not (self.account_state / 'auth.sqlite3').is_file():
             raise DeploymentError('existing shared account database is missing')
 
-    def check_health(self):
+    def check_health(self, *, expected_image=None):
         args = ['curl', '--noproxy', '*', '--fail', '--silent', '--show-error', '--max-time', '20',
                 '--resolve', 'api-annotate.reltydynamic.com:8443:' + self.bind_ip]
         health = json.loads(self.run(*args, self.api_origin + '/api/health'))
@@ -221,7 +221,7 @@ class PublicDeployment:
                      "assert json.load(urllib.request.urlopen(r,timeout=10))['protocol']==1")
         for name in ('api', 'accounts'):
             item = self.inspect(name)
-            if item['Config']['Image'] != self.image or item['State'].get('Health', {}).get('Status') != 'healthy':
+            if item['Config']['Image'] != (expected_image or self.image) or item['State'].get('Health', {}).get('Status') != 'healthy':
                 raise DeploymentError('public service is not healthy on the tested image')
 
     def deploy(self):
@@ -235,6 +235,18 @@ class PublicDeployment:
         if not old_image.startswith('datamark-r2:') or old['accounts']['Config']['Image'] != old_image:
             raise DeploymentError('unexpected or inconsistent running public images')
         old_config = self.env.read_text()
+        preserve = [line.split('=', 1)[1] for line in old_config.splitlines()
+                    if line.startswith('DATAMARK_PUBLIC_SKIP_COMMIT=')]
+        if len(preserve) > 1 or (preserve and not re.fullmatch('[0-9a-f]{40}', preserve[0])):
+            raise DeploymentError('invalid exact-commit public preservation setting')
+        if preserve == [self.commit]:
+            # An explicit per-release choice to update NAS only. Verify the
+            # existing public service; never stop containers, change data or repoint it.
+            self.validate(json.loads(self.run(*self.compose(previous, self.env), 'config', '--format', 'json')),
+                          old, expected_image=old_image)
+            self.check_health(expected_image=old_image)
+            print(f'Public deployment intentionally skipped for {self.commit}; preserved {old_image}', flush=True)
+            return
         new_config = replace_image(old_config, old_image, self.image)
         release = prepare_release(self.home, self.commit, self.run)
         release_env = release / 'runtime.conf'

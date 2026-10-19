@@ -34,6 +34,7 @@ COPY backend /app/backend
 COPY deploy/web_healthcheck.py /app/deploy/web_healthcheck.py
 COPY deploy/ci-deploy-intranet.sh /app/deploy/ci-deploy-intranet.sh
 COPY deploy/ci_deploy_public.py /app/deploy/ci_deploy_public.py
+COPY deploy/prepare_public_rules.py /app/deploy/prepare_public_rules.py
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 RUN chmod -R a+rX /app
 USER 1000:1000

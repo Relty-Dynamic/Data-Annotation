@@ -66,6 +66,18 @@ previous="$(readlink -f "$current")"
 [[ "$previous" == "$deploy_home"/releases/* && -f "$previous/deploy/compose.intranet.yaml" ]] || die 'current symlink points outside a valid release'
 compose_files=(-f "$deploy_home/releases/$commit/deploy/compose.intranet.yaml")
 previous_compose_files=(-f "$previous/deploy/compose.intranet.yaml")
+public_rules="$(sed -n 's/^DATAMARK_TASK_RULES_PUBLIC=//p' "$env_file")"
+case "$public_rules" in
+    ''|0) ;;
+    1)
+        compose_files+=(-f "$deploy_home/releases/$commit/deploy/compose.task-rules-intranet.yaml")
+        if [[ -f "$previous/deploy/compose.task-rules-intranet.yaml" ]]; then
+            previous_compose_files+=(-f "$previous/deploy/compose.task-rules-intranet.yaml")
+        fi
+        docker network inspect datamark-public-setup_private >/dev/null || die 'existing public private network is missing'
+        ;;
+    *) die 'invalid persistent public-rule opt-in' ;;
+esac
 previous_image="$(docker inspect datamark-intranet-web-1 --format '{{.Config.Image}}')"
 [[ "$previous_image" == datamark-web:* ]] || die 'running web image is unexpected'
 previous_tag="${previous_image#datamark-web:}"

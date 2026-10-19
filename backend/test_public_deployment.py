@@ -168,6 +168,30 @@ class PublicDeploymentTests(unittest.TestCase):
         for config in ('', self.config + self.config, self.config.replace(OLD, NEW)):
             with self.assertRaises(DeploymentError): replace_image(config, 'datamark-r2:' + OLD, 'new')
 
+    def test_exact_commit_preservation_only_checks_existing_public_service(self):
+        (self.home / 'runtime.conf').write_text(self.config + 'DATAMARK_PUBLIC_SKIP_COMMIT=' + NEW + '\n')
+        for service in ('api', 'accounts'):
+            self.rendered['services'][service]['image'] = 'datamark-r2:' + OLD
+        before = self.live.read_bytes()
+        self.deployment.deploy()
+        self.assertEqual(before, self.live.read_bytes())
+        self.assertEqual(self.previous, (self.home / 'current').resolve())
+        self.assertEqual('datamark-r2:' + OLD, self.items['api']['Config']['Image'])
+        self.assertFalse(any(c[:2] == ('docker', 'stop') or 'up' in c for c in self.calls))
+        self.assertFalse((self.home / 'backups').exists())
+
+    def test_preservation_for_another_commit_does_not_disable_normal_deployment(self):
+        (self.home / 'runtime.conf').write_text(self.config + 'DATAMARK_PUBLIC_SKIP_COMMIT=' + OLD + '\n')
+        self.deployment.deploy()
+        self.assertEqual('datamark-r2:' + NEW, self.items['api']['Config']['Image'])
+
+    def test_invalid_or_duplicate_public_preservation_rejected_before_service_changes(self):
+        for setting in ('yes', NEW + '\nDATAMARK_PUBLIC_SKIP_COMMIT=' + OLD):
+            (self.home / 'runtime.conf').write_text(self.config + 'DATAMARK_PUBLIC_SKIP_COMMIT=' + setting + '\n')
+            with self.assertRaises(DeploymentError):
+                self.deployment.deploy()
+            self.assertFalse(any(c[:2] == ('docker', 'stop') or 'up' in c for c in self.calls))
+
     def test_exact_remote_and_clean_tracked_source_required(self):
         for remote, dirty in ((OLD, ''), (NEW, ' M Jenkinsfile'), (NEW, '')):
             calls = []

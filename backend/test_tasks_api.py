@@ -546,6 +546,51 @@ class TaskHostTests(unittest.TestCase):
                     self.auth.set_active(self.users['lead']['id'], False)
                     self.assertEqual(client.get('/api/tasks/me').status_code, 401)
 
+    def test_nas_uses_existing_public_rule_api_with_its_own_login_and_task_snapshots(self):
+        import httpx
+        from backend.tasks.public_rules import PublicRules
+        old_app, old_client = self.host()
+        old_task = self.initialize(old_app, old_client)
+        project = old_app.state.service.load(self.project['id'])
+        project['_sources']['v0001']['duration_ms'] = 10000
+        project['_storage_version'] = 3
+        old_app.state.service.save(project)
+        public_state = self.root / 'public-tasks'
+        with patch.dict('os.environ', {'DATAMARK_PUBLIC_ORIGIN': 'https://web.example.com',
+                'DATAMARK_PUBLIC_API_ORIGIN': 'https://api.example.com', 'DATAMARK_SHARED_ACCOUNTS': '0',
+                'DATAMARK_TASKS_STATE': str(public_state)}):
+            with TestClient(account_app(self.root), base_url='http://accounts:8766') as bridge:
+                with TestClient(public_app(accounts=AccountClient(bridge)), base_url='https://api.example.com') as public:
+                    public_headers = self.login(public, 'admin', public=True)
+                    rule = self.request(public, 'POST', '/rules', {'name': 'public original', 'task_type': 'public-type',
+                        'axes': [{'id': 'posture', 'name': '姿势', 'mode': 'state', 'labels': ['坐']}]}, public_headers)
+                    def forward(request):
+                        return public.request(request.method, request.url.path, content=request.content,
+                                              headers=dict(request.headers))
+                    proxy = PublicRules(transport=httpx.MockTransport(forward))
+                    with patch.dict('os.environ', {'DATAMARK_PUBLIC_ORIGIN': '', 'DATAMARK_PUBLIC_API_ORIGIN': '',
+                            'DATAMARK_TASKS_STATE': str(self.state), 'DATAMARK_TASK_RULES_PUBLIC': '1'}), \
+                         patch('backend.tasks.public_rules.PublicRules', return_value=proxy), \
+                         patch('backend.tasks.public_rules.PUBLIC_HOST', 'api.example.com'), \
+                         patch('backend.tasks.public_rules.PUBLIC_ORIGIN', 'https://web.example.com'):
+                        _, nas = self.host()
+                        nas_headers = self.login(nas, 'admin')
+                        self.assertEqual([rule], self.request(nas, 'GET', '/rules'))
+                        self.assertEqual(old_task['rule'], self.request(nas, 'GET', '/items/' + old_task['id'])['rule'])
+                        task = self.request(nas, 'POST', '/items', {'video_id': 'clip', 'rule_id': rule['id'],
+                            'deadline': '2026-10-26'}, nas_headers)
+                        self.request(public, 'GET', '/items/' + task['id'], expected=404)
+                        published = self.request(nas, 'POST', '/rules', {'name': 'from NAS', 'task_type': 'another-type',
+                            'axes': [{'id': 'posture', 'name': '姿势', 'mode': 'state', 'labels': ['站']}]}, nas_headers)
+                        self.assertIn(published, self.request(public, 'GET', '/rules'))
+                        self.request(nas, 'DELETE', '/rules/' + published['id'], headers=nas_headers)
+                        self.assertEqual([rule], self.request(public, 'GET', '/rules'))
+                        self.request(public, 'DELETE', '/rules/' + rule['id'], headers=public_headers)
+                        self.assertEqual([], self.request(nas, 'GET', '/rules'))
+                        self.assertEqual(rule, self.request(nas, 'GET', '/items/' + task['id'])['rule'])
+                        self.request(nas, 'POST', '/items', {'video_id': 'clip', 'rule_id': rule['id'],
+                            'rule_snapshot': rule, 'deadline': '2026-10-26'}, nas_headers, expected=409)
+
     def test_full_http_review_acceptance_delivery_and_role_revocation(self):
         app, client = self.host()
         task = self.initialize(app, client)

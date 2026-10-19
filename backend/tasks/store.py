@@ -33,9 +33,10 @@ def uid():
 
 
 class TaskStore:
-    def __init__(self, root, artifacts):
+    def __init__(self, root, artifacts, *, public_rules=False):
         Path(root).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = Path(root) / 'tasks.sqlite3'
+        self.public_rules = public_rules
         self.artifacts = artifacts
         self.outputs = None
         with self.db() as db:
@@ -120,12 +121,16 @@ class TaskStore:
             return [{'user_id':r[0], 'roles':json.loads(r[1])} for r in db.execute('SELECT user_id,body FROM roles')]
 
     def list_rules(self, actor):
+        if self.public_rules:
+            raise TaskError(503, '共用规则须通过公网规则接口读取')
         with self.db() as db:
             if not self._roles(db, actor):
                 raise TaskError(403, '需要任务角色')
             return [json.loads(r[0]) for r in db.execute('SELECT body FROM rules WHERE id NOT IN (SELECT id FROM deleted_rules)')]
 
     def delete_rule(self, actor, rule_id):
+        if self.public_rules:
+            raise TaskError(503, '共用规则须通过公网规则接口删除')
         if actor.get('role') != 'admin':
             raise TaskError(403, '只有超级管理员可删除已发布规则')
         with self.db() as db:
@@ -138,6 +143,8 @@ class TaskStore:
         return {'id': rule_id, 'deleted': True}
 
     def publish_rule(self, actor, body):
+        if self.public_rules:
+            raise TaskError(503, '共用规则须通过公网规则接口发布')
         with self.db() as db:
             self._require(db, actor, 'leader')
             axes = body.get('axes')
@@ -359,7 +366,7 @@ class TaskStore:
                 'video_count': len(members), 'videos': capture['videos'],
                 'quality': 'passed' if all(item['quality'] == 'passed' for item in members) else 'unknown'}
 
-    def create_task(self, actor, body, *, participants=None, collection_layout=None):
+    def create_task(self, actor, body, *, participants=None, collection_layout=None, rule_snapshot=None):
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._require(db, actor, 'leader')
@@ -376,9 +383,19 @@ class TaskStore:
                     raise TaskError(409, '采集素材信息已变化，请重新创建任务')
                 members = [current[item['id']] for item in layout['videos']]
                 video = members[0]
-            rule = self._read(db, 'rules', body.get('rule_id'))
-            if db.execute('SELECT 1 FROM deleted_rules WHERE id=?', (rule['id'],)).fetchone():
-                raise TaskError(409, '规则已删除，请选择其他已发布规则')
+            if self.public_rules:
+                if not isinstance(rule_snapshot, dict) or rule_snapshot.get('id') != body.get('rule_id'):
+                    raise TaskError(503, '未取得当前公网规则，不能创建任务')
+                rule = json.loads(json.dumps(rule_snapshot))
+                saved = db.execute('SELECT body FROM rules WHERE id=?', (rule['id'],)).fetchone()
+                if saved and json.loads(saved[0]) != rule:
+                    raise TaskError(409, '规则编号与已有历史定义冲突，请联系管理员')
+                if not saved:
+                    self._save(db, 'rules', rule, True)
+            else:
+                rule = self._read(db, 'rules', body.get('rule_id'))
+                if db.execute('SELECT 1 FROM deleted_rules WHERE id=?', (rule['id'],)).fetchone():
+                    raise TaskError(409, '规则已删除，请选择其他已发布规则')
             annotators = body.get('annotator_ids', [])
             reviewer = body.get('reviewer_id')
             if not isinstance(annotators, list) or any(not isinstance(u, str) or not u for u in annotators) or len(annotators) > 2 or len(set(annotators)) != len(annotators) or (reviewer is not None and not isinstance(reviewer, str)):
