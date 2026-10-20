@@ -86,10 +86,10 @@ class CollectionOutputTests(unittest.TestCase):
         self.outputs.flush(task['id'])
         return result
 
-    def test_two_people_rework_versions_approved_final_and_sibling_csv(self):
+    def test_two_people_rework_versions_approved_final_directory_contains_json_and_csv(self):
         task=self.mutate('submit',self.a,self.task,annotations=self.annotation('坐'))
         original=self.data('张三/v1/posture.timeline.json')
-        self.assertNotIn(self.prefix+'/timeline/finally/posture.timeline.json',self.provider.objects)
+        self.assertNotIn(self.prefix+'/timeline/final/posture.timeline.json',self.provider.objects)
         task=self.mutate('submit',self.b,task,annotations=self.annotation())
         self.assertEqual('李四',json.loads(self.data('李四/v1/posture.timeline.json'))['task_result']['annotator_name'])
         task=self.mutate('start_review',self.lead,task)
@@ -105,13 +105,13 @@ class CollectionOutputTests(unittest.TestCase):
         self.assertEqual(json.loads(self.data('张三/v2/food.timeline.json'))['axis'],'food')
         task=self.mutate('start_review',self.lead,task)
         task=self.mutate('review',self.lead,task,action='pass',resolved_issue_ids=[issue['id'] for issue in task['issues']])
-        self.assertNotIn(self.prefix+'/timeline/finally/posture.timeline.json',self.provider.objects)
+        self.assertNotIn(self.prefix+'/timeline/final/posture.timeline.json',self.provider.objects)
         task=self.mutate('accept',self.lead,task)
-        final=json.loads(self.data('finally/posture.timeline.json'))
+        final=json.loads(self.data('final/posture.timeline.json'))
         self.assertEqual(final['segments'],revised['segments'])
         self.assertEqual(final['task_result']['accepted_by'],'lead')
         delivery=self.deliver(task)
-        rows=list(csv.DictReader(io.StringIO(self.data('delivery-'+delivery['id']+'.csv').decode('utf-8-sig'))))
+        rows=list(csv.DictReader(io.StringIO(self.data('final/delivery-'+delivery['id']+'.csv').decode('utf-8-sig'))))
         self.assertEqual(len(rows),1)
         self.assertEqual(rows[0]['accepted_by_name'],'组长')
         self.assertEqual(set(rows[0]['assigned_annotator_names'].split('|')),{'张三','李四'})
@@ -120,6 +120,234 @@ class CollectionOutputTests(unittest.TestCase):
         with self.store.db() as db:self.assertEqual(self.outputs.status(db,task['id'])['state'],'ready')
         self.assertTrue(any(key.startswith('tasks/tasks/'+task['id']+'/final/') for key in self.provider.objects))
         self.assertIn('tasks/deliveries/'+delivery['id']+'.csv',self.provider.objects)
+        self.assertFalse(any('/timeline/finally/' in key for key in self.provider.objects))
+        self.assertNotIn(self.prefix+'/timeline/delivery-'+delivery['id']+'.csv',self.provider.objects)
+
+    def legacy_output_layout(self):
+        """Model an existing database/bucket written by the previous release."""
+        prefix = self.prefix+'/timeline'
+        for key in list(self.provider.objects):
+            if key.startswith(prefix+'/final/'):
+                name = key.removeprefix(prefix+'/final/')
+                legacy = prefix+'/'+name if name.endswith('.csv') else prefix+'/finally/'+name
+                self.provider.objects[legacy] = self.provider.objects.pop(key)
+        with self.store.db() as db:
+            for ident,kind,raw in db.execute(
+                    "SELECT id,kind,body FROM capture_output_jobs WHERE kind IN ('final','delivery')").fetchall():
+                body = json.loads(raw)
+                body['directory'] = prefix+'/finally' if kind == 'final' else prefix
+                db.execute('UPDATE capture_output_jobs SET body=? WHERE id=?',(json.dumps(body),ident))
+
+    def test_legacy_ready_results_requeue_without_writes_and_retry_same_payloads(self):
+        task = self.approved()
+        delivery = self.deliver(task)
+        self.legacy_output_layout()
+        original = copy.deepcopy(self.provider.objects)
+        with self.store.db() as db:
+            versions = db.execute('SELECT * FROM capture_output_people').fetchall()
+            audit = db.execute('SELECT * FROM audit').fetchall()
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(self.provider.objects,original)
+        with self.store.db() as db:
+            self.assertEqual(restarted.status(db,task['id'])['state'],'pending')
+        put = self.provider.put
+        def interrupted(key,payload,**options):
+            if '/timeline/final/' in key and key.endswith('.csv'):
+                raise HTTPException(503,'CSV unavailable fixture')
+            return put(key,payload,**options)
+        with patch.object(self.provider,'put',side_effect=interrupted):
+            self.assertEqual(restarted.flush(task['id'])['state'],'error')
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.backfill(self.lead,task['id'],self.names)['state'],'ready')
+        for key,record in original.items():
+            self.assertEqual(self.provider.objects[key],record)
+        for name in ('scene.timeline.json','posture.timeline.json','food.timeline.json'):
+            self.assertEqual(self.data('final/'+name),self.data('finally/'+name))
+        self.assertEqual(self.data('final/delivery-'+delivery['id']+'.csv'),
+                         self.data('delivery-'+delivery['id']+'.csv'))
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT * FROM capture_output_people').fetchall(),versions)
+            self.assertEqual(db.execute('SELECT * FROM audit').fetchall(),audit)
+        generation = self.provider.generation
+        self.assertEqual(CollectionOutputs(self.store,self.media,self.editor).flush(task['id'])['state'],'ready')
+        self.assertEqual(self.provider.generation,generation)
+
+    def test_legacy_failed_final_retargets_and_keeps_external_old_file(self):
+        task = self.approved()
+        self.legacy_output_layout()
+        old = self.prefix+'/timeline/finally/posture.timeline.json'
+        self.provider.objects[old] = (b'{"external":"keep old path"}','external-version')
+        with self.store.db() as db:
+            db.execute("UPDATE capture_output_jobs SET state='error',error='old conflict' WHERE kind='final'")
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.flush(task['id'])['state'],'ready')
+        self.assertEqual(self.provider.get(old),b'{"external":"keep old path"}')
+        self.assertEqual(json.loads(self.data('final/posture.timeline.json'))['segments'][0]['label'],'站')
+
+    def test_legacy_old_task_retry_preserves_latest_approved_result(self):
+        old = self.approved()
+        rule = self.store.publish_rule(self.lead,{'name':'另一任务','task_type':'another',
+            'axes':[{'id':'posture','name':'姿势','mode':'state','labels':['站','坐']}]})
+        self.task = self.store.create_task(self.lead,{**self.body,'rule_id':rule['id']},
+                                           collection_layout=old['collection'])
+        changed = {'posture':[{'id':'new','start_ms':2000,'end_ms':2500,'label':'坐','lane':0,'kind':'interval'}]}
+        # Equal timestamps still have a deterministic insertion order.
+        with patch.object(self,'annotation',return_value=changed), \
+                patch('backend.tasks.store.stamp',return_value=old['accepted_at']):
+            newer = self.approved()
+        latest = self.data('final/posture.timeline.json')
+        self.legacy_output_layout()
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.flush(old['id'])['state'],'ready')
+        self.assertEqual(self.data('final/posture.timeline.json'),latest)
+        self.assertEqual(json.loads(latest)['task_result']['final_version_id'],newer['final_version_id'])
+        self.assertEqual(self.data('finally/posture.timeline.json'),latest)
+        for name in ('scene.timeline.json','food.timeline.json'):
+            self.assertEqual(self.data('final/'+name),self.data('finally/'+name))
+
+    def test_deleted_newer_task_does_not_block_or_contribute_to_migration(self):
+        old = self.approved()
+        original = self.data('final/posture.timeline.json')
+        rule = self.store.publish_rule(self.lead,{'name':'另一任务','task_type':'another',
+            'axes':[{'id':'posture','name':'姿势','mode':'state','labels':['站','坐']}]})
+        self.task = self.store.create_task(self.lead,{**self.body,'rule_id':rule['id']},
+                                           collection_layout=old['collection'])
+        changed = {'posture':[{'id':'new','start_ms':2000,'end_ms':2500,'label':'坐','lane':0,'kind':'interval'}]}
+        with patch.object(self,'annotation',return_value=changed):
+            newer = self.approved()
+        self.legacy_output_layout()
+        legacy = copy.deepcopy(self.provider.objects)
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        put = self.provider.put
+        def interrupted(key,payload,**options):
+            if key.endswith('/final/food.timeline.json'):
+                raise HTTPException(503,'migration interrupted before marker')
+            return put(key,payload,**options)
+        with patch.object(self.provider,'put',side_effect=interrupted):
+            self.assertEqual(restarted.flush(old['id'])['state'],'error')
+        # Deletion after partial publication must be honored on retry. A
+        # journaled partial file is not a completed newer final snapshot.
+        self.store.delete_task(self.lead,newer['id'],{'expected_revision':newer['revision']})
+        self.assertEqual(restarted.flush(old['id'])['state'],'ready')
+        self.assertEqual(self.data('final/posture.timeline.json'),original)
+        for key,record in legacy.items():
+            self.assertEqual(self.provider.objects[key],record)
+        self.assertEqual(restarted.flush(newer['id'])['state'],'error')
+
+    def another_approved(self, original, kind='later', axes=None):
+        axes = axes or [{'id':'scene','name':'场景','mode':'state','labels':['室内']},
+                    {'id':'posture','name':'姿势','mode':'state','labels':['站','坐']},
+                    {'id':'food','name':'饮食','mode':'state','labels':['喝水']}]
+        rule = self.store.publish_rule(self.lead,{'name':'后续任务','task_type':kind,'axes':axes})
+        self.task = self.store.create_task(self.lead,{**self.body,'rule_id':rule['id']},
+                                           collection_layout=original['collection'])
+        changed = {key:value for key,value in self.annotation('坐').items() if key in {axis['id'] for axis in axes}}
+        with patch.object(self,'annotation',return_value=changed):
+            return self.approved()
+
+    def test_interrupted_migration_can_recover_after_newer_task_is_accepted(self):
+        old = self.approved()
+        self.legacy_output_layout()
+        originals = copy.deepcopy(self.provider.objects)
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        put = self.provider.put
+        def fail_last_file(key,payload,**options):
+            if key.endswith('/final/food.timeline.json'):
+                raise HTTPException(503,'last JSON interrupted')
+            return put(key,payload,**options)
+        with patch.object(self.provider,'put',side_effect=fail_last_file):
+            self.assertEqual(restarted.flush(old['id'])['state'],'error')
+        partial = self.data('final/posture.timeline.json')
+        self.assertNotIn(self.prefix+'/timeline/final/.datamark-final.json',self.provider.objects)
+        newer = self.another_approved(old)
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.flush(old['id'])['state'],'ready')
+        self.assertEqual(restarted.flush(newer['id'])['state'],'ready')
+        self.assertEqual(json.loads(self.data('final/posture.timeline.json'))['segments'][0]['label'],'坐')
+        for key,record in originals.items():
+            self.assertEqual(self.provider.objects[key],record)
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM capture_output_writes').fetchone()[0],0)
+            ident,raw = db.execute("SELECT id,body FROM capture_output_jobs WHERE kind='final' ORDER BY rowid DESC LIMIT 1").fetchone()
+            db.execute("UPDATE capture_output_jobs SET state='pending' WHERE id=?",(ident,))
+        # Once completion is verified, an external rollback to old platform
+        # bytes must not be mistaken for an unfinished platform write.
+        key = self.prefix+'/timeline/final/posture.timeline.json'
+        self.provider.put(key,partial,etag=self.provider.objects[key][1])
+        self.assertEqual(restarted.flush(newer['id'])['state'],'error')
+        self.assertEqual(self.provider.get(key),partial)
+
+    def test_obsolete_personal_version_conflict_does_not_block_latest_migration(self):
+        old = self.approved()
+        newer = self.another_approved(old)
+        self.legacy_output_layout()
+        latest = self.data('finally/posture.timeline.json')
+        with self.store.db() as db:
+            db.execute("""UPDATE capture_output_jobs SET state='error',error='old conflict'
+                WHERE kind='submission' AND id IN
+                (SELECT job_id FROM capture_output_links WHERE task_id=?)""",(old['id'],))
+        key = self.prefix+'/timeline/张三/v1/posture.timeline.json'
+        self.provider.objects[key] = (b'unknown old version','external')
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.flush(newer['id'])['state'],'ready')
+        self.assertEqual(self.data('final/posture.timeline.json'),latest)
+        self.assertEqual(self.provider.get(key),b'unknown old version')
+
+    def test_successful_other_axis_does_not_discard_partial_write_recovery(self):
+        old = self.approved()
+        put = self.provider.put
+        def interrupted(key,payload,**options):
+            if key.endswith('/final/food.timeline.json'):
+                raise HTTPException(503,'partial multi-axis update')
+            return put(key,payload,**options)
+        with patch.object(self.provider,'put',side_effect=interrupted):
+            self.another_approved(old)
+        self.another_approved(old,kind='posture-only',
+            axes=[{'id':'posture','name':'姿势','mode':'state','labels':['站','坐']}])
+        key = self.prefix+'/timeline/final/scene.timeline.json'
+        with self.store.db() as db:
+            self.assertGreater(db.execute('SELECT COUNT(*) FROM capture_output_writes WHERE key=?',(key,)).fetchone()[0],0)
+        latest = self.another_approved(old,kind='scene-only',
+            axes=[{'id':'scene','name':'场景','mode':'state','labels':['室内']}])
+        with self.store.db() as db:
+            self.assertEqual(self.outputs.status(db,latest['id'])['state'],'ready')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM capture_output_writes WHERE key=?',(key,)).fetchone()[0],0)
+        self.assertEqual(json.loads(self.provider.get(key))['task_result']['task_id'],latest['id'])
+
+    def test_reserved_person_names_do_not_share_final_directory(self):
+        self.names.update(a='FiNaL',b='finally')
+        task = self.approved()
+        self.deliver(task)
+        with self.store.db() as db:
+            people = db.execute('SELECT folder FROM capture_output_people').fetchall()
+            self.assertEqual(self.outputs.status(db,task['id'])['state'],'ready')
+        self.assertEqual(len(people),2)
+        for folder, in people:
+            self.assertNotIn(folder.casefold(),('final','finally'))
+            self.assertIn(self.prefix+'/timeline/'+folder+'/v1/posture.timeline.json',self.provider.objects)
+        self.assertIn(self.prefix+'/timeline/final/posture.timeline.json',self.provider.objects)
+
+    def test_historical_person_bound_to_final_blocks_mixed_result_writes(self):
+        with self.store.db() as db:
+            db.execute('INSERT INTO capture_output_people VALUES (?,?,?,?,0)',
+                       (self.prefix+'/timeline','a','final','final'))
+        task = self.approved()
+        self.assertEqual(task['status'],'accepted')
+        self.assertIn(self.prefix+'/timeline/final/v1/posture.timeline.json',self.provider.objects)
+        self.assertNotIn(self.prefix+'/timeline/final/posture.timeline.json',self.provider.objects)
+        with self.store.db() as db:
+            status = self.outputs.status(db,task['id'])
+        self.assertEqual(status['state'],'error')
+        self.assertIn('历史标注员',status['detail'])
+
+    def test_unknown_csv_in_final_is_not_overwritten(self):
+        task = self.approved()
+        result = self.store.deliver(self.lead,{'task_ids':[task['id']],
+            'expected_revisions':{task['id']:task['revision']},'request_id':'unknown-csv'},output_names=self.names)
+        key = self.prefix+'/timeline/final/delivery-'+result['id']+'.csv'
+        self.provider.put(key,b'external csv',create=True)
+        self.assertEqual(self.outputs.flush(task['id'])['state'],'error')
+        self.assertEqual(self.provider.get(key),b'external csv')
 
     def test_failed_s3_write_preserves_submission_and_retry_reuses_version(self):
         original=self.provider.put_if_absent
@@ -151,7 +379,7 @@ class CollectionOutputTests(unittest.TestCase):
     def test_empty_final_has_attributable_csv_and_can_backfill_after_restart(self):
         task=self.approved(empty=True)
         delivery=self.deliver(task)
-        rows=list(csv.DictReader(io.StringIO(self.data('delivery-'+delivery['id']+'.csv').decode('utf-8-sig'))))
+        rows=list(csv.DictReader(io.StringIO(self.data('final/delivery-'+delivery['id']+'.csv').decode('utf-8-sig'))))
         self.assertEqual(len(rows),1)
         self.assertEqual(rows[0]['task_id'],task['id'])
         self.assertEqual(rows[0]['accepted_by_name'],'组长')
@@ -176,8 +404,8 @@ class CollectionOutputTests(unittest.TestCase):
         status=self.outputs.backfill(self.lead,task['id'],{})
         self.assertEqual(status['state'],'ready')
         self.assertIn(self.prefix+'/timeline/张三/v1/posture.timeline.json',self.provider.objects)
-        self.assertIn(self.prefix+'/timeline/finally/posture.timeline.json',self.provider.objects)
-        self.assertIn(self.prefix+'/timeline/delivery-'+delivery['id']+'.csv',self.provider.objects)
+        self.assertIn(self.prefix+'/timeline/final/posture.timeline.json',self.provider.objects)
+        self.assertIn(self.prefix+'/timeline/final/delivery-'+delivery['id']+'.csv',self.provider.objects)
         for key,record in immutable.items():self.assertEqual(self.provider.objects[key],record)
 
     def test_unknown_final_file_is_preserved_and_pending_job_survives_restart(self):
@@ -185,7 +413,7 @@ class CollectionOutputTests(unittest.TestCase):
         task=self.mutate('submit',self.b,task,annotations=self.annotation())
         task=self.mutate('start_review',self.lead,task)
         task=self.mutate('review',self.lead,task,action='pass')
-        external=self.prefix+'/timeline/finally/posture.timeline.json'
+        external=self.prefix+'/timeline/final/posture.timeline.json'
         self.provider.put(external,b'{"external":"preserve"}',create=True)
         task=self.mutate('accept',self.lead,task)
         self.assertEqual(task['status'],'accepted')
@@ -214,15 +442,15 @@ class CollectionOutputTests(unittest.TestCase):
         task=self.mutate('review',self.lead,task,action='pass')
         original=self.provider.put
         def interrupted(key,payload,**options):
-            if key.endswith('/finally/posture.timeline.json'):raise HTTPException(503,'interrupted fixture')
+            if key.endswith('/final/posture.timeline.json'):raise HTTPException(503,'interrupted fixture')
             return original(key,payload,**options)
         with patch.object(self.provider,'put',side_effect=interrupted):
             task=self.mutate('accept',self.lead,task)
-        first=self.data('finally/scene.timeline.json')
-        self.assertNotIn(self.prefix+'/timeline/finally/.datamark-final.json',self.provider.objects)
+        first=self.data('final/scene.timeline.json')
+        self.assertNotIn(self.prefix+'/timeline/final/.datamark-final.json',self.provider.objects)
         with self.store.db() as db:self.assertEqual(self.outputs.status(db,task['id'])['state'],'error')
         restarted=CollectionOutputs(self.store,self.media,self.editor)
         self.assertEqual(restarted.flush(task['id'])['state'],'ready')
-        self.assertEqual(self.data('finally/scene.timeline.json'),first)
-        completed=json.loads(self.data('finally/.datamark-final.json'))
+        self.assertEqual(self.data('final/scene.timeline.json'),first)
+        completed=json.loads(self.data('final/.datamark-final.json'))
         self.assertEqual(set(completed['files']),{'scene.timeline.json','posture.timeline.json','food.timeline.json'})

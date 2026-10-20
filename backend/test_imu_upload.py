@@ -74,11 +74,14 @@ class ImuPublicationTests(unittest.TestCase):
     def test_video_first_then_imu_preserves_project_identity_and_timeline(self):
         self.publish(self.fpv, [self.video])
         original = self.service.collection(PREFIX, download=False)
-        timeline = PREFIX + '/timeline/finally/posture.timeline.json'
-        self.provider.put_if_absent(timeline, b'explicit-human-annotation-fixture')
+        timelines = [PREFIX + '/timeline/' + folder + '/posture.timeline.json'
+                     for folder in ('final', 'finally')]
+        for timeline in timelines:
+            self.provider.put_if_absent(timeline, b'explicit-human-annotation-fixture')
         self.publish(self.imu, [self.raw])
         self.assertEqual(self.service.collection(PREFIX, download=False), original)
-        self.assertEqual(self.provider.get(timeline), b'explicit-human-annotation-fixture')
+        for timeline in timelines:
+            self.assertEqual(self.provider.get(timeline), b'explicit-human-annotation-fixture')
 
     def test_complete_capture_and_matching_imu_can_coexist(self):
         full = {**self.fpv, 'attachments': self.imu['attachments']}
