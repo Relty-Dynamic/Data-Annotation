@@ -13,7 +13,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 
-SPEC = importlib.util.spec_from_file_location("deploy_worker", Path(__file__).with_name("deploy_worker.py"))
+DEPLOY = Path(__file__).resolve().parents[1] / "deploy"
+SPEC = importlib.util.spec_from_file_location("deploy_worker", DEPLOY / "deploy_worker.py")
 assert SPEC is not None and SPEC.loader is not None
 deployment = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deployment)
@@ -242,7 +243,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(dict(os.environ), original)
 
     def test_worker_parallelism_stays_within_the_existing_container_budget(self) -> None:
-        compose = Path(__file__).with_name("compose.yaml").read_text(encoding="utf-8")
+        compose = (DEPLOY / "compose.yaml").read_text(encoding="utf-8")
         self.assertIn('      DATAMARK_WORKER_SLOTS: "2"\n', compose)
         self.assertIn('      DATAMARK_FFMPEG_ENCODER_THREADS: "2"\n', compose)
         self.assertIn('    cpus: 4.0\n', compose)

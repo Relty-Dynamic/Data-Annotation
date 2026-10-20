@@ -5,6 +5,7 @@ import copy
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from backend import test_auth, test_track_customization
 from backend.auth import AuthStore
@@ -225,6 +226,83 @@ class LibraryPersistenceTests(unittest.TestCase):
     def initialize(self):
         project = self.service.open_path(str(self.source))
         return self.service.initialize_track_library(project["id"], self.library().defaults())
+
+    def legacy_root_batch(self, version=3):
+        project = self.initialize()
+        project["annotations"]["scene"] = [{"id": "retained", "label": "室内", "start_ms": 0, "end_ms": 1000}]
+        project = self.service.update_draft(project["id"], project["annotations"], project["revision"])
+        stored = self.service.load(project["id"])
+        _, documents = self.service.export_documents(stored)
+        original = {}
+        for axis, raw in documents.items():
+            if version == 1 and axis == "category":
+                continue
+            doc = json.loads(raw)
+            doc["schema_version"] = version
+            original[axis] = json.dumps(doc, ensure_ascii=False).encode()
+            (self.source / f"{axis}.timeline.json").write_bytes(original[axis])
+        stored["_external_hashes"] = self.service.current_external_hashes(self.source)
+        stored["selected_tracks"] = ["posture"]
+        # The hidden draft must not replace the original external scene.
+        stored["annotations"]["scene"][0]["label"] = "室外"
+        self.service.save(stored)
+        return stored, original
+
+    def test_first_partial_writeback_preserves_legacy_hidden_axes_byte_for_byte(self):
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                # Keep each version's source and database independent.
+                fixture = LibraryPersistenceTests()
+                fixture.setUp()
+                try:
+                    project, original = fixture.legacy_root_batch(version)
+                    result = fixture.service.writeback(project["id"])
+                    self.assertEqual([Path(p).name for p in result["paths"]], ["posture.timeline.json"])
+                    for axis, raw in original.items():
+                        self.assertEqual((fixture.source / f"{axis}.timeline.json").read_bytes(), raw)
+                        if axis != "posture":
+                            self.assertEqual((fixture.source / "timeline" / f"{axis}.timeline.json").read_bytes(), raw)
+                    fresh = ProjectService(fixture.root / "fresh")
+                    fresh.probe = fixture.service.probe
+                    try:
+                        reopened = fresh.open_path(str(fixture.source))
+                        self.assertEqual(reopened["selected_tracks"], ["posture"])
+                        self.assertEqual(reopened["annotations"]["scene"][0]["label"], "室内")
+                        restored = fresh.select_library_tracks(reopened["id"], ["scene", "posture"],
+                            fixture.library().list(None), reopened["revision"])
+                        self.assertEqual(restored["annotations"]["scene"][0]["id"], "retained")
+                    finally:
+                        fresh.sessions.close()
+                        fresh.previews.close()
+                finally:
+                    fixture.tearDown()
+
+    def test_legacy_migration_failure_rolls_back_new_directory_and_keeps_originals(self):
+        project, original = self.legacy_root_batch()
+        import os
+        replace = os.replace
+        def fail_retained(source, target):
+            if Path(target).name == "scene.timeline.json":
+                raise OSError("explicit migration interruption")
+            return replace(source, target)
+        with patch("backend.service.os.replace", side_effect=fail_retained):
+            with self.assertRaises(HTTPException):
+                self.service.writeback(project["id"])
+        self.assertFalse((self.source / "timeline").exists())
+        for axis, raw in original.items():
+            self.assertEqual((self.source / f"{axis}.timeline.json").read_bytes(), raw)
+        self.assertEqual(self.service.load(project["id"])["annotations"]["scene"][0]["label"], "室外")
+
+    def test_invalid_retained_legacy_source_is_not_migrated(self):
+        project, original = self.legacy_root_batch()
+        path = self.source / "scene.timeline.json"
+        doc = json.loads(path.read_bytes())
+        doc["timebase"]["source_fingerprint"] = "a" * 64
+        path.write_text(json.dumps(doc))
+        with self.assertRaises(HTTPException):
+            self.service.writeback(project["id"])
+        self.assertFalse((self.source / "timeline").exists())
+        self.assertEqual((self.source / "posture.timeline.json").read_bytes(), original["posture"])
 
     def test_defaults_snapshot_applies_to_new_projects_and_does_not_update_on_reopen(self):
         library = self.library()

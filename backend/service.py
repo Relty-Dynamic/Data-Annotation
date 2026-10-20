@@ -1449,13 +1449,13 @@ class ProjectService:
                 batch_ids.add(document["save_id"])
                 lookup = {item["id"]: item["name"] for item in document["labels"]}
                 annotations[axis] = [{"id": item["id"], "label": lookup[item["label_id"]], "kind": item.get("kind", "interval"), "start_ms": item["start_ms"], "end_ms": item["end_ms"], **({"lane": item["lane"]} if "lane" in item else {}), **({"mode": item.get("mode", "state")} if axis == "category" else {}), **({key: item[key] for key in ("created_by", "created_by_name", "created_at", "updated_by", "updated_by_name", "updated_at") if key in item} if version == 3 else {})} for item in document["segments"]]
-            if (not all(batch_ids) or len(versions) != 1
+            if (not all(batch_ids) or (len(versions) != 1 and written is None)
                     or (len(batch_ids) != 1 and written is None)):
                 raise HTTPException(409, "标注 JSON 不属于同一保存批次或格式版本。请恢复一致的文件后再打开。")
-            version = next(iter(versions))
-            expected_axes = LEGACY_AXES if version == 1 else AXES
-            if not set(documents) <= set(expected_axes) | expected_custom:
-                raise HTTPException(409, "原目录标注文件与格式版本不一致。")
+            for axis, document in documents.items():
+                expected_axes = LEGACY_AXES if document["schema_version"] == 1 else AXES
+                if axis not in set(expected_axes) | expected_custom:
+                    raise HTTPException(409, "原目录标注文件与格式版本不一致。")
             # Written-back files may preserve unannotated intervals on every axis.
             # Validate their contents without imposing the stricter export rule.
             cleaned = validate_annotations(annotations, project["duration_ms"], final=True, videos=active_videos(selected),
@@ -2272,6 +2272,28 @@ class ProjectService:
             destination = source / "timeline"
             external_directory = self.external_directory(source)
             target_expected = actual if external_directory == destination else {axis: None for axis in AXES}
+            written_axes = list(documents)
+            if external_directory != destination:
+                retained = [axis for axis, value in actual.items()
+                            if value is not None and axis in available and axis not in documents]
+                if retained:
+                    # The first timeline/ publication switches all future reads
+                    # away from root. Carry forward validated, unselected files
+                    # byte-for-byte, never this editor's unselected draft.
+                    _, checked_hashes = self.read_external(copy.deepcopy(project))
+                    if checked_hashes != actual:
+                        raise HTTPException(409, "旧标注在迁移前发生变化，未进行写回。")
+                    for axis in retained:
+                        path = external_directory / filename_for_axis(axis)
+                        try:
+                            if path.is_symlink():
+                                raise OSError("legacy annotation is a link")
+                            raw = path.read_bytes()
+                        except OSError:
+                            raise HTTPException(409, "旧标注无法读取，未进行写回。") from None
+                        if digest(raw) != actual[axis]:
+                            raise HTTPException(409, "旧标注在迁移前发生变化，未进行写回。")
+                        documents[axis] = raw
             created_destination = not destination.exists()
             retired = [axis for axis, value in target_expected.items()
                        if axis not in available and valid_custom_axis(axis) and value is not None]
@@ -2384,7 +2406,7 @@ class ProjectService:
             project["last_writeback"] = {"save_id": save_id, "saved_at": now()}
             project["updated_at"] = now()
             self.save(project)
-            return {"paths": [str(destination / filename_for_axis(axis)) for axis in documents], "save_id": save_id}
+            return {"paths": [str(destination / filename_for_axis(axis)) for axis in written_axes], "save_id": save_id}
 
     def media_source(self, project: dict, video_id: str) -> tuple[Path, dict]:
         source = project["_sources"].get(video_id)
