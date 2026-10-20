@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import sys
 from unittest.mock import patch
+from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx
@@ -55,8 +56,14 @@ def main():
         provider.signed_url = lambda key, **kw: (f'https://parts.invalid/{kw["UploadId"]}/{kw["PartNumber"]}'
             if kw.get('operation') == 'upload_part' else signed(key, **kw))
         def direct(request):
-            ident, number = request.url.path.strip('/').split('/')
-            provider.uploads[ident]['parts'][int(number)] = request.content
+            if request.url.host == 'parts.invalid':
+                ident, number = request.url.path.strip('/').split('/')
+                provider.uploads[ident]['parts'][int(number)] = request.content
+            else:
+                key = unquote(request.url.path).split('/test-bucket/', 1)[1]
+                assert hashlib.sha256(request.content).hexdigest() == request.headers['x-amz-meta-sha256']
+                assert len(request.content) == int(request.headers['content-length'])
+                provider.put_if_absent(key, request.content)
             return httpx.Response(200)
         with TestClient(app) as gateway:
             class Client:
@@ -66,12 +73,14 @@ def main():
                     if path.startswith('/api/r2/helper/prediction/'):
                         return gateway.request(method, path, **kwargs)
                     path = path.replace('/api/r2/helper/transfer/uploads', '/api/r2/uploads', 1)
-                    parts = path.split('/')
+                    parsed = urlsplit(path)
+                    parts = parsed.path.split('/')
                     if path == '/api/r2/uploads': value = uploads.start(USER, kwargs['json'])
                     elif parts[-1] == 'finish': value = uploads.finish(parts[4], USER)
                     elif parts[-1] == 'complete': value = uploads.complete_file(parts[4], int(parts[6]), USER)
                     elif len(parts) == 5: value = uploads.public(uploads.load(parts[4], USER))
-                    else: value = uploads.plan(parts[4], int(parts[6]), USER)
+                    else: value = uploads.plan(parts[4], int(parts[6]), USER,
+                                               single=parse_qs(parsed.query).get('single') == ['1'])
                     return httpx.Response(200, json=value)
             engine = AgentEngine(args.work, Client(), service=local, picker=lambda root, kind: [str(args.capture)])
             try:

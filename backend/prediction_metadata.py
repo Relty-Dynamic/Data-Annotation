@@ -2,6 +2,7 @@
 import hashlib
 import re
 from pathlib import PurePosixPath
+from .prediction_diagnostics import diagnostics, failure_reason, mounting_metadata
 
 PROFILES = {'imu_fusion_prediction_timeline/1.2.0', 'imu_fusion_prediction_timeline/1.3.0'}
 
@@ -29,8 +30,12 @@ def metadata(doc):
     result = dict(export_profile=doc['export_profile'], needs_alignment_review=any(r['needs_alignment_review'] for r in recordings))
     if doc['export_profile'].endswith('/1.2.0'):
         if (isinstance(doc.get('provenance'), dict) and 'upload_batch' in doc['provenance']
-                or any(r.get('alignment_status') == 'same_day_inherited' for r in recordings)):
+                or any(r.get('alignment_status') == 'same_day_inherited'
+                       or any(key in r for key in ('needs_mounting_review', 'leg_mounting_method', 'leg_mounting_version'))
+                       for r in recordings)):
             raise ValueError('部分批次或继承校时的预标注须使用 1.3.0 格式。')
+        result.update(needs_mounting_review=False, needs_mounting_review_record_ids=[], mounting_records=[],
+                      needs_review=result['needs_alignment_review'])
         return result
     provenance = doc.get('provenance')
     batch = provenance.get('upload_batch') if isinstance(provenance, dict) else None
@@ -64,7 +69,11 @@ def metadata(doc):
             fail()
         excluded_ids.add(ident)
         source_paths.add(path.casefold())
-        excluded_rows.append(dict(record_id=ident, path=path, reason=reason))
+        clean = dict(record_id=ident, path=path, reason=reason)
+        if 'diagnostics' in row:
+            clean['diagnostics'] = diagnostics(row['diagnostics'])
+            clean['reason_detail'] = failure_reason(reason, clean['diagnostics'])
+        excluded_rows.append(clean)
     listed = batch.get('excluded_record_ids')
     recording_ids = [r.get('id') for r in recordings]
     if (any(not isinstance(i, str) for i in recording_ids) or len(set(recording_ids)) != len(recording_ids)
@@ -87,4 +96,6 @@ def metadata(doc):
         total_records=batch['total_records'], excluded_record_ids=sorted(excluded_ids),
         excluded_records=excluded_rows, inherited_record_ids=inherited,
         needs_alignment_review=result['needs_alignment_review'] or bool(excluded) or bool(inherited))
+    result.update(mounting_metadata(recordings, batch, {s['record_id']: s['path'] for s in inputs}))
+    result['needs_review'] = result['needs_alignment_review'] or result['needs_mounting_review']
     return result

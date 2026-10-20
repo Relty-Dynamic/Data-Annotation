@@ -39,6 +39,8 @@ def run(manager, job, user_id, service, can_upload):
                 stage = {'predict':'姿势预标注','stage':'视频上传或核验','cache':'播放缓存生成','compress':'视频压缩'}.get(function.__name__, '本机处理')
                 with manager.lock:
                     job.update(state='error',detail=failure_detail(error, stage))
+                    if hasattr(error, 'prediction_failure'):
+                        job['prediction_failure'] = error.prediction_failure
             raise
     def update(**values):
         with manager.lock:
@@ -65,6 +67,7 @@ def run(manager, job, user_id, service, can_upload):
                 raise HTTPException(409,'上传任务已在处理。')
             job.update(state='compressing',progress=0,clips_total=len(job['records']),clips_verified=0,
                        prediction_detail='',detail='预标注、压缩与上传正在并行处理。')
+            job.pop('prediction_failure', None)
         prepared.mkdir(parents=True,exist_ok=True)
         # One encoder, one cache builder, one transfer group; the slowest group
         # does not stop earlier groups from preparing the next clip.
