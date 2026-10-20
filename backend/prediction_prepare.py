@@ -56,11 +56,19 @@ class PredictionFailure(HTTPException):
     def __init__(self, job, records):
         message, details = failure_details(job, records)
         # The relay accepts at most 2000 characters in report.error. Reserve
-        # space for the task ID; complete per-record diagnoses travel separately.
+        # space for the task ID. Bound structured diagnostics too: the entire
+        # recurring relay report (including the selection) has a 512 KiB limit.
         if len(message) > 1600:
-            message = message[:1500] + f'…共 {len(details)} 条失败记录，完整原因请展开“预标注失败详情”。'
+            message = message[:1500] + f'…共 {len(details)} 条失败记录，请展开“预标注失败详情”。'
         super().__init__(422, f'{message}（预标注任务：{job["id"]}）')
-        self.prediction_failure = dict(job_id=job['id'], records=details)
+        preview = dict(job_id=job['id'], total_records=len(details), omitted_records=0, records=[])
+        for row in details:
+            preview['records'].append(row)
+            if len(json.dumps(preview)) > 64 * 1024 - 100:
+                preview['records'].pop()
+                break
+        preview['omitted_records'] = len(details) - len(preview['records'])
+        self.prediction_failure = preview
 
 
 def sampler(target, directory, capabilities):

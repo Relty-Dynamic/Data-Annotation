@@ -231,6 +231,33 @@ class MountingUploadTests(unittest.TestCase):
                 self.assertIn('80/500', details['records'][-1]['reason_detail'])
                 bridge.command(USER, value['id'], dict(action='start'))
 
+    def test_long_unicode_paths_bound_diagnostics_and_acknowledge_relay_command(self):
+        from backend.upload_bridge import UploadBridge
+        from backend.test_r2_integration import USER
+        paths = ['IMU/' + '/'.join(['采' * 50] * 6) + f'/{index}.txt' for index in range(64)]
+        rows = [dict(record_id=hashlib.sha256(path.encode()).hexdigest()[:16], path=path,
+                     reason='inference_failed', diagnostics=[mounting_diagnostic()]) for path in paths]
+        failure = PredictionFailure(dict(id='b'*64, error_details=rows), [dict(path=p) for p in paths])
+        preview = failure.prediction_failure
+        self.assertLessEqual(len(json.dumps(preview)), 64 * 1024)
+        self.assertEqual(preview['total_records'], 64)
+        self.assertGreater(preview['omitted_records'], 0)
+        self.assertEqual(len(preview['records']) + preview['omitted_records'], 64)
+        self.assertEqual(preview['records'][0]['path'], paths[0])
+        bridge = UploadBridge(SimpleNamespace(request=lambda *args, **kwargs: {'user': USER}))
+        registered = bridge.register(dict(platform='darwin', protocol=1))
+        bridge.pair(USER, registered, 'explicit-fixture-session')
+        value = bridge.agents[registered['id']]
+        bridge.command(USER, value['id'], dict(action='start'))
+        command = bridge.poll(value, {})['command']
+        report = dict(busy=False, error=failure.detail,
+                      selection=dict(name='fixture', capture_date='20261019',
+                                     videos=[], attachments=paths, ignored=[]),
+                      job=dict(state='error', detail=failure.detail, prediction_failure=preview))
+        bridge.poll(value, dict(report=report, completed=command['id']))
+        self.assertIsNone(bridge.public(value)['command'])
+        self.assertTrue(bridge.public(value)['online'])
+
 
 class MountingTaskTests(unittest.TestCase):
     def test_mounting_and_diagnostics_persist_after_human_clear_save_and_reopen(self):
