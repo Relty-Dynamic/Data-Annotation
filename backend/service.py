@@ -2275,7 +2275,8 @@ class ProjectService:
             written_axes = list(documents)
             if external_directory != destination:
                 retained = [axis for axis, value in actual.items()
-                            if value is not None and axis in available and axis not in documents]
+                            if value is not None and axis in available
+                            and axis != "habit" and axis not in documents]
                 if retained:
                     # The first timeline/ publication switches all future reads
                     # away from root. Carry forward validated, unselected files

@@ -260,8 +260,9 @@ class LibraryPersistenceTests(unittest.TestCase):
                     self.assertEqual([Path(p).name for p in result["paths"]], ["posture.timeline.json"])
                     for axis, raw in original.items():
                         self.assertEqual((fixture.source / f"{axis}.timeline.json").read_bytes(), raw)
-                        if axis != "posture":
+                        if axis not in ("posture", "habit"):
                             self.assertEqual((fixture.source / "timeline" / f"{axis}.timeline.json").read_bytes(), raw)
+                    self.assertFalse((fixture.source / "timeline" / "habit.timeline.json").exists())
                     fresh = ProjectService(fixture.root / "fresh")
                     fresh.probe = fixture.service.probe
                     try:
