@@ -253,6 +253,13 @@ class CollectionOutputTests(unittest.TestCase):
         self.assertEqual(len(rows),1)
         self.assertEqual(rows[0]['task_id'],task['id'])
         self.assertEqual(rows[0]['accepted_by_name'],'组长')
+        total = list(csv.DictReader(io.StringIO(self.store.artifacts.get(delivery['artifact_key']).decode('utf-8-sig'))))
+        self.assertEqual(len(total), 1)
+        self.assertEqual(total[0]['final_version_id'], rows[0]['final_version_id'])
+        self.assertEqual(total[0]['video_id'], rows[0]['video_id'])
+        for key in ('axis', 'segment_id', 'label', 'start_ms', 'end_ms'):
+            self.assertEqual(total[0][key], '')
+            self.assertEqual(rows[0][key], '')
         restarted=CollectionOutputs(self.store,self.media,self.editor)
         keys=set(self.provider.objects)
         self.assertEqual(restarted.backfill(self.lead,task['id'],self.names)['state'],'ready')

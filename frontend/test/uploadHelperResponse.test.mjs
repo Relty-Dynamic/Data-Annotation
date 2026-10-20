@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readUploadResponse} from './response.mjs';
+import {readUploadResponse} from '../../backend/upload_ui/response.mjs';
 
 test('upload helper preserves valid success data and actionable JSON errors',async()=>{
  assert.deepEqual(await readUploadResponse(new Response('{"state":"ready"}',{status:200})),{state:'ready'});
