@@ -195,9 +195,10 @@ docker compose --env-file "$env_file" "${compose_files[@]}" \
     up -d --no-build --wait --wait-timeout 180
 [[ "$(docker inspect datamark-intranet-web-1 --format '{{.Config.Image}}')" == "datamark-web:$commit" ]] ||
     die 'running web container is not the tested image'
-curl --fail --silent --show-error --cacert "$root_ca" \
-    "https://$host$expected_suffix/api/health" |
-    python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "ok" and data["application"] == "datamark" and data["storage_backend"] == "nas" and "account-login" in data["capabilities"]'
+# Compose considers a gateway without a healthcheck ready as soon as it runs.
+# Wait for its actual TLS listener and NAS response before committing the release.
+python3 "$release/deploy/wait_intranet_ready.py" \
+    "https://$host$expected_suffix/api/health" "$root_ca"
 persist_image_tag "$commit"
 env_tag_updated=1
 next_link="$deploy_home/.current-$commit-$$"

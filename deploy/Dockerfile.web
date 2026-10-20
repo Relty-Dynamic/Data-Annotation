@@ -34,6 +34,7 @@ RUN --mount=type=cache,id=datamark-pip,target=/root/.cache/pip,sharing=locked \
 COPY backend /app/backend
 COPY deploy/web_healthcheck.py /app/deploy/web_healthcheck.py
 COPY deploy/ci-deploy-intranet.sh /app/deploy/ci-deploy-intranet.sh
+COPY deploy/wait_intranet_ready.py /app/deploy/wait_intranet_ready.py
 COPY deploy/ci_deploy_public.py /app/deploy/ci_deploy_public.py
 COPY deploy/prepare_public_rules.py /app/deploy/prepare_public_rules.py
 COPY deploy/deploy_worker.py deploy/compose.yaml /app/deploy/
