@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -96,6 +97,8 @@ class IntranetReleaseTests(unittest.TestCase):
         self.home = self.root / "service"
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.shell_env = self.root / "commands.bash"
+        self.shell_env.write_text("")
         self.old, self.new = "a" * 40, "b" * 40
         self.previous = self.home / "releases" / self.old
         release = self.home / "releases" / self.new
@@ -130,6 +133,14 @@ class IntranetReleaseTests(unittest.TestCase):
         (release / "deploy/wait_intranet_ready.py").write_text(
             f"import sys\nsys.path.insert(0, {str(ROOT)!r})\n"
             "from deploy import wait_intranet_ready as ready\n"
+            # Jenkins mounts .tmp with noexec. Python reads the curl fixture as
+            # data, just as Bash reads the command functions below.
+            f"curl_fixture = {str(self.bin / 'curl.py')!r}\n"
+            "real_run = ready.subprocess.run\n"
+            "def run_probe(args, **kwargs):\n"
+            "    assert args[0] == 'curl', 'unexpected external command'\n"
+            "    return real_run([sys.executable, curl_fixture, *args[1:]], **kwargs)\n"
+            "ready.subprocess.run = run_probe\n"
             "clock = [0]\nready.time.monotonic = lambda: clock[0]\n"
             "ready.time.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)\n"
             "ready.wait_ready(*sys.argv[1:], timeout=15, interval=5)\n")
@@ -150,9 +161,13 @@ elif args[0]=='compose' and 'up' in args: image.write_text(os.environ['DATAMARK_
 """)
 
     def command(self, name, source):
-        path = self.bin / name
-        path.write_text(f"#!{sys.executable}\n{source}\n")
-        path.chmod(0o755)
+        path = self.bin / (name + ".py")
+        path.write_text(source + "\n")
+        # Do not depend on exec permission for files in the test tmpfs. The
+        # production script still runs unchanged, including its identity guard.
+        with self.shell_env.open("a") as stream:
+            stream.write(f'{name}() {{ {shlex.quote(sys.executable)} '
+                         f'{shlex.quote(str(path))} "$@"; }}\n')
 
     def execute(self, recover):
         self.command("curl", f"""
@@ -165,7 +180,7 @@ if n==1 or not {recover!r}: sys.exit(7)
 print({json.dumps(HEALTH)!r})
 """)
         result = subprocess.run(["bash", str(self.script), "s3-mock-10443"],
-                                env={**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]},
+                                env={**os.environ, "BASH_ENV": str(self.shell_env)},
                                 capture_output=True, text=True, timeout=15)
         self.assertTrue(self.curl_calls.exists(), result.stdout + result.stderr)
         self.assertGreaterEqual(int(self.curl_calls.read_text()), 2, result.stderr)
@@ -192,6 +207,19 @@ print({json.dumps(HEALTH)!r})
         self.assertEqual(self.image.read_text(), self.old)
         self.assertEqual(self.env_file.read_bytes(), original)
         self.assertEqual(self.calls.read_text().count("up -d"), 2)
+
+    def test_wrong_user_is_rejected_before_container_or_database_changes(self):
+        self.command("id", "print('not-relty')")
+        original = self.env_file.read_bytes()
+        result = subprocess.run(["bash", str(self.script), "s3-mock-10443"],
+                                env={**os.environ, "BASH_ENV": str(self.shell_env)},
+                                capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("run on relty-server as relty", result.stderr)
+        self.assertFalse(self.calls.exists())
+        self.assertFalse((self.home / "backups").exists())
+        self.assertEqual((self.home / "current").resolve(), self.previous)
+        self.assertEqual(self.env_file.read_bytes(), original)
 
 
 if __name__ == "__main__":
