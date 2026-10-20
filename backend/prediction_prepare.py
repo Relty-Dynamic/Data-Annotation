@@ -25,16 +25,16 @@ from .prediction_metadata import metadata as prediction_metadata
 from .prediction_diagnostics import diagnostics, failure_reason
 
 
-def failure_message(job, records):
+def failure_details(job, records):
     """Use only diagnostics tied to this upload; do not expose arbitrary exception text."""
     if 'error_details' not in job:
-        return job.get('error', 'IMU 推理未完成')
+        return job.get('error', 'IMU 推理未完成'), []
     try:
         rows = job['error_details']
         if not isinstance(rows, list) or len(rows) > len(records):
             raise ValueError()
         expected = {r['path'] for r in records}
-        seen, messages = set(), []
+        seen, messages, clean = set(), [], []
         for row in rows:
             if (not isinstance(row, dict) or not isinstance(row.get('path'), str)
                     or row['path'] not in expected or row['path'] in seen
@@ -42,11 +42,25 @@ def failure_message(job, records):
                     or row.get('reason') != 'inference_failed'):
                 raise ValueError()
             seen.add(row['path'])
-            detail = failure_reason(row['reason'], diagnostics(row.get('diagnostics', [])))
+            stages = diagnostics(row.get('diagnostics', []))
+            detail = failure_reason(row['reason'], stages)
             messages.append(f'{row["path"]}：{detail}')
-        return '；'.join(messages) or 'IMU 推理未完成，请按任务编号查看诊断。'
+            clean.append(dict(record_id=row['record_id'], path=row['path'], reason=row['reason'],
+                              diagnostics=stages, reason_detail=detail))
+        return '；'.join(messages) or 'IMU 推理未完成，请按任务编号查看诊断。', clean
     except (ValueError, TypeError, KeyError):
-        return 'IMU 推理未完成，算法返回的阶段诊断无效，请按任务编号查看诊断。'
+        return 'IMU 推理未完成，算法返回的阶段诊断无效，请按任务编号查看诊断。', []
+
+
+class PredictionFailure(HTTPException):
+    def __init__(self, job, records):
+        message, details = failure_details(job, records)
+        # The relay accepts at most 2000 characters in report.error. Reserve
+        # space for the task ID; complete per-record diagnoses travel separately.
+        if len(message) > 1600:
+            message = message[:1500] + f'…共 {len(details)} 条失败记录，完整原因请展开“预标注失败详情”。'
+        super().__init__(422, f'{message}（预标注任务：{job["id"]}）')
+        self.prediction_failure = dict(job_id=job['id'], records=details)
 
 
 def sampler(target, directory, capabilities):
@@ -168,7 +182,7 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
             raise HTTPException(504, '预标注仍在处理，可稍后重试继续同一任务。')
         state = job['state']
         if state == 'failed':
-            raise HTTPException(422, f'{failure_message(job, records)}（预标注任务：{job["id"]}）')
+            raise PredictionFailure(job, records)
         if state == 'awaiting_motion':
             curves = []
             # The same video window may support multiple IMU sessions.

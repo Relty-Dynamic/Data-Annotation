@@ -162,6 +162,7 @@ class FolderUploadManager(MockUploadManager):
                 if job['state'] not in ('ready_to_compress', 'error'):
                     raise HTTPException(409, '预标注任务正在处理。')
                 job.update(state='preparing_prediction', detail='正在准备姿势预标注。')
+                job.pop('prediction_failure', None)
             def progress(detail):
                 with self.lock:
                     job['detail'] = detail
@@ -179,6 +180,8 @@ class FolderUploadManager(MockUploadManager):
                 detail = error.detail if isinstance(error, HTTPException) and isinstance(error.detail, str) else '预标注准备失败，尚未上传；请检查素材和设备角色后重新选择。'
                 with self.lock:
                     job.update(state='error', detail=detail)
+                    if hasattr(error, 'prediction_failure'):
+                        job['prediction_failure'] = error.prediction_failure
                 raise
         if hasattr(self.store, 'transfer_progress'):
             def transfer_progress(values):
@@ -191,7 +194,7 @@ class FolderUploadManager(MockUploadManager):
         result = super().status(ident, user_id)
         job = self._job(ident, user_id)
         with self.lock:
-            result.update({key:job[key] for key in ('clips_total','clips_verified','prediction_detail') if key in job})
+            result.update({key:job[key] for key in ('clips_total','clips_verified','prediction_detail','prediction_failure') if key in job})
             if job.get('upload_kind') == 'imu':
                 result.update(upload_kind='imu', selected=len(job['attachments']), total=len(job['attachments']))
         prediction = job.get('prediction_result')

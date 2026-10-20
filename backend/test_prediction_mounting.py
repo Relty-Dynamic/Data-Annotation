@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from fastapi import HTTPException
 
 from backend.prediction_import import convert, warning
 from backend.prediction_metadata import metadata
+from backend.prediction_prepare import PredictionFailure
 from backend.r2_folder import scan_collection, FolderUploadManager
 from backend import test_prediction as fixtures
 from backend.test_prediction import document, project, v13_document
@@ -180,6 +182,54 @@ class MountingUploadTests(unittest.TestCase):
         diagnostic = mounting_diagnostic()
         diagnostic['qualified_covered_seconds'] = float('inf')
         self.assertIn('诊断无效', self.failed_job(diagnostic))
+
+    def test_many_failures_complete_agent_command_and_relay_every_diagnostic(self):
+        from backend.upload_agent import AgentEngine
+        from backend.upload_bridge import UploadBridge
+        from backend.test_r2_integration import USER
+        f = self.fixture
+        paths = ['IMU/session.txt'] + [f'IMU/record-{index:04d}.txt' for index in range(63)]
+        for path in paths[1:]:
+            (f.capture/path).write_bytes(b'explicit-IMU-fixture')
+        rows = [dict(record_id=hashlib.sha256(path.encode()).hexdigest()[:16], path=path,
+                     reason='inference_failed', diagnostics=[mounting_diagnostic()]) for path in paths]
+        failure = PredictionFailure(dict(id='b'*64, error_details=rows), [dict(path=path) for path in paths])
+        self.assertLessEqual(len(failure.detail), 2000)
+        self.assertIn('共 64 条', failure.detail)
+        self.assertIn('b'*64, failure.detail)
+        for pipeline in (False, True):
+            with self.subTest(pipeline=pipeline):
+                local = f.root/f'agent-{pipeline}'
+                local.mkdir()
+                engine = AgentEngine(f.root, SimpleNamespace(), service=SimpleNamespace(local=local))
+                engine.target.request = lambda *args, **kwargs: USER
+                engine.target.capture_exists = lambda _: False
+                engine.target.pipeline_enabled = pipeline
+                engine.selection = engine.manager.select_folder(USER['id'], f.capture)
+                engine.target.attachments = engine.selection['attachments']
+                bridge = UploadBridge(SimpleNamespace(request=lambda *args, **kwargs: {'user': USER}))
+                registered = bridge.register(dict(platform='darwin', protocol=1))
+                bridge.pair(USER, registered, 'explicit-fixture-session')
+                value = bridge.agents[registered['id']]
+                bridge.command(USER, value['id'], dict(action='start', fields=dict(
+                    collector='fixture', prediction='generate', chest_device='chest', thigh_device='thigh')))
+                command = bridge.poll(value, {})['command']
+                with patch('backend.prediction_prepare.prepare_prediction', side_effect=failure), \
+                        patch.object(engine.manager, '_compress_video', side_effect=failure):
+                    engine.execute(command)
+                report = engine.snapshot()
+                bridge.poll(value, dict(report=report, completed=engine.completed))
+                visible = bridge.public(value)
+                self.assertTrue(visible['online'])
+                self.assertIsNone(visible['command'])
+                self.assertFalse(visible['report']['busy'])
+                self.assertLessEqual(len(visible['report']['error']), 2000)
+                self.assertEqual(visible['report']['job']['state'], 'error')
+                details = visible['report']['job']['prediction_failure']
+                self.assertEqual(details['job_id'], 'b'*64)
+                self.assertEqual([row['path'] for row in details['records']], paths)
+                self.assertIn('80/500', details['records'][-1]['reason_detail'])
+                bridge.command(USER, value['id'], dict(action='start'))
 
 
 class MountingTaskTests(unittest.TestCase):
