@@ -1335,6 +1335,10 @@ class ProjectService:
                         raise ValueError()
             except (OSError, ValueError):
                 raise HTTPException(422, f"无法读取已有标注文件 {path.name}。")
+        return self._read_external_documents(project, documents, hashes, include_tracks=include_tracks)
+
+    def _read_external_documents(self, project: dict, documents: dict, hashes: dict,
+                                 *, include_tracks: bool = False) -> tuple:
         if not documents:
             return (None, hashes, [], list(AXES), copy.deepcopy(DEFAULT_TRACK_LABELS)) if include_tracks else (None, hashes)
         if any(not isinstance(document, dict) or not isinstance(document.get("timebase"), dict)
@@ -2295,6 +2299,12 @@ class ProjectService:
                         if digest(raw) != actual[axis]:
                             raise HTTPException(409, "旧标注在迁移前发生变化，未进行写回。")
                         documents[axis] = raw
+                    # Reuse the reopen validator on the complete prospective
+                    # batch before creating timeline/. Individually valid old
+                    # files can still conflict with a new skipped-video list.
+                    self._read_external_documents(copy.deepcopy(project),
+                        {axis: json.loads(raw.decode("utf-8-sig")) for axis, raw in documents.items()},
+                        {axis: digest(raw) for axis, raw in documents.items()})
             created_destination = not destination.exists()
             retired = [axis for axis, value in target_expected.items()
                        if axis not in available and valid_custom_axis(axis) and value is not None]

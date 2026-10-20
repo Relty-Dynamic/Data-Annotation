@@ -305,6 +305,28 @@ class LibraryPersistenceTests(unittest.TestCase):
         self.assertFalse((self.source / "timeline").exists())
         self.assertEqual((self.source / "posture.timeline.json").read_bytes(), original["posture"])
 
+    def test_legacy_migration_rejects_incompatible_skips_before_publication_and_can_retry(self):
+        (self.fpv / "A09999_20260917120001_0002.avi").write_bytes(b"second synthetic video")
+        project, original = self.legacy_root_batch()
+        failed = project["videos"][1]
+        with patch.object(self.service.sessions, "failed_for_skip", return_value=[{
+                "video_id": failed["id"], "name": failed["name"], "detail": "fixture decode failure"}]):
+            skipped = self.service.skip_failed_videos(project["id"], [failed["id"]], project["revision"])
+        saved = self.service.load(project["id"])
+        with self.assertRaises(HTTPException) as caught:
+            self.service.writeback(project["id"])
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("跳过的片段列表不一致", caught.exception.detail)
+        self.assertFalse((self.source / "timeline").exists())
+        self.assertFalse((self.source / ".annotation-backups").exists())
+        self.assertEqual(self.service.load(project["id"]), saved)
+        for axis, raw in original.items():
+            self.assertEqual((self.source / f"{axis}.timeline.json").read_bytes(), raw)
+        self.service.restore_skipped_videos(project["id"], skipped["revision"])
+        self.service.writeback(project["id"])
+        restored, _ = self.service.read_external(self.service.load(project["id"]))
+        self.assertEqual(restored["scene"][0]["label"], "室内")
+
     def test_defaults_snapshot_applies_to_new_projects_and_does_not_update_on_reopen(self):
         library = self.library()
         library.save(None, "scene", "环境", "state", ["新室内"], default=True)
