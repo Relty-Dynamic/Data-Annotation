@@ -22,6 +22,31 @@ from fastapi import HTTPException
 from .mock_s3 import MockUploadManager, file_sha256
 from .r2_folder import scan_collection
 from .prediction_metadata import metadata as prediction_metadata
+from .prediction_diagnostics import diagnostics, failure_reason
+
+
+def failure_message(job, records):
+    """Use only diagnostics tied to this upload; do not expose arbitrary exception text."""
+    if 'error_details' not in job:
+        return job.get('error', 'IMU 推理未完成')
+    try:
+        rows = job['error_details']
+        if not isinstance(rows, list) or len(rows) > len(records):
+            raise ValueError()
+        expected = {r['path'] for r in records}
+        seen, messages = set(), []
+        for row in rows:
+            if (not isinstance(row, dict) or not isinstance(row.get('path'), str)
+                    or row['path'] not in expected or row['path'] in seen
+                    or row.get('record_id') != hashlib.sha256(row['path'].encode()).hexdigest()[:16]
+                    or row.get('reason') != 'inference_failed'):
+                raise ValueError()
+            seen.add(row['path'])
+            detail = failure_reason(row['reason'], diagnostics(row.get('diagnostics', [])))
+            messages.append(f'{row["path"]}：{detail}')
+        return '；'.join(messages) or 'IMU 推理未完成，请按任务编号查看诊断。'
+    except (ValueError, TypeError, KeyError):
+        return 'IMU 推理未完成，算法返回的阶段诊断无效，请按任务编号查看诊断。'
 
 
 def sampler(target, directory, capabilities):
@@ -143,7 +168,7 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
             raise HTTPException(504, '预标注仍在处理，可稍后重试继续同一任务。')
         state = job['state']
         if state == 'failed':
-            raise HTTPException(422, f'{job["error"]}（预标注任务：{job["id"]}）')
+            raise HTTPException(422, f'{failure_message(job, records)}（预标注任务：{job["id"]}）')
         if state == 'awaiting_motion':
             curves = []
             # The same video window may support multiple IMU sessions.
@@ -168,6 +193,9 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
         raise HTTPException(502, '预标注下载校验失败，可重试同一任务。')
     try:
         summary = prediction_metadata(json.loads(raw.decode('utf-8-sig')))
+        for key in ('needs_mounting_review', 'needs_review'):
+            if key in result and (type(result[key]) is not bool or result[key] != summary[key]):
+                raise ValueError('预标注任务与文件的复核状态不一致。')
         if summary.get('batch_status'):
             excluded_ids = result.get('excluded_record_ids')
             if (result.get('batch_status') != summary['batch_status'] or not isinstance(excluded_ids, list)
@@ -204,5 +232,7 @@ def prepare_prediction(target, service, root, selection, roles, *, progress=lamb
     target.attachments = rescanned['attachments']
     detail = (f'部分预标注已生成（{summary["validated_records"]}/{summary["total_records"]} 段）；未完成记录保留原文件并留待人工标注。'
               if summary.get('batch_status') == 'partial' else '预标注已生成，将与压缩视频一并上传。')
+    if result['needs_mounting_review']:
+        detail += '腿部安装方向需要人工复核，请核实佩戴方向并结合视频复核姿势预标注。'
     progress(detail + ('校时结果需要人工复核。' if result['needs_alignment_review'] else ''))
     return rescanned, result

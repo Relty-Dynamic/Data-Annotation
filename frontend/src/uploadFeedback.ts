@@ -4,6 +4,10 @@ export function predictionMessage(prediction?:PredictionReport):string{
  const parts=[prediction.batch_status==='partial'?`部分姿势预标注已完成（${prediction.validated_records}/${prediction.total_records} 段），未完成区间需人工标注。`:'已携带姿势预标注。'];
  if(prediction.inherited_record_ids?.length)parts.push(`${prediction.inherited_record_ids.length} 段使用了同日其他记录的校时偏移。`);
  if(prediction.needs_alignment_review)parts.push('请结合视频人工复核校时。');
+ if(prediction.needs_mounting_review){
+  const paths=prediction.mounting_records?.filter(row=>row.needs_mounting_review).map(row=>row.path).join('、');
+  parts.push(`腿部安装方向需要人工复核${paths?`（${paths}）`:''}：方向由本段短时证据估计，请核实佩戴方向并结合视频复核姿势预标注。`);
+ }
  return parts.join('');
 }
 export function predictionFailureReason(reason:string):string{

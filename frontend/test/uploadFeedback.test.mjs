@@ -29,3 +29,15 @@ test('partial prediction and inherited clocks are visible even after material up
  assert.equal(predictionMessage(undefined),'');
  assert.equal(predictionMessage({sha256:'a',segments:2,needs_alignment_review:false}),'已携带姿势预标注。');
 });
+test('mounting review remains visible with confirmed alignment and identifies the recording',()=>{
+ const message=predictionMessage({sha256:'a',segments:2,needs_alignment_review:false,needs_mounting_review:true,
+  mounting_records:[{record_id:'one',path:'IMU/session.txt',needs_mounting_review:true,method:'short_duration_consistency',version:'1.0.0'},
+   {record_id:'two',path:'IMU/normal.txt',needs_mounting_review:false,method:'legacy_sample_count',version:'1.0.0'}]});
+ assert.match(message,/腿部安装方向需要人工复核/);assert.match(message,/IMU\/session.txt/);
+ assert.doesNotMatch(message,/IMU\/normal.txt|复核校时/);
+});
+test('partial completion never hides independent mounting and alignment reviews',()=>{
+ const message=predictionMessage({sha256:'a',segments:1,batch_status:'partial',validated_records:1,total_records:2,
+  needs_mounting_review:true,needs_alignment_review:true,inherited_record_ids:['one']});
+ for(const pattern of [/1\/2/,/未完成区间/,/复核校时/,/腿部安装方向需要人工复核/])assert.match(message,pattern);
+});

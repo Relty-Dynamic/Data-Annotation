@@ -197,6 +197,7 @@ class FolderUploadManager(MockUploadManager):
         prediction = job.get('prediction_result')
         if prediction:
             result['prediction'] = {key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review',
+                'needs_mounting_review', 'needs_review', 'needs_mounting_review_record_ids', 'mounting_records',
                 'job_id', 'export_profile', 'batch_status', 'validated_records', 'total_records',
                 'excluded_record_ids', 'excluded_records', 'inherited_record_ids') if key in prediction}
         return result

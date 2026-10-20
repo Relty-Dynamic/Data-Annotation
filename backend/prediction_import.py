@@ -13,6 +13,7 @@ import re
 import uuid
 from fastapi import HTTPException
 from .prediction_metadata import metadata as prediction_metadata
+from .prediction_diagnostics import failure_reason
 
 MAX_BYTES = 20 * 1024**2
 
@@ -160,14 +161,16 @@ def warning(metadata):
         return None
     if metadata.get('state') == 'rejected':
         return metadata['detail']
+    messages = []
     if metadata.get('batch_status') == 'partial':
-        reasons = {'inference_failed': 'IMU 推理未完成', 'invalid_prepared_prediction': '推理结果无法读取',
-                   'alignment_unresolved': '未获得可靠校时', 'failed': '校时或导出失败', 'no_video_overlap': '校时后与视频无交集'}
-        paths = '、'.join(f'{row["path"]}（{reasons.get(row["reason"], "预标注未完成")}）' for row in metadata['excluded_records'])
+        paths = '、'.join(f'{row["path"]}（{failure_reason(row["reason"], row.get("diagnostics", []))}）' for row in metadata['excluded_records'])
         inherited = '部分结果使用了同日其他记录的校时偏移。' if metadata.get('inherited_record_ids') else ''
-        return f'姿势预标注仅完成 {metadata["validated_records"]}/{metadata["total_records"]} 段；未完成：{paths}。{inherited}缺失区间保留空白，请人工标注并复核校时。'
-    if metadata.get('inherited_record_ids'):
-        return '部分姿势预标注使用了同日其他记录的校时偏移，请结合视频人工复核。'
-    if metadata.get('needs_alignment_review'):
-        return '姿势预标注的相机校时尚需人工复核，请结合视频检查。'
-    return None
+        messages.append(f'姿势预标注仅完成 {metadata["validated_records"]}/{metadata["total_records"]} 段；未完成：{paths}。{inherited}缺失区间保留空白，请人工标注并复核校时。')
+    elif metadata.get('inherited_record_ids'):
+        messages.append('部分姿势预标注使用了同日其他记录的校时偏移，请结合视频人工复核。')
+    elif metadata.get('needs_alignment_review'):
+        messages.append('姿势预标注的相机校时尚需人工复核，请结合视频检查。')
+    if metadata.get('needs_mounting_review'):
+        paths = '、'.join(row['path'] for row in metadata.get('mounting_records', []) if row['needs_mounting_review'])
+        messages.append(f'腿部安装方向需要人工复核：{paths or "部分记录"}。方向由本段短时证据估计，请核实佩戴方向并结合视频复核姿势预标注。')
+    return ''.join(messages) or None
