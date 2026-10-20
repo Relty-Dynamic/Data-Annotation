@@ -234,7 +234,7 @@ class MountingUploadTests(unittest.TestCase):
     def test_long_unicode_paths_bound_diagnostics_and_acknowledge_relay_command(self):
         from backend.upload_bridge import UploadBridge
         from backend.test_r2_integration import USER
-        paths = ['IMU/' + '/'.join(['采' * 50] * 6) + f'/{index}.txt' for index in range(64)]
+        paths = ['IMU/' + '/'.join(['采' * 75] * 4) + f'/{index}.txt' for index in range(64)]
         rows = [dict(record_id=hashlib.sha256(path.encode()).hexdigest()[:16], path=path,
                      reason='inference_failed', diagnostics=[mounting_diagnostic()]) for path in paths]
         failure = PredictionFailure(dict(id='b'*64, error_details=rows), [dict(path=p) for p in paths])
@@ -257,6 +257,41 @@ class MountingUploadTests(unittest.TestCase):
         bridge.poll(value, dict(report=report, completed=command['id']))
         self.assertIsNone(bridge.public(value)['command'])
         self.assertTrue(bridge.public(value)['online'])
+
+    def test_large_partial_artifact_keeps_full_metadata_but_bounds_upload_status(self):
+        from backend.upload_bridge import UploadBridge
+        from backend.test_r2_integration import USER
+        f = self.fixture
+        doc = add_mounting(v13_document(project()))
+        paths = [f'IMU/record-{index:04d}.txt' for index in range(700)]
+        rows = [dict(record_id=hashlib.sha256(path.encode()).hexdigest()[:16], path=path,
+                     reason='inference_failed', diagnostics=[mounting_diagnostic()]) for path in paths]
+        doc['provenance']['upload_batch'].update(batch_status='partial', total_records=701,
+            excluded_records=rows, excluded_record_ids=[row['record_id'] for row in rows])
+        full = metadata(doc)
+        manager = FolderUploadManager(SimpleNamespace(capture_exists=lambda _: False), f.root/'staging')
+        selection = manager.select_folder(USER['id'], f.capture)
+        job = manager.start(USER, 'fixture', None, None, selection['selection_id'])
+        manager.jobs[job['id']].update(prediction_result=full, state='ready')
+        status = manager.status(job['id'], USER['id'])
+        visible = status['prediction']
+        self.assertLessEqual(len(json.dumps(visible)), 64 * 1024)
+        self.assertEqual(visible['excluded_records_total'], 700)
+        self.assertLess(len(visible['excluded_records']), 700)
+        self.assertEqual(len(full['excluded_records']), 700)
+        self.assertEqual(full['excluded_records'][-1]['diagnostics'], [mounting_diagnostic()])
+        self.assertTrue(visible['needs_mounting_review'])
+        self.assertTrue(visible['needs_alignment_review'])
+        bridge = UploadBridge(SimpleNamespace(request=lambda *args, **kwargs: {'user': USER}))
+        registered = bridge.register(dict(platform='darwin', protocol=1))
+        bridge.pair(USER, registered, 'explicit-fixture-session')
+        value = bridge.agents[registered['id']]
+        bridge.command(USER, value['id'], dict(action='start'))
+        command = bridge.poll(value, {})['command']
+        report = dict(busy=False, job=status, selection=dict(name='fixture', capture_date='20261019',
+                      videos=['video.avi'], attachments=['IMU/session.txt', *paths], ignored=[]))
+        bridge.poll(value, dict(report=report, completed=command['id']))
+        self.assertIsNone(bridge.public(value)['command'])
 
 
 class MountingTaskTests(unittest.TestCase):

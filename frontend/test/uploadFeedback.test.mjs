@@ -41,3 +41,9 @@ test('partial completion never hides independent mounting and alignment reviews'
   needs_mounting_review:true,needs_alignment_review:true,inherited_record_ids:['one']});
  for(const pattern of [/1\/2/,/未完成区间/,/复核校时/,/腿部安装方向需要人工复核/])assert.match(message,pattern);
 });
+test('bounded status keeps total inherited count and explicitly identifies omitted diagnostics',()=>{
+ const message=predictionMessage({sha256:'a',segments:1,needs_alignment_review:true,
+  needs_mounting_review:true,details_truncated:true,excluded_records_total:700,excluded_records:[],
+  mounting_records_total:60,mounting_records:[],inherited_record_ids_total:20,inherited_record_ids:[]});
+ for(const pattern of [/20 段使用了同日/,/省略 700 条失败详情/,/60 条安装方向记录/,/原始姿势预测文件/,/腿部安装方向需要人工复核/])assert.match(message,pattern);
+});

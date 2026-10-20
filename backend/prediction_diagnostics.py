@@ -1,6 +1,29 @@
 """Bounded, public prediction diagnostics; never display worker paths or exceptions."""
 import math
 import re
+import json
+
+
+def upload_report(value):
+    """Bound UI-only lists; the verified artifact and stored metadata stay complete."""
+    limit = 64 * 1024
+    if len(json.dumps(value)) <= limit:
+        return value
+    keys = ('mounting_records', 'excluded_records', 'inherited_record_ids',
+            'needs_mounting_review_record_ids', 'excluded_record_ids')
+    result = {key: item for key, item in value.items() if key not in keys}
+    result['details_truncated'] = True
+    for key in keys:
+        if key in value:
+            result[key] = []
+            result[key + '_total'] = len(value[key])
+    for key in keys:
+        for item in value.get(key, []):
+            result[key].append(item)
+            if len(json.dumps(result)) > limit:
+                result[key].pop()
+                break
+    return result
 
 
 def diagnostics(value):

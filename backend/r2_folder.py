@@ -199,10 +199,11 @@ class FolderUploadManager(MockUploadManager):
                 result.update(upload_kind='imu', selected=len(job['attachments']), total=len(job['attachments']))
         prediction = job.get('prediction_result')
         if prediction:
-            result['prediction'] = {key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review',
+            from .prediction_diagnostics import upload_report
+            result['prediction'] = upload_report({key: prediction[key] for key in ('sha256', 'segments', 'needs_alignment_review',
                 'needs_mounting_review', 'needs_review', 'needs_mounting_review_record_ids', 'mounting_records',
                 'job_id', 'export_profile', 'batch_status', 'validated_records', 'total_records',
-                'excluded_record_ids', 'excluded_records', 'inherited_record_ids') if key in prediction}
+                'excluded_record_ids', 'excluded_records', 'inherited_record_ids') if key in prediction})
         return result
 
 
