@@ -56,6 +56,28 @@ class CollectionTaskTests(unittest.TestCase):
         layout=self.media.task_collection(records) if key else None
         return self.store.create_task(self.admin,body,collection_layout=layout)
 
+    def test_equivalent_legacy_registrations_do_not_duplicate_collection_members(self):
+        with self.store.db() as db:
+            original = self.store._read(db, 'videos', self.records[0]['id'])
+            alias = {**original, 'id':'legacy-alias'}
+            self.store._save(db, 'videos', alias, True)
+        task = self.create()
+        self.assertEqual(len(task['video_ids']), 2)
+        self.assertEqual(len({video['source']['key'] for video in task['collection']['videos']}), 2)
+        self.assertEqual(len(self.store.list_videos(self.admin)), 3, 'historical registrations must remain')
+
+    def test_conflicting_legacy_registration_does_not_bypass_quality_or_ownership(self):
+        for field, value in (('quality','failed'), ('uploader_id','other')):
+            with self.subTest(field=field):
+                with self.store.db() as db:
+                    original = self.store._read(db, 'videos', self.records[0]['id'])
+                    alias = {**original, 'id':'legacy-conflict', field:value}
+                    self.store._save(db, 'videos', alias, insert=field == 'quality')
+                with self.assertRaises(TaskError) as caught:
+                    self.create()
+                self.assertEqual(caught.exception.status, 409)
+                self.assertIn('重复登记', caught.exception.detail)
+
     def test_batch_resolution_loads_each_source_project_once_and_checks_each_video(self):
         sources = [record['source'] for record in self.records]
         with patch.object(self.media_service, 'load', wraps=self.media_service.load) as load, \

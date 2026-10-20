@@ -410,17 +410,19 @@ class SessionCache:
                     # Another tab reopening this project must not invalidate the
                     # versioned URLs already playing in the first tab.
                     return copy.deepcopy(previous['status'])
-            # Opening another project prioritizes that project. The stopped job
-            # keeps atomically completed files and can resume on its next open.
-            if self._current:
-                self._current['stop'].set()
-            for pending in self._pending:
-                pending['stop'].set()
-                self._pause(pending)
-                pending['done'].set()
-            self._pending.clear()
+            # A shared service may prepare projects for different users/tabs.
+            # Replace only this project's obsolete job; other projects keep
+            # their FIFO position instead of repeatedly cancelling one another.
+            if previous:
+                previous['stop'].set()
+                if previous is not self._current:
+                    self._pending = [pending for pending in self._pending if pending is not previous]
+                    self._pause(previous)
+                    previous['done'].set()
             status = self._initial(project)
-            status.update(state='running', requested=True, detail='正在检查本机精简播放素材。')
+            status.update(state='running', requested=True,
+                          detail='等待前面的项目完成素材准备。' if self._current or self._pending
+                          else '正在检查本机精简播放素材。')
             job = {'project': project, 'signature': signature, 'status': status,
                    'retry_failed': retry_failed, 'stop': threading.Event(),
                    'done': threading.Event(), 'assets': {}, 'manifest': None}
@@ -594,14 +596,15 @@ class SessionCache:
                     return
                 job = self._pending.pop(0)
                 self._current = job
+                job['status']['detail'] = '正在检查本机精简播放素材。'
             try:
                 self._prepare(job)
             except _Cancelled:
                 self._pause(job)
             except Exception as error:
                 if job['stop'].is_set() or self._closed:
-                    # FFmpeg reports cancellation as HTTPException. A normal
-                    # project switch is a pause, not a failed media conversion.
+                    # FFmpeg reports cancellation as HTTPException. Explicit
+                    # invalidation is a pause, not a failed media conversion.
                     self._pause(job)
                 else:
                     detail = (str(error.detail) if isinstance(error, HTTPException) else

@@ -391,9 +391,19 @@ class TaskHostTests(unittest.TestCase):
             self.request(client, 'PUT', '/items/' + task['id'] + '/assignment',
                          {'annotator_ids': participants}, headers, 422)
         headers = self.login(client, 'admin')
+        second = json.loads(json.dumps(self.project))
+        second['id'] = 'b' * 32
+        source = self.root / 'nas/second.mp4'
+        source.write_bytes(b'another explicit media identity fixture')
+        second['videos'][0].update(name=source.name, relative_path=source.name)
+        second['_sources']['v0001'] = {'path':str(source), 'stamp':{
+            'size':source.stat().st_size, 'mtime_ns':source.stat().st_mtime_ns}}
+        app.state.service.save(second)
         results = self.request(client, 'POST', '/videos/batch', {'videos': [
-            {**self.video, 'video_id': 'second'}, self.video, None]}, headers)['results']
-        self.assertEqual([True, False, False], [row['ok'] for row in results])
+            {**self.video, 'video_id': 'second', 'source':{'backend':'nas','key':second['id']+'/v0001'}},
+            {**self.video, 'video_id':'duplicate-source'}, self.video, None]}, headers)['results']
+        self.assertEqual([True, False, False, False], [row['ok'] for row in results])
+        self.assertIn('已登记', results[1]['detail'])
         self.login(client, 'a')
         entries = self.request(client, 'GET', '/audit?task_id=' + task['id'])
         self.assertTrue(entries)

@@ -632,7 +632,7 @@ class PlaybackSessionTests(unittest.TestCase):
         self.assertEqual(self.service.load(self.ident)["annotations"], self.project["annotations"])
         self.assertEqual(self.service.sessions.status(self.ident)["state"], "idle")
 
-    def test_replaced_pending_project_can_be_started_again(self):
+    def test_concurrent_projects_keep_fifo_order_despite_repeated_start_requests(self):
         paths = [item["path"] for item in self.project["_sources"].values()]
         second = self.service.open_files(paths)["id"]
         third = self.service.open_files(paths)["id"]
@@ -655,20 +655,57 @@ class PlaybackSessionTests(unittest.TestCase):
             try:
                 manager.start(second)
                 manager.start(third)
-                self.assertEqual(manager.status(second)["state"], "idle")
-                restarted = manager.start(second)
-                self.assertEqual(restarted["state"], "running")
+                for _ in range(5):
+                    for ident in (third, second, self.ident):
+                        self.assertEqual(manager.start(ident)["state"], "running")
+                self.assertEqual([job["project"]["id"] for job in manager._pending], [second, third])
+                self.assertFalse(manager._current["stop"].is_set())
             finally:
                 release.set()
             deadline = time.monotonic() + 3
-            while manager.status(second)["state"] != "ready" and time.monotonic() < deadline:
+            while manager.status(third)["state"] != "ready" and time.monotonic() < deadline:
                 time.sleep(.01)
-            self.assertEqual(manager.status(second)["state"], "ready")
-        self.assertEqual(prepared, [second])
+            self.assertEqual(manager.status(third)["state"], "ready")
+        self.assertEqual(prepared, [self.ident, second, third])
         first = manager.status(self.ident)
-        self.assertEqual(first["state"], "idle")
+        self.assertEqual(first["state"], "ready")
         self.assertEqual(first["running"], 0)
         self.assertEqual(first["failed"], 0)
+
+    def test_cancelled_pending_project_can_restart_without_cancelling_other_projects(self):
+        paths = [item["path"] for item in self.project["_sources"].values()]
+        second = self.service.open_files(paths)["id"]
+        third = self.service.open_files(paths)["id"]
+        entered, release = threading.Event(), threading.Event()
+        manager, prepared = self.service.sessions, []
+        def prepare(job):
+            ident = job["project"]["id"]
+            if ident == self.ident:
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("First project worker was not released")
+            manager._check(job)
+            prepared.append(ident)
+            with manager._condition:
+                job["status"].update(state="ready", progress=100)
+        with patch.object(manager, "_prepare", side_effect=prepare):
+            manager.start(self.ident)
+            self.assertTrue(entered.wait(3))
+            try:
+                manager.start(second)
+                manager.start(third)
+                old = manager._entries[second]
+                manager.invalidate(second)
+                self.assertTrue(old["done"].is_set())
+                self.assertTrue(old["stop"].is_set())
+                self.assertEqual(manager.status(second)["state"], "idle")
+                manager.start(second)
+                self.assertEqual([job["project"]["id"] for job in manager._pending], [third, second])
+                self.assertFalse(manager._current["stop"].is_set())
+            finally:
+                release.set()
+            self.assertTrue(manager._entries[second]["done"].wait(3))
+        self.assertEqual(prepared, [self.ident, third, second])
 
     def test_repair_only_copies_missing_local_sheet_and_keeps_other_assets(self):
         manifest = self.prepare()

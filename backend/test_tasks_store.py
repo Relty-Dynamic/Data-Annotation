@@ -169,6 +169,94 @@ class TasksTests(unittest.TestCase):
                 with self.assertRaises(sqlite3.IntegrityError):
                     db.execute(f'UPDATE {table} SET body="{{}}"')
 
+    def test_independent_drafts_can_save_from_same_revision_but_stale_own_tab_cannot(self):
+        task = self.task(True)
+        first = self.store.save_draft(self.a, task['id'], dict(expected_revision=0, annotations=self.annotations()))
+        second = self.store.save_draft(self.b, task['id'], dict(expected_revision=0, annotations={'posture': []}))
+        self.assertEqual(second['draft']['annotations'], {'posture': []})
+        self.assertEqual(self.store.get_task(self.a, task['id'])['draft']['annotations'], self.annotations())
+        third = self.store.save_draft(self.a, task['id'], dict(expected_revision=first['revision'],
+                                                            annotations={'posture': []}))
+        self.expect(409, lambda: self.store.save_draft(self.a, task['id'],
+            dict(expected_revision=first['revision'], annotations=self.annotations())))
+        self.assertEqual(self.store.get_task(self.a, task['id'])['draft']['annotations'], {'posture': []})
+        self.assertNotIn('_draft_revisions', third)
+        self.assertNotIn('_state_revision', third)
+        submitted = self.mutate('submit', self.a, third, annotations=self.annotations())
+        self.expect(409, lambda: self.store.save_draft(self.b, task['id'],
+            dict(expected_revision=second['revision'], annotations=self.annotations())))
+        saved = self.mutate('save_draft', self.b, submitted, annotations=self.annotations())
+        self.assertEqual(saved['draft']['annotations'], self.annotations())
+        self.expect(403, lambda: self.mutate('save_draft', self.a, saved, annotations={}))
+
+    def test_legacy_revision_guard_remains_strict_until_a_known_draft_boundary(self):
+        task = self.task(True)
+        first = self.mutate('save_draft', self.a, task, annotations=self.annotations())
+        with self.store.db() as db:
+            stored = self.store._read(db, 'tasks', task['id'])
+            stored.pop('_state_revision')
+            stored.pop('_draft_revisions')
+            self.store._save(db, 'tasks', stored)
+        self.expect(409, lambda: self.store.save_draft(self.b, task['id'],
+            dict(expected_revision=0, annotations={'posture': []})))
+        self.mutate('save_draft', self.b, first, annotations={'posture': []})
+        self.mutate('save_draft', self.a, first, annotations=self.annotations())
+        for revision in (-1, True, 1.0, 10**20):
+            self.expect(409, lambda: self.store.save_draft(self.b, task['id'],
+                dict(expected_revision=revision, annotations={})))
+
+    def test_source_registration_is_unique_even_with_different_ids_and_concurrent_requests(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        barrier = threading.Barrier(2)
+        def register(ident):
+            barrier.wait(timeout=3)
+            try:
+                self.store.register_video(self.admin, dict(id=ident, collector_id='c', date='20261020',
+                    scene='inside', duration_ms=1000, source={'backend':'nas', 'key':'same-source'}))
+                return 200
+            except TaskError as error:
+                return error.status
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            self.assertEqual(sorted(workers.map(register, ('one', 'two'))), [200, 409])
+        self.assertEqual(len(self.store.list_videos(self.admin)), 2)
+
+    def test_legacy_source_alias_cannot_create_a_second_active_task(self):
+        task = self.task()
+        with self.store.db() as db:
+            alias = {**self.store._read(db, 'videos', 'v'), 'id':'alias'}
+            self.store._save(db, 'videos', alias, True)
+        self.expect(409, lambda: self.store.create_task(self.lead, dict(video_id='alias',
+            rule_id=self.rule['id'], annotator_ids=['a'], reviewer_id='reviewer', deadline='2026-10-26')))
+        self.assertEqual(len(self.store.list_tasks(self.lead)), 1)
+        self.assertEqual(self.store.get_task(self.lead, task['id'])['video_id'], 'v')
+
+    def test_mixed_delivery_keeps_empty_task_identity_without_inventing_segments(self):
+        tasks = []
+        for video_id, annotations in (('v', {'posture': []}), ('other', self.annotations())):
+            if video_id != 'v':
+                self.store.register_video(self.admin, dict(id=video_id, collector_id='collector',
+                    date='20261020', scene='inside', duration_ms=10000, quality='passed',
+                    source={'backend':'nas', 'key':video_id}))
+            task = self.store.create_task(self.lead, dict(video_id=video_id, rule_id=self.rule['id'],
+                annotator_ids=['a'], reviewer_id='reviewer', deadline='2026-10-26'))
+            task = self.mutate('submit', self.a, task, annotations=annotations)
+            task = self.mutate('start_review', self.reviewer, task)
+            task = self.mutate('review', self.reviewer, task, action='pass')
+            task = self.mutate('accept', self.lead, task)
+            tasks.append(task)
+        delivery = self.store.deliver(self.lead, dict(task_ids=[task['id'] for task in tasks],
+            expected_revisions={task['id']:task['revision'] for task in tasks}, request_id='mixed-empty'))
+        rows = list(csv.DictReader(io.StringIO(self.artifacts.get(delivery['artifact_key']).decode('utf-8-sig'))))
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({row['final_version_id'] for row in rows}, {task['final_version_id'] for task in tasks})
+        empty = next(row for row in rows if row['video_id'] == 'v')
+        self.assertEqual(empty['reviewer'], self.reviewer['id'])
+        for key in ('axis', 'segment_id', 'lane', 'label', 'start_ms', 'end_ms', 'start_seconds', 'end_seconds'):
+            self.assertEqual(empty[key], '')
+        populated = [row for row in rows if row['video_id'] == 'other']
+        self.assertEqual({row['segment_id'] for row in populated}, {'s', 't'})
+
     def test_validation_allows_gaps_overlap_requires_fields(self):
         task=self.task()
         task=self.mutate('save_draft',self.a,task,annotations=self.annotations())

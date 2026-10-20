@@ -6,6 +6,8 @@
 !deploy/Dockerfile.web
 !deploy/healthcheck.py
 !deploy/web_healthcheck.py
+!deploy/deploy_worker.py
+!deploy/compose.yaml
 !frontend/
 !frontend/src/
 !frontend/src/**

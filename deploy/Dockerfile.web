@@ -6,6 +6,7 @@ COPY frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
 COPY frontend/public ./public
 COPY frontend/src ./src
 COPY frontend/test ./test
+COPY backend/upload_ui/response.mjs /app/backend/upload_ui/response.mjs
 RUN npm test
 RUN npm run build
 
@@ -35,6 +36,7 @@ COPY deploy/web_healthcheck.py /app/deploy/web_healthcheck.py
 COPY deploy/ci-deploy-intranet.sh /app/deploy/ci-deploy-intranet.sh
 COPY deploy/ci_deploy_public.py /app/deploy/ci_deploy_public.py
 COPY deploy/prepare_public_rules.py /app/deploy/prepare_public_rules.py
+COPY deploy/deploy_worker.py deploy/compose.yaml /app/deploy/
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 RUN chmod -R a+rX /app
 USER 1000:1000
