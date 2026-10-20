@@ -50,7 +50,7 @@ def diagnostics(value):
                 clean[key] = number
             for key, maximum in (('qualified_covered_seconds', 10**9), ('sign_agreement', 1)):
                 number = item.get(key)
-                if type(number) not in (int, float) or not math.isfinite(number) or not 0 <= number <= maximum:
+                if type(number) not in (int, float) or not 0 <= number <= maximum or not math.isfinite(number):
                     raise ValueError('预标注安装方向诊断时长或一致性无效。')
                 clean[key] = number
             reason = item.get('rejection_reason')

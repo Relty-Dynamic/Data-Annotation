@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -20,6 +21,46 @@ from .r2_folder import FolderUploadManager
 from .r2_upload import RemoteCaptureTarget
 from .service import ProjectService
 from .upload_errors import failure_detail
+
+
+def bounded_report(report):
+    """Keep relay heartbeats and acknowledgements within the complete JSON budget."""
+    limit = 512 * 1024
+    if len(json.dumps(report)) <= limit:
+        return report
+    report = copy.deepcopy(report)
+    job = report.get('job', {})
+    prediction = job.get('prediction', {})
+    failure = job.get('prediction_failure', {})
+    selection = report.get('selection', {})
+    fields = [(prediction, key) for key in ('excluded_records', 'mounting_records',
+              'excluded_record_ids', 'needs_mounting_review_record_ids', 'inherited_record_ids')]
+    fields += [(failure, 'records'), *[(selection, key) for key in ('ignored', 'attachments', 'videos')]]
+    for container, key in fields:
+        rows = container.get(key)
+        if not rows or len(json.dumps(report)) <= limit:
+            continue
+        if container is failure:
+            container.setdefault('total_records', len(rows))
+        else:
+            container.setdefault(key + '_total', len(rows))
+        if container is prediction:
+            container['details_truncated'] = True
+        def take(count):
+            container[key] = rows[:count]
+            if container is failure:
+                container['omitted_records'] = container['total_records'] - count
+        # Find the largest prefix that fits, including its omission counters.
+        low, high = 0, len(rows)
+        while low < high:
+            middle = (low + high + 1) // 2
+            take(middle)
+            if len(json.dumps(report)) <= limit:
+                low = middle
+            else:
+                high = middle - 1
+        take(low)
+    return report
 
 
 class AgentTarget(RemoteCaptureTarget):
@@ -65,7 +106,7 @@ class AgentEngine:
             result = dict(self.report)
             if self.job:
                 result['job'] = self.manager.status(self.job['id'],self.job['owner'])
-            return result
+            return bounded_report(result)
 
     def accept(self, command):
         with self.lock:

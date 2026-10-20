@@ -104,6 +104,7 @@ class MountingContractTests(unittest.TestCase):
     def test_diagnostics_reject_invalid_numbers_and_fields_instead_of_hiding_them(self):
         for key, value in [('near_vertical_samples', True), ('support_bins', -1),
                            ('qualified_covered_seconds', float('nan')), ('sign_agreement', 1.1),
+                           ('qualified_covered_seconds', 10**400), ('sign_agreement', 10**400),
                            ('rejection_reason', '/private/error'), ('stage', 'unknown'),
                            ('code', '<script>')]:
             doc = add_failure(v13_document(project(), partial=True))
@@ -292,6 +293,56 @@ class MountingUploadTests(unittest.TestCase):
                       videos=['video.avi'], attachments=['IMU/session.txt', *paths], ignored=[]))
         bridge.poll(value, dict(report=report, completed=command['id']))
         self.assertIsNone(bridge.public(value)['command'])
+
+    def test_snapshot_budgets_whole_report_and_preserves_internal_selection_and_diagnostics(self):
+        import copy
+        from backend.upload_agent import AgentEngine
+        from backend.upload_bridge import UploadBridge
+        from backend.prediction_diagnostics import upload_report
+        from backend.test_r2_integration import USER
+        f = self.fixture
+        engine = AgentEngine(f.root, SimpleNamespace(), service=SimpleNamespace(local=f.root/'agent'))
+        paths = ['IMU/' + '/'.join(['采' * 75] * 4) + f'/{index}.txt' for index in range(64)]
+        rows = [dict(record_id=hashlib.sha256(path.encode()).hexdigest()[:16], path=path,
+                     reason='inference_failed', diagnostics=[mounting_diagnostic()]) for path in paths]
+        failure = PredictionFailure(dict(id='b'*64, error_details=rows), [dict(path=p) for p in paths])
+        preview = upload_report(dict(sha256='a'*64, job_id='b'*64, segments=1,
+            batch_status='partial', validated_records=1, total_records=65, needs_alignment_review=True,
+            excluded_records=rows, mounting_records=[], inherited_record_ids=[]))
+        for kind in ('prediction', 'prediction_failure', 'selection_only'):
+            with self.subTest(kind=kind):
+                count = 1800 if kind == 'selection_only' else 1200
+                selected = dict(name='fixture', capture_date='20261019', videos=['video.avi'],
+                                attachments=[f'IMU/{"采"*64}{i:04d}.wplay' for i in range(count)], ignored=[])
+                engine.report = dict(busy=False, selection=selected)
+                if kind != 'selection_only':
+                    engine.report['job'] = dict(state='error' if kind == 'prediction_failure' else 'ready',
+                        detail='fixture', **{kind: preview if kind == 'prediction' else failure.prediction_failure})
+                original = copy.deepcopy(engine.report)
+                self.assertGreater(len(json.dumps(original)), 512 * 1024)
+                visible = engine.snapshot()
+                self.assertLessEqual(len(json.dumps(visible)), 512 * 1024)
+                self.assertEqual(engine.report, original)
+                if kind == 'prediction':
+                    self.assertTrue(visible['job'][kind]['needs_alignment_review'])
+                    self.assertEqual(visible['job'][kind]['excluded_records_total'], 64)
+                elif kind == 'prediction_failure':
+                    details = visible['job'][kind]
+                    self.assertEqual(details['omitted_records'] + len(details['records']), 64)
+                else:
+                    self.assertEqual(visible['selection']['attachments_total'], count)
+                bridge = UploadBridge(SimpleNamespace(request=lambda *args, **kwargs: {'user': USER}))
+                registered = bridge.register(dict(platform='darwin', protocol=1))
+                bridge.pair(USER, registered, 'explicit-fixture-session')
+                value = bridge.agents[registered['id']]
+                bridge.command(USER, value['id'], dict(action='start'))
+                command = bridge.poll(value, {})['command']
+                bridge.poll(value, dict(report=visible, completed=command['id']))
+                self.assertIsNone(bridge.public(value)['command'])
+                if kind == 'selection_only':
+                    visible['selection']['attachments_total'] = 0
+                    with self.assertRaises(HTTPException):
+                        bridge.poll(value, dict(report=visible))
 
 
 class MountingTaskTests(unittest.TestCase):

@@ -124,7 +124,7 @@ class UploadBridge:
                 raise HTTPException(422, '组件错误信息无效。')
             selected=report.get('selection')
             if selected is not None:
-                if (not isinstance(selected,dict) or set(selected)-{'upload_kind'}!={'name','capture_date','videos','attachments','ignored'}
+                if (not isinstance(selected,dict) or set(selected)-{'upload_kind','videos_total','attachments_total','ignored_total'}!={'name','capture_date','videos','attachments','ignored'}
                         or not isinstance(selected['name'],str) or '/' in selected['name'] or '\\' in selected['name']
                         or selected.get('upload_kind', 'video') not in ('video', 'imu')
                         or not isinstance(selected['capture_date'],str)
@@ -136,6 +136,9 @@ class UploadBridge:
                     if (not isinstance(items,list) or len(items)>5000 or any(not isinstance(item,str) or len(item)>1000
                             or item.startswith('/') or '\\' in item or ':' in item for item in items)):
                         raise HTTPException(422, '组件不能上报本机绝对路径。')
+                    total = selected.get(key + '_total', len(items))
+                    if type(total) is not int or not len(items) <= total <= 5000:
+                        raise HTTPException(422, '组件文件清单总数无效。')
         with self.lock:
             if report is not None:
                 value['report'] = report
