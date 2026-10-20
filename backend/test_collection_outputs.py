@@ -184,6 +184,136 @@ class CollectionOutputTests(unittest.TestCase):
         self.assertEqual(self.provider.get(old),b'{"external":"keep old path"}')
         self.assertEqual(json.loads(self.data('final/posture.timeline.json'))['segments'][0]['label'],'站')
 
+    def test_legacy_old_task_retry_preserves_latest_approved_result(self):
+        old = self.approved()
+        rule = self.store.publish_rule(self.lead,{'name':'另一任务','task_type':'another',
+            'axes':[{'id':'posture','name':'姿势','mode':'state','labels':['站','坐']}]})
+        self.task = self.store.create_task(self.lead,{**self.body,'rule_id':rule['id']},
+                                           collection_layout=old['collection'])
+        changed = {'posture':[{'id':'new','start_ms':2000,'end_ms':2500,'label':'坐','lane':0,'kind':'interval'}]}
+        # Equal timestamps still have a deterministic insertion order.
+        with patch.object(self,'annotation',return_value=changed), \
+                patch('backend.tasks.store.stamp',return_value=old['accepted_at']):
+            newer = self.approved()
+        latest = self.data('final/posture.timeline.json')
+        self.legacy_output_layout()
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.flush(old['id'])['state'],'ready')
+        self.assertEqual(self.data('final/posture.timeline.json'),latest)
+        self.assertEqual(json.loads(latest)['task_result']['final_version_id'],newer['final_version_id'])
+        self.assertEqual(self.data('finally/posture.timeline.json'),latest)
+        for name in ('scene.timeline.json','food.timeline.json'):
+            self.assertEqual(self.data('final/'+name),self.data('finally/'+name))
+
+    def test_deleted_newer_task_does_not_block_or_contribute_to_migration(self):
+        old = self.approved()
+        original = self.data('final/posture.timeline.json')
+        rule = self.store.publish_rule(self.lead,{'name':'另一任务','task_type':'another',
+            'axes':[{'id':'posture','name':'姿势','mode':'state','labels':['站','坐']}]})
+        self.task = self.store.create_task(self.lead,{**self.body,'rule_id':rule['id']},
+                                           collection_layout=old['collection'])
+        changed = {'posture':[{'id':'new','start_ms':2000,'end_ms':2500,'label':'坐','lane':0,'kind':'interval'}]}
+        with patch.object(self,'annotation',return_value=changed):
+            newer = self.approved()
+        self.legacy_output_layout()
+        legacy = copy.deepcopy(self.provider.objects)
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        put = self.provider.put
+        def interrupted(key,payload,**options):
+            if key.endswith('/final/food.timeline.json'):
+                raise HTTPException(503,'migration interrupted before marker')
+            return put(key,payload,**options)
+        with patch.object(self.provider,'put',side_effect=interrupted):
+            self.assertEqual(restarted.flush(old['id'])['state'],'error')
+        # Deletion after partial publication must be honored on retry. A
+        # journaled partial file is not a completed newer final snapshot.
+        self.store.delete_task(self.lead,newer['id'],{'expected_revision':newer['revision']})
+        self.assertEqual(restarted.flush(old['id'])['state'],'ready')
+        self.assertEqual(self.data('final/posture.timeline.json'),original)
+        for key,record in legacy.items():
+            self.assertEqual(self.provider.objects[key],record)
+        self.assertEqual(restarted.flush(newer['id'])['state'],'error')
+
+    def another_approved(self, original, kind='later', axes=None):
+        axes = axes or [{'id':'scene','name':'场景','mode':'state','labels':['室内']},
+                    {'id':'posture','name':'姿势','mode':'state','labels':['站','坐']},
+                    {'id':'food','name':'饮食','mode':'state','labels':['喝水']}]
+        rule = self.store.publish_rule(self.lead,{'name':'后续任务','task_type':kind,'axes':axes})
+        self.task = self.store.create_task(self.lead,{**self.body,'rule_id':rule['id']},
+                                           collection_layout=original['collection'])
+        changed = {key:value for key,value in self.annotation('坐').items() if key in {axis['id'] for axis in axes}}
+        with patch.object(self,'annotation',return_value=changed):
+            return self.approved()
+
+    def test_interrupted_migration_can_recover_after_newer_task_is_accepted(self):
+        old = self.approved()
+        self.legacy_output_layout()
+        originals = copy.deepcopy(self.provider.objects)
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        put = self.provider.put
+        def fail_last_file(key,payload,**options):
+            if key.endswith('/final/food.timeline.json'):
+                raise HTTPException(503,'last JSON interrupted')
+            return put(key,payload,**options)
+        with patch.object(self.provider,'put',side_effect=fail_last_file):
+            self.assertEqual(restarted.flush(old['id'])['state'],'error')
+        partial = self.data('final/posture.timeline.json')
+        self.assertNotIn(self.prefix+'/timeline/final/.datamark-final.json',self.provider.objects)
+        newer = self.another_approved(old)
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.flush(old['id'])['state'],'ready')
+        self.assertEqual(restarted.flush(newer['id'])['state'],'ready')
+        self.assertEqual(json.loads(self.data('final/posture.timeline.json'))['segments'][0]['label'],'坐')
+        for key,record in originals.items():
+            self.assertEqual(self.provider.objects[key],record)
+        with self.store.db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM capture_output_writes').fetchone()[0],0)
+            ident,raw = db.execute("SELECT id,body FROM capture_output_jobs WHERE kind='final' ORDER BY rowid DESC LIMIT 1").fetchone()
+            db.execute("UPDATE capture_output_jobs SET state='pending' WHERE id=?",(ident,))
+        # Once completion is verified, an external rollback to old platform
+        # bytes must not be mistaken for an unfinished platform write.
+        key = self.prefix+'/timeline/final/posture.timeline.json'
+        self.provider.put(key,partial,etag=self.provider.objects[key][1])
+        self.assertEqual(restarted.flush(newer['id'])['state'],'error')
+        self.assertEqual(self.provider.get(key),partial)
+
+    def test_obsolete_personal_version_conflict_does_not_block_latest_migration(self):
+        old = self.approved()
+        newer = self.another_approved(old)
+        self.legacy_output_layout()
+        latest = self.data('finally/posture.timeline.json')
+        with self.store.db() as db:
+            db.execute("""UPDATE capture_output_jobs SET state='error',error='old conflict'
+                WHERE kind='submission' AND id IN
+                (SELECT job_id FROM capture_output_links WHERE task_id=?)""",(old['id'],))
+        key = self.prefix+'/timeline/张三/v1/posture.timeline.json'
+        self.provider.objects[key] = (b'unknown old version','external')
+        restarted = CollectionOutputs(self.store,self.media,self.editor)
+        self.assertEqual(restarted.flush(newer['id'])['state'],'ready')
+        self.assertEqual(self.data('final/posture.timeline.json'),latest)
+        self.assertEqual(self.provider.get(key),b'unknown old version')
+
+    def test_successful_other_axis_does_not_discard_partial_write_recovery(self):
+        old = self.approved()
+        put = self.provider.put
+        def interrupted(key,payload,**options):
+            if key.endswith('/final/food.timeline.json'):
+                raise HTTPException(503,'partial multi-axis update')
+            return put(key,payload,**options)
+        with patch.object(self.provider,'put',side_effect=interrupted):
+            self.another_approved(old)
+        self.another_approved(old,kind='posture-only',
+            axes=[{'id':'posture','name':'姿势','mode':'state','labels':['站','坐']}])
+        key = self.prefix+'/timeline/final/scene.timeline.json'
+        with self.store.db() as db:
+            self.assertGreater(db.execute('SELECT COUNT(*) FROM capture_output_writes WHERE key=?',(key,)).fetchone()[0],0)
+        latest = self.another_approved(old,kind='scene-only',
+            axes=[{'id':'scene','name':'场景','mode':'state','labels':['室内']}])
+        with self.store.db() as db:
+            self.assertEqual(self.outputs.status(db,latest['id'])['state'],'ready')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM capture_output_writes WHERE key=?',(key,)).fetchone()[0],0)
+        self.assertEqual(json.loads(self.provider.get(key))['task_result']['task_id'],latest['id'])
+
     def test_reserved_person_names_do_not_share_final_directory(self):
         self.names.update(a='FiNaL',b='finally')
         task = self.approved()

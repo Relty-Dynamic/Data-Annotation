@@ -29,6 +29,8 @@ class CollectionOutputs:
                     id TEXT PRIMARY KEY,kind TEXT,body TEXT,state TEXT,error TEXT);
                 CREATE TABLE IF NOT EXISTS capture_output_links(
                     job_id TEXT,task_id TEXT,PRIMARY KEY(job_id,task_id));
+                CREATE TABLE IF NOT EXISTS capture_output_writes(
+                    key TEXT,sha256 TEXT,PRIMARY KEY(key,sha256));
             ''')
             # Requeue the exact frozen payloads in the new layout. Existing
             # objects remain untouched; normal sync performs the new writes.
@@ -41,8 +43,36 @@ class CollectionOutputs:
                 if body['directory'] != legacy:
                     continue
                 body['directory'] = prefix+'/final'
+                if kind == 'final':
+                    body['migrated_layout'] = True
                 db.execute("UPDATE capture_output_jobs SET body=?,state='pending',error=NULL WHERE id=?",
                            (json.dumps(body,ensure_ascii=False),ident))
+
+    def _migration_final(self, body):
+        """Rebuild the active collection result per file from frozen plans."""
+        candidates = []
+        with self.store.db() as db:
+            for ident,raw in db.execute("SELECT id,body FROM capture_output_jobs WHERE kind='final' ORDER BY rowid"):
+                candidate = json.loads(raw)
+                if candidate['prefix'] != body['prefix']:
+                    continue
+                tasks = [row[0] for row in db.execute(
+                    'SELECT task_id FROM capture_output_links WHERE job_id=?',(ident,))]
+                if not tasks or any(self.store._read(db,'tasks',task)['status']=='deleted' for task in tasks):
+                    continue
+                candidates.append(candidate)
+        if not candidates:
+            return body
+        winners,dependencies = {},[]
+        # Stable ordering resolves equal timestamps by original insertion order.
+        for candidate in sorted(candidates,key=lambda item:item['metadata']['accepted_at']):
+            for name in candidate['files']:
+                winners[name] = candidate
+            metadata = candidate['metadata']
+        for candidate in winners.values():
+            dependencies.extend(candidate.get('dependencies',[]))
+        return {**body,'files':{name:item['files'][name] for name,item in winners.items()},'metadata':metadata,
+                'dependencies':list(dict.fromkeys(dependencies))}
 
     def _plan(self, db, task):
         capture = task.get('collection')
@@ -239,8 +269,14 @@ class CollectionOutputs:
         if previous and previous.get('application') != APPLICATION:
             raise HTTPException(409,'最终目录含无法确认归属的记录，原文件已保留。')
         if previous and previous['metadata']['accepted_at'] > body['metadata']['accepted_at']:
-            return  # Backfilling history must not replace a newer approved result.
+            manifest['metadata'] = previous['metadata']
         known = previous.get('files',{}) if previous else {}
+        # Persist content identities before sending writes. A failed multi-file
+        # publication can then recognize its own partial files after restart,
+        # even when a newer accepted result is selected on retry.
+        with self.store.db() as db:
+            db.executemany('INSERT OR IGNORE INTO capture_output_writes VALUES (?,?)',
+                [(directory+'/'+name,checksum) for name,checksum in manifest['files'].items()])
         for name,text in files.items():
             key,data = directory+'/'+name,text.encode()
             existing,version = self.provider.optional_json(key)
@@ -249,8 +285,18 @@ class CollectionOutputs:
             else:
                 raw = self.provider.get(key)
                 if raw != data:
-                    if hashlib.sha256(raw).hexdigest() != known.get(name):
+                    checksum = hashlib.sha256(raw).hexdigest()
+                    with self.store.db() as db:
+                        partial = db.execute('SELECT 1 FROM capture_output_writes WHERE key=? AND sha256=?',
+                                             (key,checksum)).fetchone()
+                    if checksum != known.get(name) and not partial:
                         raise HTTPException(409,'最终目录文件已被外部修改，原文件已保留，请核对后重试。')
+                    incoming = json.loads(text)['task_result']['accepted_at']
+                    if checksum == known.get(name) and existing['task_result']['accepted_at'] > incoming:
+                        manifest['files'][name] = checksum
+                        if existing['task_result']['accepted_at'] > manifest['metadata']['accepted_at']:
+                            manifest['metadata'] = existing['task_result']
+                        continue
                     self.provider.put(key,data,etag=version)
             if self.provider.get(key) != data:
                 raise HTTPException(503,'最终 JSON 读回校验失败。')
@@ -259,6 +305,9 @@ class CollectionOutputs:
         self.provider.put(marker,payload,etag=etag,create=etag is None)
         if self.provider.get(marker) != payload:
             raise HTTPException(503,'最终结果清单读回校验失败。')
+        with self.store.db() as db:
+            db.executemany('DELETE FROM capture_output_writes WHERE key=?',
+                           [(directory+'/'+name,) for name in files])
 
     def flush(self, task_id):
         with self.lock:
@@ -279,14 +328,16 @@ class CollectionOutputs:
             return True
         body = json.loads(raw)
         visiting.add(ident)
-        for dependency in body.get('dependencies',[]):
-            if not self._run(dependency,visiting):
-                return False
         try:
             with self.store.db() as db:
                 for task_id, in db.execute('SELECT task_id FROM capture_output_links WHERE job_id=?',(ident,)):
                     if self.store._read(db,'tasks',task_id)['status']=='deleted':
                         raise HTTPException(410,'关联任务已删除，停止写入采集结果目录，历史任务记录保留。')
+            if kind == 'final' and body.get('migrated_layout'):
+                body = self._migration_final(body)
+            for dependency in body.get('dependencies',[]):
+                if not self._run(dependency,visiting):
+                    return False
             self._publish(kind,body)
         except Exception as error:
             detail = error.detail if isinstance(error,HTTPException) and isinstance(error.detail,str) else '采集目录结果同步失败，请重试；任务记录已保留。'
