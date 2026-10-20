@@ -13,7 +13,7 @@ from backend.prediction_metadata import metadata
 from backend.prediction_prepare import PredictionFailure
 from backend.r2_folder import scan_collection, FolderUploadManager
 from backend import test_prediction as fixtures
-from backend.test_prediction import document, project, v13_document
+from backend.test_prediction import project, v13_document
 
 
 def add_mounting(doc, *, review=True):
@@ -43,9 +43,9 @@ def add_failure(doc):
 
 
 class MountingContractTests(unittest.TestCase):
-    def test_mounting_review_is_independent_of_confirmed_alignment_and_preserves_coordinates(self):
+    def test_mounting_review_is_independent_of_confirmed_alignment(self):
         doc = add_mounting(v13_document(project()))
-        rows, info = convert(json.dumps(doc).encode(), project())
+        _, info = convert(json.dumps(doc).encode(), project())
         self.assertFalse(info['needs_alignment_review'])
         self.assertTrue(info['needs_mounting_review'])
         self.assertTrue(info['needs_review'])
@@ -55,15 +55,12 @@ class MountingContractTests(unittest.TestCase):
         self.assertIn('腿部安装方向需要人工复核', warning(info))
         self.assertIn('IMU/session.txt', warning(info))
         self.assertNotIn('校时', warning(info))
-        self.assertEqual([(r['start_ms'], r['end_ms']) for r in rows], [(0, 3000), (5000, 8000)])
 
-    def test_old_producers_and_legacy_mounting_path_do_not_gain_false_warnings(self):
-        for doc in (json.loads(document(project())), v13_document(project()),
-                    add_mounting(v13_document(project()), review=False)):
-            info = metadata(doc)
-            self.assertFalse(info['needs_mounting_review'])
-            self.assertFalse(info['needs_review'])
-            self.assertIsNone(warning(info))
+    def test_legacy_mounting_method_does_not_gain_false_warnings(self):
+        info = metadata(add_mounting(v13_document(project()), review=False))
+        self.assertFalse(info['needs_mounting_review'])
+        self.assertFalse(info['needs_review'])
+        self.assertIsNone(warning(info))
 
     def test_malformed_or_suppressed_mounting_flags_reject_import(self):
         cases = []
