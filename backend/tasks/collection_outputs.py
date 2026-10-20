@@ -30,6 +30,19 @@ class CollectionOutputs:
                 CREATE TABLE IF NOT EXISTS capture_output_links(
                     job_id TEXT,task_id TEXT,PRIMARY KEY(job_id,task_id));
             ''')
+            # Requeue the exact frozen payloads in the new layout. Existing
+            # objects remain untouched; normal sync performs the new writes.
+            db.execute('BEGIN IMMEDIATE')
+            for ident,kind,raw in db.execute(
+                    "SELECT id,kind,body FROM capture_output_jobs WHERE kind IN ('final','delivery')").fetchall():
+                body = json.loads(raw)
+                prefix = body['prefix']
+                legacy = prefix+'/finally' if kind == 'final' else prefix
+                if body['directory'] != legacy:
+                    continue
+                body['directory'] = prefix+'/final'
+                db.execute("UPDATE capture_output_jobs SET body=?,state='pending',error=NULL WHERE id=?",
+                           (json.dumps(body,ensure_ascii=False),ident))
 
     def _plan(self, db, task):
         capture = task.get('collection')
@@ -68,7 +81,7 @@ class CollectionOutputs:
             return {'id':user_id,'folder':row[0],'name':row[1]}
         name = self._display(db,user_id,names)
         folder = safe_name(name)
-        if folder.casefold() == 'finally' or db.execute(
+        if folder.casefold() in ('final', 'finally') or db.execute(
                 'SELECT 1 FROM capture_output_people WHERE prefix=? AND lower(folder)=lower(?)',(prefix,folder)).fetchone():
             folder += '-' + hashlib.sha256(user_id.encode()).hexdigest()[:12]
         db.execute('INSERT INTO capture_output_people VALUES (?,?,?,?,0)',(prefix,user_id,folder,name))
@@ -130,7 +143,7 @@ class CollectionOutputs:
                     'accepted_by':task['accepted_by'],'accepted_by_name':self._display(db,task['accepted_by'],names),
                     'accepted_at':task['accepted_at']}
         files = self._documents(project,task['final_annotations'],metadata)
-        return self._queue(db,ident,'final',[task['id']],{'prefix':prefix,'directory':prefix+'/finally',
+        return self._queue(db,ident,'final',[task['id']],{'prefix':prefix,'directory':prefix+'/final',
                            'files':files,'metadata':metadata,'dependencies':dependencies})
 
     def delivery(self, db, tasks, delivery, content, names):
@@ -174,7 +187,7 @@ class CollectionOutputs:
                         'accepted_by':task['accepted_by'],'accepted_by_name':self._display(db,task['accepted_by'],names),
                         'submission_versions':json.dumps(versions,ensure_ascii=False),'delivery_id':delivery['id']})
             self._queue(db,ident,'delivery',[task['id'] for task,_ in items],{'prefix':prefix,
-                'directory':prefix,'files':{'delivery-'+delivery['id']+'.csv':'\ufeff'+stream.getvalue()},
+                'directory':prefix+'/final','files':{'delivery-'+delivery['id']+'.csv':'\ufeff'+stream.getvalue()},
                 'metadata':{'delivery_id':delivery['id']},'dependencies':[final for _,final in items if final]})
 
     def status(self, db, task_id):
@@ -206,6 +219,13 @@ class CollectionOutputs:
 
     def _publish(self, kind, body):
         directory,files = body['directory'],body['files']
+        if kind in ('final', 'delivery'):
+            with self.store.db() as db:
+                occupied = db.execute(
+                    "SELECT 1 FROM capture_output_people WHERE prefix=? AND lower(folder)='final'",
+                    (body['prefix'],)).fetchone()
+            if occupied:
+                raise HTTPException(409,'final 目录已绑定历史标注员，原文件已保留；请管理员核对目录冲突。')
         manifest = {'application':APPLICATION,'metadata':body['metadata'],
                     'files':{name:hashlib.sha256(text.encode()).hexdigest() for name,text in files.items()}}
         if kind != 'final':

@@ -746,11 +746,11 @@ class TaskHostTests(unittest.TestCase):
         task=self.request(client,'POST',path+'/review',{'expected_revision':task['revision'],'action':'pass'},headers)
         task=self.request(client,'POST',path+'/accept',{'expected_revision':task['revision']},headers)
         self.assertEqual(task['output_sync']['state'],'ready')
-        self.assertIn(prefix+'/timeline/finally/posture.timeline.json',provider.objects)
+        self.assertIn(prefix+'/timeline/final/posture.timeline.json',provider.objects)
         delivery=self.request(client,'POST','/deliveries',{'task_ids':[task['id']],
             'expected_revisions':{task['id']:task['revision']},'request_id':'export'},headers)
         self.assertEqual(delivery['output_sync'][0]['state'],'ready')
-        self.assertIn(prefix+'/timeline/delivery-'+delivery['id']+'.csv',provider.objects)
+        self.assertIn(prefix+'/timeline/final/delivery-'+delivery['id']+'.csv',provider.objects)
         client.cookies.clear()
         self.request(client,'POST',path+'/outputs/retry',{},headers,expected=401)
 
