@@ -200,9 +200,17 @@ class MountingUploadTests(unittest.TestCase):
                 local = f.root/f'agent-{pipeline}'
                 local.mkdir()
                 engine = AgentEngine(f.root, SimpleNamespace(), service=SimpleNamespace(local=local))
-                engine.target.request = lambda *args, **kwargs: USER
+                def request(method, path, **kwargs):
+                    if (method, path) == ('GET', '/api/auth/me'):
+                        return USER
+                    if (method, path) == ('GET', '/api/health'):
+                        capabilities = ['s3-single-video-cache-v1']
+                        if pipeline:
+                            capabilities.append('s3-upload-pipeline-v1')
+                        return {'capabilities': capabilities}
+                    raise AssertionError(f'Unexpected upload request: {method} {path}')
+                engine.target.request = request
                 engine.target.capture_exists = lambda _: False
-                engine.target.pipeline_enabled = pipeline
                 engine.selection = engine.manager.select_folder(USER['id'], f.capture)
                 engine.target.attachments = engine.selection['attachments']
                 bridge = UploadBridge(SimpleNamespace(request=lambda *args, **kwargs: {'user': USER}))
@@ -212,9 +220,11 @@ class MountingUploadTests(unittest.TestCase):
                 bridge.command(USER, value['id'], dict(action='start', fields=dict(
                     collector='fixture', prediction='generate', chest_device='chest', thigh_device='thigh')))
                 command = bridge.poll(value, {})['command']
-                with patch('backend.prediction_prepare.prepare_prediction', side_effect=failure), \
+                with patch('backend.prediction_prepare.prepare_prediction', side_effect=failure) as predict, \
                         patch.object(engine.manager, '_compress_video', side_effect=failure):
                     engine.execute(command)
+                predict.assert_called_once()
+                self.assertEqual(engine.target.pipeline_enabled, pipeline)
                 report = engine.snapshot()
                 bridge.poll(value, dict(report=report, completed=engine.completed))
                 visible = bridge.public(value)
