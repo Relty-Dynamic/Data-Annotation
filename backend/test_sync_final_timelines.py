@@ -3,14 +3,15 @@ import copy
 import hashlib
 import io
 import json
+import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from deploy.sync_final_timelines import (
-    APPLICATION, MARKER, SyncError, discover, main, run_lock, sync_capture,
+    APPLICATION, MARKER, PENDING, SyncError, discover, main, run_lock, sync_capture,
 )
 
 
@@ -188,13 +189,14 @@ class FinalTimelineSyncTests(unittest.TestCase):
         self.assertEqual((self.target / MARKER).read_bytes(), old_marker)
 
     def test_failed_nas_readback_does_not_publish_success_marker(self):
-        from deploy.sync_final_timelines import atomic_write
+        from deploy.sync_final_timelines import guarded_write
 
-        def corrupt(path, data):
-            atomic_write(path, data)
-            path.write_bytes(b'fixture storage corruption')
+        def corrupt(path, data, expected, backup=None):
+            guarded_write(path, data, expected, backup)
+            if path.name.endswith('.timeline.json'):
+                path.write_bytes(b'fixture storage corruption')
 
-        with patch('deploy.sync_final_timelines.atomic_write', side_effect=corrupt):
+        with patch('deploy.sync_final_timelines.guarded_write', side_effect=corrupt):
             with self.assertRaisesRegex(SyncError, '整批读回校验失败'):
                 self.sync(apply=True)
         self.assertFalse((self.target / MARKER).exists())
@@ -233,22 +235,202 @@ class FinalTimelineSyncTests(unittest.TestCase):
         self.assertFalse(self.target.exists())
 
     def test_interrupted_copy_does_not_publish_marker_and_retry_finishes(self):
-        from deploy.sync_final_timelines import atomic_write
+        from deploy.sync_final_timelines import guarded_write
         calls = 0
 
-        def interrupt(path, data):
+        def interrupt(path, data, expected, backup=None):
             nonlocal calls
             calls += 1
             if calls == 3:
                 raise OSError('fixture NAS interrupted')
-            atomic_write(path, data)
+            guarded_write(path, data, expected, backup)
 
-        with patch('deploy.sync_final_timelines.atomic_write', side_effect=interrupt):
+        with patch('deploy.sync_final_timelines.guarded_write', side_effect=interrupt):
             with self.assertRaises(OSError):
                 self.sync(apply=True)
         self.assertFalse((self.target / MARKER).exists())
         self.assertEqual(self.sync(apply=True)['copy'], 1)
         self.assertTrue((self.target / MARKER).is_file())
+
+    def test_late_manual_edit_is_captured_and_restored_without_loss(self):
+        self.sync(apply=True)
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z', axes=('posture', 'scene'))
+        target = self.target / 'posture.timeline.json'
+        manual = b'{"fixture":"manual edit after preflight"}'
+        rename = os.rename
+
+        def editing(source, destination):
+            if source == target:
+                target.write_bytes(manual)
+            rename(source, destination)
+
+        with patch('deploy.sync_final_timelines.os.rename', side_effect=editing):
+            with self.assertRaisesRegex(SyncError, '实际写入时变化'):
+                self.sync(apply=True)
+        self.assertEqual(target.read_bytes(), manual)
+        backups = list((self.collection / 'timeline' / '.final-sync-backups').glob('*/posture.timeline.json'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), manual)
+        self.assertEqual(json.loads((self.target / MARKER).read_bytes())['metadata']['final_version_id'], 'v1')
+
+    def test_concurrent_creation_during_replacement_is_never_overwritten(self):
+        self.sync(apply=True)
+        target = self.target / 'posture.timeline.json'
+        old = target.read_bytes()
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z')
+        link = os.link
+        manual = b'{"fixture":"concurrent new file"}'
+
+        def creating(source, destination, **kwargs):
+            if Path(source).name.startswith('.sync-stage-') and destination == target:
+                target.write_bytes(manual)
+            return link(source, destination, **kwargs)
+
+        with patch('deploy.sync_final_timelines.os.link', side_effect=creating):
+            with self.assertRaisesRegex(SyncError, '其他写入者创建'):
+                self.sync(apply=True)
+        self.assertEqual(target.read_bytes(), manual)
+        self.assertTrue(any(path.read_bytes() == old for path in
+                            (self.collection / 'timeline' / '.final-sync-backups').glob('*/posture.timeline.json')))
+
+    def test_open_writer_after_capture_is_preserved_in_backup(self):
+        self.sync(apply=True)
+        target = self.target / 'posture.timeline.json'
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z')
+        link = os.link
+        manual = b'{"fixture":"write through open descriptor"}'
+        with target.open('r+b') as writer:
+            def writing(source, destination, **kwargs):
+                if Path(source).name.startswith('.sync-stage-') and destination == target:
+                    writer.seek(0)
+                    writer.write(manual)
+                    writer.truncate()
+                    writer.flush()
+                return link(source, destination, **kwargs)
+
+            with patch('deploy.sync_final_timelines.os.link', side_effect=writing):
+                result = self.sync(apply=True)
+        self.assertEqual((Path(result['backup']) / target.name).read_bytes(), manual)
+        self.assertEqual(target.read_bytes(), self.store.objects[DIRECTORY + target.name])
+
+    def test_source_change_after_writes_recovers_to_newer_accepted_version(self):
+        self.sync(apply=True)
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z', axes=('posture', 'scene'))
+        get = self.store.get
+        count = 0
+
+        def changing(key):
+            nonlocal count
+            if key == DIRECTORY + MARKER:
+                count += 1
+                if count == 3:
+                    self.store.publish(version='v3', accepted_at='2026-10-21T03:00:00Z', axes=('posture', 'scene'))
+            return get(key)
+
+        with patch.object(self.store, 'get', side_effect=changing):
+            with self.assertRaisesRegex(SyncError, '写入期间变化'):
+                self.sync(apply=True)
+        self.assertTrue((self.target / PENDING).is_file())
+        self.assertEqual(self.sync(apply=True)['copy'], 2)
+        self.assertFalse((self.target / PENDING).exists())
+        for name in ('posture.timeline.json', 'scene.timeline.json', MARKER):
+            self.assertEqual((self.target / name).read_bytes(), self.store.objects[DIRECTORY + name])
+
+    def test_interrupted_update_resumes_new_source_but_rejects_manual_content(self):
+        from deploy.sync_final_timelines import guarded_write
+        self.sync(apply=True)
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z', axes=('posture', 'scene'))
+
+        def interrupt(path, data, expected, backup=None):
+            if path.name == 'scene.timeline.json':
+                raise OSError('fixture disconnected NAS')
+            guarded_write(path, data, expected, backup)
+
+        with patch('deploy.sync_final_timelines.guarded_write', side_effect=interrupt):
+            with self.assertRaises(OSError):
+                self.sync(apply=True)
+        self.store.publish(version='v3', accepted_at='2026-10-21T03:00:00Z', axes=('posture', 'scene'))
+        self.assertEqual(self.sync(apply=True)['copy'], 2)
+        self.assertFalse((self.target / PENDING).exists())
+        (self.target / 'posture.timeline.json').write_bytes(b'{"fixture":"real human edit"}')
+        with self.assertRaisesRegex(SyncError, '人工修改'):
+            self.sync(apply=True)
+
+    def test_hardlink_failure_leaves_original_files_in_place(self):
+        self.sync(apply=True)
+        old = (self.target / 'posture.timeline.json').read_bytes()
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z')
+        with patch('deploy.sync_final_timelines.os.link', side_effect=OSError('fixture unsupported')):
+            with self.assertRaisesRegex(SyncError, '不支持.*硬链接'):
+                self.sync(apply=True)
+        self.assertEqual((self.target / 'posture.timeline.json').read_bytes(), old)
+
+    def test_mount_check_failure_is_logged_before_any_s3_request(self):
+        args = ['--config', str(self.root / 'not-read.json'), '--nas-root', str(self.nas), '--apply',
+                '--mount-root', str(self.root / 'nas')]
+        with patch('deploy.sync_final_timelines.os.path.ismount', return_value=False), \
+                patch('deploy.sync_final_timelines.R2Store') as store, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main(args), 1)
+        store.assert_not_called()
+        self.assertIn('NAS 挂载检查失败', errors.getvalue())
+
+    def test_restart_after_marker_capture_recovers_using_persisted_journal(self):
+        from deploy.sync_final_timelines import guarded_write
+        self.sync(apply=True)
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z', axes=('posture', 'scene'))
+
+        def crash(path, data, expected, backup=None):
+            if path.name == MARKER:
+                os.rename(path, backup)
+                raise OSError('fixture process died after marker capture')
+            guarded_write(path, data, expected, backup)
+
+        with patch('deploy.sync_final_timelines.guarded_write', side_effect=crash):
+            with self.assertRaises(OSError):
+                self.sync(apply=True)
+        self.assertFalse((self.target / MARKER).exists())
+        self.assertTrue((self.target / PENDING).exists())
+        self.store.publish(version='v3', accepted_at='2026-10-21T03:00:00Z', axes=('posture', 'scene'))
+        self.assertEqual(self.sync(apply=True)['copy'], 2)
+        self.assertEqual((self.target / MARKER).read_bytes(), self.store.objects[DIRECTORY + MARKER])
+        self.assertFalse((self.target / PENDING).exists())
+
+    def test_restart_after_completed_marker_only_cleans_pending_record(self):
+        unlink = Path.unlink
+        pending = self.target / PENDING
+
+        def crash(path, *args, **kwargs):
+            if path == pending:
+                raise OSError('fixture process died before journal cleanup')
+            return unlink(path, *args, **kwargs)
+
+        with patch.object(Path, 'unlink', crash):
+            with self.assertRaises(OSError):
+                self.sync(apply=True)
+        self.assertTrue(pending.is_file())
+        self.assertTrue((self.target / MARKER).is_file())
+        self.assertEqual(self.sync(apply=True)['copy'], 0)
+        self.assertFalse(pending.exists())
+
+    def test_unknown_edit_is_rejected_while_own_update_is_pending(self):
+        from deploy.sync_final_timelines import guarded_write
+        self.sync(apply=True)
+        self.store.publish(version='v2', accepted_at='2026-10-21T02:00:00Z', axes=('posture', 'scene'))
+
+        def interrupt(path, data, expected, backup=None):
+            if path.name == 'scene.timeline.json':
+                raise OSError('fixture interrupted update')
+            guarded_write(path, data, expected, backup)
+
+        with patch('deploy.sync_final_timelines.guarded_write', side_effect=interrupt):
+            with self.assertRaises(OSError):
+                self.sync(apply=True)
+        manual = b'{"fixture":"unknown edit while pending"}'
+        (self.target / 'posture.timeline.json').write_bytes(manual)
+        self.store.publish(version='v3', accepted_at='2026-10-21T03:00:00Z', axes=('posture', 'scene'))
+        with self.assertRaisesRegex(SyncError, '人工修改'):
+            self.sync(apply=True)
+        self.assertEqual((self.target / 'posture.timeline.json').read_bytes(), manual)
 
     def test_older_source_is_refused_in_preview_and_apply(self):
         self.sync(apply=True)

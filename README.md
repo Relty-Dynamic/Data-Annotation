@@ -534,17 +534,21 @@ PYTHONNOUSERSITE=1 .venv/bin/python -m deploy.sync_final_timelines \
   --nas-root /mnt/nas/homes/datacollection/daily
 ```
 
-同一命令追加 `--apply` 即实际复制；`--prefix daily/20261021` 可只检查一天，或填写完整的 S3 采集前缀。重复运行只下载目标缺失或摘要变化的 JSON，相同文件复用并核验。更新前将被替换的旧文件及旧完成清单读回备份到该采集目录的 `timeline/.final-sync-backups/<UTC时间-唯一编号>/`；目标存在不同内容的未知文件或人工修改时保留原文件并报错。源端不再列出的文件、NAS 其他文件和备份均不自动删除。
+同一命令追加 `--apply` 即实际复制；`--prefix daily/20261021` 可只检查一天，或填写完整的 S3 采集前缀。重复运行只下载目标缺失或摘要变化的 JSON，相同文件复用并核验。更新时将待替换的实际旧文件移入该采集目录的 `timeline/.final-sync-backups/<UTC时间-唯一编号>/`，核对捕获到的内容后才发布新文件；旧完成清单也按相同规则保留。捕获时发现人工修改会报错，并在目标仍为空时恢复原文件；捕获后有其他写入者创建目标文件时保留其文件，不强行覆盖。仍持有旧文件句柄的写入者，其修改保留在备份文件中。源端不再列出的文件、NAS 其他文件和备份均不自动删除。
 
-JSON 全部校验后才开始写入；每个文件用临时文件写入、读回核验并原子替换，整批读回通过且 S3 完成清单没有变化后，最后更新 NAS 完成清单。单文件读取沿用平台的 32 MiB 上限，单个采集本次待下载 JSON 总计不超过 128 MiB。复制过程可能暂时出现新旧文件并存，整目录不是原子切换；中断不会记录为完成，同一源版本可在下次运行继续。失败后若源端再次换版导致内容冲突，脚本保留现场并报错，需核对备份和版本后处理。另存隐藏的 `.datamark-sync-source.json` 绑定 S3 采集前缀，防止不同年份的同名采集在后续运行中混入同一 NAS 目录。
+JSON 全部校验后才开始写入。每个文件先写入并核验临时文件，再通过不覆盖既有路径的硬链接发布；旧文件捕获到备份后、发布新文件前，目标可能短暂缺失。文件和目录变更均执行持久化同步；NAS 挂载须支持同文件系统内的重命名、硬链接与目录同步，脚本会在移动旧文件前探测硬链接支持，失败不采用强制覆盖。单文件读取沿用平台的 32 MiB 上限，单个采集本次待下载 JSON 总计不超过 128 MiB。整批读回通过且 S3 完成清单没有变化后，最后更新 NAS 完成清单。整目录不是原子切换，读取方应校验完成清单内的全部摘要后使用结果。
+
+写入 JSON 前，脚本在目标目录持久保存 `.datamark-sync-pending.json`，记录本次及未完成尝试中允许的内容摘要。中断或写入期间 S3 再次换版后，下次可识别脚本自身的部分写入并继续同步；不在记录和完成清单内的实际人工修改仍拒绝覆盖。完成清单提交成功后清理这份记录；失败时保留记录及备份，不把未完成批次报告为成功。不要手工删除未完成记录或覆盖文件来绕过冲突。另存隐藏的 `.datamark-sync-source.json` 绑定 S3 采集前缀，防止不同年份的同名采集在后续运行中混入同一 NAS 目录。
 
 核对预演及一次实际复制的日志后，为同一个运行账号配置每天晚上 23:00 扫描一次，时间以运行机器的时区为准。例如（按现场路径调整，不会由脚本自动安装）：
 
 ```cron
-0 23 * * * cd /srv/datamark-sync && /usr/bin/mountpoint -q /mnt/nas && PYTHONNOUSERSITE=1 /srv/datamark-sync/.venv/bin/python -m deploy.sync_final_timelines --config /srv/datamark-sync/.local/r2-readonly.json --nas-root /mnt/nas/homes/datacollection/daily --apply >> /srv/datamark-sync/.local/final-sync.log 2>&1
+0 23 * * * { cd /srv/datamark-sync && PYTHONNOUSERSITE=1 /srv/datamark-sync/.venv/bin/python -m deploy.sync_final_timelines --config /srv/datamark-sync/.local/r2-readonly.json --nas-root /mnt/nas/homes/datacollection/daily --mount-root /mnt/nas --apply; } >> /srv/datamark-sync/.local/final-sync.log 2>&1
 ```
 
-同一运行机、同一 NAS 根目录使用项目 `.local/final-sync/` 下的进程锁，上一轮未结束时新一轮报错退出；可用 `--state-dir` 指定运行机的其他本地锁目录，所有调用须一致，且只在一台机器上安排此同步。每个采集输出实际目标、复制数、未变化数及备份位置，末行给出汇总；成功退出码为 `0`，任意采集失败或运行条件不满足为 `1`，其他无冲突采集仍可继续。上线应另行核验真实 S3 读取、NAS 写入和定时日志，代码测试不代表已启用线上同步。
+定时示例将工作目录切换和脚本执行的输出统一写入日志；日志所在 `.local` 目录须预先存在且可写。`--mount-root` 在任何 S3 请求或同步写入前验证 NAS 挂载点，并确认目标位于该挂载点内；挂载失败写明原因并非零退出。NAS 本机等不使用 `/mnt/nas` 的环境须按实际挂载调整或省略此参数。
+
+同一运行机、同一 NAS 根目录使用项目 `.local/final-sync/` 下的进程锁，上一轮未结束时新一轮报错退出；可用 `--state-dir` 指定运行机的其他本地锁目录，所有调用须一致，且只在一台机器上安排此同步。每个采集输出实际目标、复制数、未变化数及备份位置，末行给出汇总；成功退出码为 `0`，任意采集失败或运行条件不满足为 `1`，其他无冲突采集仍可继续。上线应另行核验真实 S3 读取、NAS 写入、文件系统能力和定时日志，代码测试不代表已启用线上同步。
 
 共用任务接口位于 `/api/tasks/`：`me/users/roles/rules/axis-library/sources/videos/items/deliveries/audit`，任务详情下提供独立草稿、提交、分配、复核、裁定、验收和历史接口；媒体与工作台操作也在任务授权范围下检查，不能使用原项目接口绕过任务隔离。所有数据修改仍校验登录、CSRF 与当前任务权限。
 

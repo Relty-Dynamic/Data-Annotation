@@ -21,6 +21,7 @@ from backend.r2_store import R2Store, object_key
 APPLICATION = 'DataMark-task-timeline-v1'
 MARKER = '.datamark-final.json'
 SOURCE = '.datamark-sync-source.json'
+PENDING = '.datamark-sync-pending.json'
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -64,6 +65,14 @@ def safe_path(root, parts):
     return path
 
 
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def atomic_write(path, data):
     temp = path.with_name('.' + path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
@@ -74,10 +83,82 @@ def atomic_write(path, data):
         if temp.read_bytes() != data:
             raise SyncError('NAS 临时文件读回不一致。')
         os.replace(temp, path)
+        sync_directory(path.parent)
         if path.read_bytes() != data:
             raise SyncError('NAS 目标文件读回不一致。')
     finally:
         temp.unlink(missing_ok=True)
+
+
+def guarded_write(path, data, expected, backup=None):
+    """Capture the real old file, then publish without replacing a racing writer."""
+    if expected == data:
+        if path.is_symlink() or path.read_bytes() != data:
+            raise SyncError('NAS 文件在实际写入时变化，未覆盖：' + path.name)
+        return
+    stage = path.with_name('.sync-stage-' + uuid.uuid4().hex)
+    probe = path.with_name('.sync-link-' + uuid.uuid4().hex)
+    captured = False
+    published = False
+    try:
+        atomic_write(stage, data)
+        # Verify no-replace publication is supported before moving any old file.
+        try:
+            os.link(stage, probe)
+        except OSError:
+            raise SyncError('NAS 文件系统不支持本次安全发布所需的硬链接，未替换原文件。') from None
+        probe.unlink()
+        if expected is not None:
+            if backup is None:
+                raise SyncError('缺少原文件备份位置，未替换。')
+            try:
+                os.rename(path, backup)
+            except FileNotFoundError:
+                raise SyncError('NAS 文件在实际写入时消失，未覆盖：' + path.name) from None
+            captured = True
+            sync_directory(backup.parent)
+            sync_directory(path.parent)
+            if backup.is_symlink() or backup.read_bytes() != expected:
+                raise SyncError('NAS 文件在实际写入时变化，已保留原文件与备份：' + path.name)
+        try:
+            os.link(stage, path)
+        except FileExistsError:
+            raise SyncError('NAS 文件被其他写入者创建，未覆盖：' + path.name) from None
+        published = True
+        sync_directory(path.parent)
+        if path.read_bytes() != data:
+            raise SyncError('NAS 目标文件读回不一致：' + path.name)
+    finally:
+        # Restore only an absent target; a concurrent writer's new file wins.
+        if captured and not published:
+            try:
+                os.link(backup, path, follow_symlinks=False)
+                sync_directory(path.parent)
+            except FileExistsError:
+                pass
+        probe.unlink(missing_ok=True)
+        stage.unlink(missing_ok=True)
+
+
+def pending_record(raw, capture, directory):
+    if raw is None:
+        return {'application': APPLICATION, 'capture_prefix': capture, 'directory': directory,
+                'accepted_at': '', 'files': {}}
+    try:
+        value = json.loads(raw)
+        if (value['application'] != APPLICATION or value['capture_prefix'] != capture
+                or value['directory'] != directory or not isinstance(value['accepted_at'], str)
+                or not isinstance(value['files'], dict)):
+            raise ValueError
+        for name, checksums in value['files'].items():
+            if (not isinstance(name, str) or name.startswith('.') or not name.endswith('.json')
+                    or '/' in name or object_key(name) != name or not isinstance(checksums, list)
+                    or not checksums or any(not isinstance(checksum, str)
+                    or not re.fullmatch('[a-f0-9]{64}', checksum) for checksum in checksums)):
+                raise ValueError
+        return value
+    except (ValueError, TypeError, KeyError, HTTPException):
+        raise SyncError('未完成同步记录无效，保留现场，请核对后重试。') from None
 
 
 def discover(store, prefix, *, directories=None):
@@ -141,10 +222,13 @@ def sync_capture(store, root, capture, *, apply=False, collections=None, directo
     target = safe_path(root, parts + ['timeline', directory])
     marker_path = safe_path(root, parts + ['timeline', directory, MARKER])
     source_path = safe_path(root, parts + ['timeline', directory, SOURCE])
+    pending_path = safe_path(root, parts + ['timeline', directory, PENDING])
     source_raw = source_path.read_bytes() if source_path.exists() else None
     expected_source = json.dumps({'application': APPLICATION, 'capture_prefix': capture}, ensure_ascii=False).encode()
     if source_raw is not None and source_raw != expected_source:
         raise SyncError('NAS 目录已绑定其他 S3 采集路径或来源记录已改变，未复制。')
+    pending_raw = pending_path.read_bytes() if pending_path.exists() else None
+    pending = pending_record(pending_raw, capture, directory)
     remote_directory = capture + '/timeline/' + directory + '/'
     remote_key = remote_directory + MARKER
     remote_raw = store.get(remote_key)
@@ -159,7 +243,8 @@ def sync_capture(store, root, capture, *, apply=False, collections=None, directo
         originals[name] = old
         if old is not None and sha(old) == checksum:
             continue
-        if old is not None and sha(old) != local['files'].get(name):
+        if (old is not None and sha(old) != local['files'].get(name)
+                and sha(old) not in pending['files'].get(name, [])):
             raise SyncError('NAS 存在不同内容的未知文件或人工修改，原文件已保留：' + name)
         data = store.get(remote_directory + name)
         total += len(data)
@@ -181,6 +266,8 @@ def sync_capture(store, root, capture, *, apply=False, collections=None, directo
         raise SyncError('S3 验收版本在读取期间变化，稍后重试。')
     if local_raw is not None and remote['metadata']['accepted_at'] < local['metadata']['accepted_at']:
         raise SyncError('S3 验收清单早于 NAS 已保存版本，未覆盖。')
+    if remote['metadata']['accepted_at'] < pending['accepted_at']:
+        raise SyncError('S3 验收清单早于未完成同步版本，未覆盖。')
     if not apply:
         return {'copy': len(downloads), 'unchanged': len(remote['files']) - len(downloads),
                 'marker': local_raw != remote_raw, 'target': str(target)}
@@ -193,32 +280,48 @@ def sync_capture(store, root, capture, *, apply=False, collections=None, directo
         raise SyncError('NAS 完成清单在同步期间变化，未开始写入。')
     if (source_path.read_bytes() if source_path.exists() else None) != source_raw:
         raise SyncError('NAS 来源记录在同步期间变化，未开始写入。')
+    if (pending_path.read_bytes() if pending_path.exists() else None) != pending_raw:
+        raise SyncError('NAS 未完成同步记录在同步期间变化，未开始写入。')
     if not downloads and local_raw == remote_raw and source_raw == expected_source:
+        pending_path.unlink(missing_ok=True)
+        if pending_raw is not None:
+            sync_directory(target)
         return {'copy': 0, 'unchanged': len(remote['files']), 'marker': False, 'target': str(target)}
     backup = None
-    if local_raw is not None or any(originals[name] is not None for name in downloads):
+    if ((local_raw is not None and local_raw != remote_raw)
+            or any(originals[name] is not None for name in downloads)):
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex
         backup = safe_path(root, parts + ['timeline', '.final-sync-backups', stamp])
         backup.mkdir(parents=True, exist_ok=False)
-        for name in downloads:
-            if originals[name] is not None:
-                atomic_write(backup / name, originals[name])
-        if local_raw is not None:
-            atomic_write(backup / MARKER, local_raw)
+        sync_directory(backup.parent)
+        sync_directory(backup.parent.parent)
     target.mkdir(parents=True, exist_ok=True)
     # Persist the source binding before JSON writes, so an interrupted run cannot
     # later mix another year's identically named collection into this directory.
     if source_raw is None:
-        atomic_write(source_path, expected_source)
+        guarded_write(source_path, expected_source, None)
+    # Persist both baseline and intended identities before the first JSON move.
+    # A later source version can then recognize our interrupted writes safely.
+    for name, checksum in remote['files'].items():
+        known = set(pending['files'].get(name, []))
+        known.add(checksum)
+        if originals[name] is not None:
+            known.add(sha(originals[name]))
+        pending['files'][name] = sorted(known)
+    pending['accepted_at'] = remote['metadata']['accepted_at']
+    atomic_write(pending_path, json.dumps(pending, ensure_ascii=False).encode())
     for name, data in downloads.items():
-        atomic_write(safe_path(root, parts + ['timeline', directory, name]), data)
+        guarded_write(safe_path(root, parts + ['timeline', directory, name]), data,
+                      originals[name], backup / name if backup else None)
     # Verify every selected file, including reused files, before publishing marker.
     for name, checksum in remote['files'].items():
         if sha(safe_path(root, parts + ['timeline', directory, name]).read_bytes()) != checksum:
             raise SyncError('NAS 整批读回校验失败，未更新完成清单。')
     if store.get(remote_key) != remote_raw:
         raise SyncError('S3 验收版本在写入期间变化，未更新完成清单；下次重试。')
-    atomic_write(marker_path, remote_raw)
+    guarded_write(marker_path, remote_raw, local_raw, backup / MARKER if backup else None)
+    pending_path.unlink()
+    sync_directory(target)
     return {'copy': len(downloads), 'unchanged': len(remote['files']) - len(downloads),
             'marker': local_raw != remote_raw, 'backup': str(backup) if backup else None,
             'target': str(target)}
@@ -244,6 +347,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True, help='平台现有受保护 R2 JSON 配置（600）')
     parser.add_argument('--nas-root', type=Path, required=True, help='已挂载的 homes/datacollection/daily 绝对路径')
+    parser.add_argument('--mount-root', type=Path, help='定时运行时核对的 NAS 挂载点，如 /mnt/nas')
     parser.add_argument('--prefix', default='daily', help='S3 范围，如 daily/20261021；NAS 按采集目录名查找')
     parser.add_argument('--apply', action='store_true', help='实际写入；默认只读预演')
     parser.add_argument('--state-dir', type=Path, default=ROOT / '.local/final-sync', help='运行机本地锁目录')
@@ -253,6 +357,11 @@ def main(argv=None):
         if not root.is_absolute() or not root.is_dir() or root.is_symlink():
             raise SyncError('NAS 根目录须为已存在的绝对目录，请先核对挂载。')
         root = root.resolve()
+        if args.mount_root is not None:
+            mount = args.mount_root
+            if (not mount.is_absolute() or mount.is_symlink() or not os.path.ismount(mount)
+                    or not root.is_relative_to(mount.resolve())):
+                raise SyncError('NAS 挂载检查失败或目标不在该挂载点下，本次未执行。')
         prefix = args.prefix.rstrip('/')
         object_key(prefix)
         if prefix != 'daily' and not prefix.startswith('daily/'):
