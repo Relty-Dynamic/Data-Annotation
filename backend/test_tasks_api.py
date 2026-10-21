@@ -757,6 +757,17 @@ class TaskHostTests(unittest.TestCase):
         task=self.request(client,'POST',path+'/accept',{'expected_revision':task['revision']},headers)
         self.assertEqual(task['output_sync']['state'],'ready')
         self.assertIn(prefix+'/timeline/final/posture.timeline.json',provider.objects)
+        # Copy the platform's actual exported JSON, including its acceptance
+        # marker, through the standalone NAS sync without modifying S3 objects.
+        from deploy.sync_final_timelines import MARKER, sync_capture
+        nas_daily = self.root / 'nas-copy' / 'daily'
+        nas_collection = nas_daily / '20261015' / 'fixture'
+        nas_collection.mkdir(parents=True)
+        copied = sync_capture(provider, nas_daily, prefix, apply=True, directory='final')
+        self.assertEqual(copied['copy'], 1)
+        for name in ('posture.timeline.json', MARKER):
+            self.assertEqual((nas_collection / 'timeline' / 'final' / name).read_bytes(),
+                             provider.get(prefix + '/timeline/final/' + name))
         delivery=self.request(client,'POST','/deliveries',{'task_ids':[task['id']],
             'expected_revisions':{task['id']:task['revision']},'request_id':'export'},headers)
         self.assertEqual(delivery['output_sync'][0]['state'],'ready')
