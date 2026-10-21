@@ -11,7 +11,9 @@ const readyUrls = new Map<string, string>();
 export function rememberPreparedPreviews(projectId: string, videos: Array<{id: string; url: string; fast_url?: string}>) {
   for (const video of videos) {
     readyUrls.set(`${projectId}/${video.id}`, video.url);
-    readyUrls.set(`${projectId}/${video.id}?fast=true`, video.fast_url ?? `${video.url}?fast=true`);
+    const fastKey = `${projectId}/${video.id}?fast=true`;
+    if (video.fast_url) readyUrls.set(fastKey, video.fast_url);
+    else readyUrls.delete(fastKey);
   }
 }
 export function forgetProjectPreviews(projectId: string) {

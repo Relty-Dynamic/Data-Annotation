@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path, PureWindowsPath
 from fastapi import HTTPException
 from .source_cache import is_reparse
+from .playback_contract import asset_kinds
 
 LOCK = threading.RLock()
 APPLICATION = 'DataMark-desktop-cache-v1'
@@ -167,7 +168,7 @@ class DesktopCache:
     def publish_entry(self, project: dict, video: dict, entry: dict, source: Path, target: Path) -> dict:
         result = dict(entry)
         stem = safe_name(Path(video['name']).stem)
-        for kind, records in [('normal', [entry['normal']]), ('fast', [entry['fast']]), ('thumbnail', [entry['thumbnail']]), ('sheets', entry['sheets'])]:
+        for kind, records in [(kind, [entry[kind]]) for kind in asset_kinds(entry['profile'])] + [('sheets', entry['sheets'])]:
             fresh = []
             for index, record in enumerate(records):
                 path = self.service.sessions._valid_record(source, record, jpeg=kind in {'thumbnail','sheets'})

@@ -47,7 +47,7 @@ import { useMediaBuffering } from './useMediaBuffering';
 import PreparePanel from './PreparePanel';
 import { sessionAssetUrl } from './sessionAssets';
 import { readProjectPreference, readRestorableProjectPreference, writeProjectPreference, readRemovedProjects, updateRemovedProjects } from './projectPreferences';
-import { advanceVideoTime, applyPlaybackRate, playbackProfile, seekMediaTime, sourceTime } from './playback';
+import { advanceVideoTime, applyPlaybackRate, playbackProfile, maximumPlaybackRate, seekMediaTime, sourceTime } from './playback';
 import { formatTime, parseTime, switchCoveredState, applyAnnotationRange, assignSegmentLanes, deleteAnnotation, TRACKS, projectTracks, projectTrackLabels, projectAnnotationLabels, customTrack, trackName, isEventTrack, locateVideo, annotationsEqual, normalizeStateSeams, isSegmentDraftDirty, splitAnnotationLabel, annotationLabel } from './domain';
 import { createBoundaryEdit, moveAnnotationBoundary, type AnnotationBoundary, type BoundaryEdit } from './annotationBoundary';
 import type { FixedTrack, Project, Segment, Track } from './domain';
@@ -146,7 +146,6 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const [help,setHelp]=useState(false);
  const historyRef=useRef<Project['annotations'][]>([]),redoRef=useRef<Project['annotations'][]>([]);
  const videoIdRef=useRef(''),rateRef=useRef(rate),transportKeys=useRef(new Set<string>());
- rateRef.current=rate;
  async function toggleWorkspaceFullscreen(){
   try{
    if(document.fullscreenElement)await document.exitFullscreen();
@@ -158,12 +157,13 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  function activateVideo(id:string){videoIdRef.current=id;setVideoId(id);}
  function pausePlayback(){wantsPlay.current=false;videoRef.current?.pause();syncNativeTime();setPlaying(false);}
  function applyPlayerRate(v:HTMLVideoElement){
-  const desired=playbackProfile(rateRef.current,wantsPlay.current);
+  const desired=playbackProfile(rateRef.current,wantsPlay.current,hasFastPreview);
   if(v!==videoRef.current||(Number(v.dataset.timeScale)||1)!==desired.scale)return false;
-  applyPlaybackRate(v,desired.nativeRate);return true;
+  try{applyPlaybackRate(v,desired.nativeRate);return true;}
+  catch{wantsPlay.current=false;v.pause();setPlaying(false);setError('浏览器不支持此播放速度，请选择较低倍速。');return false;}
  }
  function playNative(v:HTMLVideoElement){if(!applyPlayerRate(v))return;v.play().catch(()=>{if(videoRef.current!==v||!wantsPlay.current)return;pausePlayback();setError('视频尚未就绪，请稍后点击播放。');});}
- function changeRate(value:number){rateRef.current=value;setRate(value);const v=videoRef.current;if(v)applyPlayerRate(v);}
+ function changeRate(value:number){value=Math.min(value,maximumRate);rateRef.current=value;setRate(value);const v=videoRef.current;if(v)applyPlayerRate(v);}
 
  const activeSegments=useMemo(()=>assignSegmentLanes(project?.annotations[activeTrack]??[],project?.duration_ms??0),[project?.annotations,project?.duration_ms,activeTrack]);
  const selected=activeSegments.find(s=>s.id===selectedId);
@@ -188,7 +188,12 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
  const annotationTime=(ms:number)=>recordingDateTime(recordingOrigin,ms)?.slice(11)??formatTime(ms);
  const activeVideo=playbackVideos.find(video=>video.id===videoId);
  useEffect(()=>{if(!project||!preparation.manifest)return;rememberPreparedPreviews(project.id,preparation.manifest.videos);},[project?.id,preparation.manifest]);
- const profile=playbackProfile(rate,playing);
+ const hasFastPreview=!!preparation.manifest?.videos.find(video=>video.id===videoId)?.fast_url;
+ const maximumRate=preparation.manifest?maximumPlaybackRate(preparation.manifest.videos):100;
+ const effectiveRate=Math.min(rate,maximumRate);
+ rateRef.current=effectiveRate;
+ useEffect(()=>{if(rate>maximumRate){setRate(maximumRate);setNotice('当前素材共用普通视频缓存，已调整为 10 倍速。');}},[rate,maximumRate]);
+ const profile=playbackProfile(effectiveRate,playing,hasFastPreview);
  const preview=usePreview(project?.id,videoId,mediaVersion,sessionEntered&&!prepareOpen&&!deleting&&!project?.deletion_pending,profile.fast,true);
  const playableUrl=project&&preview.state==='ready'&&preview.url?browserVideoUrl(project.id,preview.url):undefined;
  const nextVideo=playbackVideos[playbackVideos.findIndex(video=>video.id===videoId)+1];
@@ -248,7 +253,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   if(wantsPlay.current){pausePlayback();return;}
   if(timeRef.current>=p.duration_ms)seek(0);
   wantsPlay.current=true;setPlaying(true);
-  if(rateRef.current>10)return; // Render the compressed-media player before starting.
+  if(playbackProfile(rateRef.current,true,hasFastPreview).fast)return; // Render the compressed-media player before starting.
   if(v.readyState>0&&v.dataset.videoId===videoIdRef.current)playNative(v);
  }
  function onReady(){
@@ -280,7 +285,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   const v=videoRef.current;if(!v)return;
   if(!applyPlayerRate(v))return;
   if(wantsPlay.current&&v.readyState>0)playNative(v);
- },[rate,profile.fast,playing]);
+ },[effectiveRate,profile.fast,playing]);
  useEffect(()=>{
   if(!playing)return;
   let frame=0,lastPublish=0;
@@ -907,7 +912,7 @@ export default function App({user,onLogout:logoutNow}:{user:Account;onLogout:()=
   <main className="editor-grid" inert={importOpen||!!busy||!!deleteProject||!!renameProject||submitOpen||resetAnnotationsOpen||cloudDialogOpen||prepareOpen||settingsOpen}>
   {project&&!sessionEntered?<section className="session-start-screen"><Film size={34}/><h2>{clearedPreviewId===project.id?'本机预览已清理':restoreOnReady.current===project.id?'正在载入项目':'预览尚未就绪'}</h2><p>{clearedPreviewId===project.id?'项目和标注草稿仍在。需要继续这个项目时，再主动准备预览；也可以从右侧新建项目选择新素材。':restoreOnReady.current===project.id?(preparation.status?.detail||'正在检查已有播放素材。'):'需要先准备视频、封面和悬停图片，才能进入标注工作台。'}</p><button className="primary" onClick={openPreparation}>{clearedPreviewId===project.id?'重新准备此项目预览':'查看素材准备'}<ArrowRight size={16}/></button></section>:<section className="left-column"><div className="preview-panel"><div className="panel-heading"><div><Film size={16}/><h2>视频预览</h2></div><span className="muted-text">{activeVideo?`${project!.videos.findIndex(v=>v.id===videoId)+1} / ${project!.videos.length} · ${activeVideo.name}`:'等待选择素材'}</span></div>
    <VideoStage empty={!project}>{project&&activeVideo?<><video key={`${project.id}-${videoId}-${mediaVersion}-${profile.fast}`} ref={videoRef} data-video-id={activeVideo.id} data-time-scale={profile.scale} crossOrigin={playableUrl&&!playableUrl.startsWith('blob:')?(activeStorage==='s3'?'anonymous':separateApiOrigin?'use-credentials':undefined):undefined} src={playableUrl} poster={activeVideo.thumbnail_url?sessionAssetUrl(project.id,activeVideo.thumbnail_url):undefined} muted={muted||profile.fast} playsInline preload="auto" onLoadedMetadata={e=>{if(e.currentTarget===videoRef.current){onReady();}}} onRateChange={e=>{if(e.currentTarget===videoRef.current)applyPlayerRate(e.currentTarget);}} onPlaying={e=>{if(e.currentTarget===videoRef.current&&wantsPlay.current){applyPlayerRate(e.currentTarget);setPlaying(true);}}} onPlay={e=>{if(e.currentTarget!==videoRef.current)return;if(!wantsPlay.current)e.currentTarget.pause();else setPlaying(true);}} onPause={e=>{if(e.currentTarget===videoRef.current&&!wantsPlay.current)setPlaying(false);}} onTimeUpdate={e=>{if(e.currentTarget===videoRef.current)syncNativeTime();}} onEnded={e=>{if(e.currentTarget===videoRef.current)ended();}} onError={e=>{if(e.currentTarget!==videoRef.current||preview.state!=='ready')return;pausePlayback();setMediaError('预览读取失败，请检查素材可读性后重试。');}} onClick={toggle}/><div className="video-tag"><span className="live-dot"/> {profile.fast?'高倍速预览 · 本机缓存':'流畅预览 · 270p'}</div>{previewPending&&(preview.state!=='idle'||showPreviewWait)&&!previewError&&<div className="media-cover preview-preparation" role="status"><LoaderCircle className="spin"/><p>{preview.state==='running'?(profile.fast?'正在准备流畅快进预览':'正在生成此片段的预览'):preview.state==='queued'?'此片段正在排队':'正在读取预览缓存'}</p>{preview.state==='running'&&preview.progress!==null&&<><progress aria-label="预览生成进度" max={100} value={preview.progress}/><strong>{Math.floor(preview.progress)}%</strong></>}<small>{preview.detail||(preview.state==='running'?'仅首次准备，完成后可直接复用缓存，并提前准备后续片段':'可以继续浏览时间轴和其他片段')}</small></div>}{showBuffering&&!previewPending&&!previewError&&<div className="media-buffering" role="status"><LoaderCircle className="spin" size={14}/>正在缓冲…</div>}{scrubbing&&<div className="media-scrubbing">{selectedBoundary?"调整边界 · 实时预览":"拖动定位 · 松开后显示目标画面"}</div>}{previewError&&<div className="media-cover"><p>{previewError}</p><button className="secondary" onClick={()=>{pendingSeek.current=Math.max(0,(timeRef.current-activeVideo.start_ms)/1000);setMediaError('');forgetProjectPreviews(project.id);setMediaVersion(v=>v+1);setSessionEntered(false);setPrepareOpen(true);void preparation.start(project.id,true);}}>重新加载</button></div>}</>:<div className="empty-preview"><div className="empty-film"><Film size={34}/><span>＋</span></div><h2>选择素材，开始标注</h2><p>{mockMode?'选择测试视频，新建模拟 S3 项目。上传后会生成标注预览。':activeStorage==='s3'?'选择已上传至 S3 的采集缓存目录。':sharedServer?'从已挂载的 NAS 选择完整采集目录。':'选择本机视频文件或原视频目录。'}{!mockMode&&<> <br/>原视频留在原位置，系统会准备标注用预览。</>}</p><button className="primary" onClick={()=>beginImport('new')}><Upload size={17}/>新建项目并选择素材</button><span className="format-hint">支持 MP4 · AVI · MOV · MKV · WEBM</span></div>}</VideoStage>
-   <div className="player-controls"><div className="play-controls"><button className="icon-button" aria-label="后退1秒" disabled={!project} onClick={()=>moveCursor(-1000)}><SkipBack size={17}/></button><button className="play-button" aria-label={playing?'暂停':'播放'} disabled={!project} onClick={toggle}>{playing?<Pause size={19}/>:<Play size={19} fill="currentColor"/>}</button><button className="icon-button" aria-label="前进1秒" disabled={!project} onClick={()=>moveCursor(1000)}><SkipForward size={17}/></button><span className="player-time" title="播放进度 / 总时长">{formatTime(time)}<b>/</b><span>{formatTime(project?.duration_ms??0)}</span></span></div><div className="play-options"><PlaybackSpeed value={rate} onChange={changeRate}/><button className="icon-button" aria-label={muted?'开启声音':'静音'} onClick={()=>setMuted(!muted)}>{muted?<VolumeX size={17}/>:<Volume2 size={17}/>}</button><button className="icon-button" aria-label="全屏视频" disabled={!project} onClick={()=>videoRef.current?.requestFullscreen()}><Maximize size={17}/></button></div></div>
+   <div className="player-controls"><div className="play-controls"><button className="icon-button" aria-label="后退1秒" disabled={!project} onClick={()=>moveCursor(-1000)}><SkipBack size={17}/></button><button className="play-button" aria-label={playing?'暂停':'播放'} disabled={!project} onClick={toggle}>{playing?<Pause size={19}/>:<Play size={19} fill="currentColor"/>}</button><button className="icon-button" aria-label="前进1秒" disabled={!project} onClick={()=>moveCursor(1000)}><SkipForward size={17}/></button><span className="player-time" title="播放进度 / 总时长">{formatTime(time)}<b>/</b><span>{formatTime(project?.duration_ms??0)}</span></span></div><div className="play-options"><PlaybackSpeed value={effectiveRate} maximum={maximumRate} onChange={changeRate}/><button className="icon-button" aria-label={muted?'开启声音':'静音'} onClick={()=>setMuted(!muted)}>{muted?<VolumeX size={17}/>:<Volume2 size={17}/>}</button><button className="icon-button" aria-label="全屏视频" disabled={!project} onClick={()=>videoRef.current?.requestFullscreen()}><Maximize size={17}/></button></div></div>
   </div>
   {project?<Timeline project={playbackProject!} currentTime={time} activeTrack={activeTrack} trackRevealVersion={trackRevealVersion} selectedId={selectedId} selectedBoundary={selectedBoundary} onBoundarySelect={selectBoundary} onBoundaryDismiss={exitBoundary} anchors={anchors} selectedRange={selectedRange} anchorControls={anchorControls} onRangeDismiss={dismissTimelineRange} onSeek={seek} onScrubStart={beginScrub} onScrubEnd={endScrub} onTrackSelect={selectTrack} onSegmentSelect={selectSegment}/>:<div className="empty-timeline"><div className="panel-heading"><div><Layers3 size={16}/><h2>标注时间线</h2></div><span>导入视频后开始标注</span></div>{(['scene','posture','category'] as const).map((t,i)=><div className={'placeholder-track '+t} key={t}><span><i/>{names[t]}</span><div><span>{['室内 / 室外 / 半开放 / 隧道 / 电梯 / 交通工具内 / Unknown','坐 / 站 / 躺 / 移动 / 骑行 / 交通工具坐 / 交通工具站 / 交通工具躺 / Unknown','工作学习 / 运动锻炼 / 饮食 / 出行 / 社交 / 休闲娱乐 / 休息 / 日常事务 / Unknown'][i]}</span></div></div>)}</div>}
   </section>}

@@ -7,7 +7,8 @@ import {desktopAssetFile} from './browserVideoCache.ts';
 export interface SessionVideo {
   id: string;
   url: string;
-  fast_url: string;
+  fast_url?: string;
+  playback_mode?: 'normal-only';
   thumbnail_url: string;
   storyboard: StoryboardManifest;
 }
@@ -22,7 +23,9 @@ export function isSessionManifest(value: unknown): value is SessionManifest {
   if (typeof manifest.version !== 'string' || !manifest.version || !Array.isArray(manifest.videos) || !manifest.videos.length) return false;
   return new Set(manifest.videos.map(video => video?.id)).size === manifest.videos.length &&
     manifest.videos.every(video => video && typeof video.id === 'string' && video.id &&
-      [video.url, video.fast_url, video.thumbnail_url].every(url => typeof url === 'string' && validAssetUrl(url)) &&
+      (video.playback_mode === 'normal-only' ? video.fast_url === undefined :
+        video.playback_mode === undefined && typeof video.fast_url === 'string' && validAssetUrl(video.fast_url)) &&
+      [video.url, video.thumbnail_url].every(url => typeof url === 'string' && validAssetUrl(url)) &&
       isStoryboardManifest(video.storyboard) && video.storyboard.sheets.every(url => validAssetUrl(url)));
 }
 

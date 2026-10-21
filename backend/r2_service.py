@@ -372,11 +372,12 @@ class R2ProjectService(ProjectService):
             normal_url = self.provider.signed_url(prefix + '/' + source['key']) if source else asset('normal', 'normal.mp4')
             if source:
                 normal_records[video['url']] = source
-            value = {**video, 'url': normal_url, 'fast_url': asset('fast', 'fast.mp4'),
+            value = {**video, 'url': normal_url,
+                     **({'fast_url': asset('fast', 'fast.mp4')} if 'fast_url' in video else {}),
                      'thumbnail_url': asset('thumbnail', 'thumbnail.jpg'),
                      'storyboard': {**video['storyboard'], 'sheets': sheets}}
             videos.append(value)
-            mapping.update({video[key]: value[key] for key in ('url', 'fast_url', 'thumbnail_url')})
+            mapping.update({video[key]: value[key] for key in ('url', 'fast_url', 'thumbnail_url') if key in video})
             mapping.update(zip(video['storyboard']['sheets'], sheets))
         downloads = []
         for item in manifest.get('assets', []):

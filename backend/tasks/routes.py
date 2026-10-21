@@ -402,6 +402,8 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
             if state['state'] == 'ready':
                 manifest = workspace.session_manifest(project, task_id)
                 video = next(item for item in manifest['videos'] if item['id'] == tail)
+                if request.query_params.get('fast') == 'true' and 'fast_url' not in video:
+                    raise HTTPException(404, '该素材仅有普通视频缓存，请更新页面后使用普通视频倍速播放。')
                 return {'state': 'ready', 'progress': 100, 'url': video['fast_url'] if request.query_params.get('fast') == 'true' else video['url']}
             return {'state': 'queued', 'progress': None, 'url': None, 'detail': state.get('detail')}
         match = re.fullmatch(r'([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+)(?:/(\d+))?', tail)

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { advanceVideoTime, applyPlaybackRate, playbackProfile, seekMediaTime, sourceTime } from '../src/playback.ts';
+import { advanceVideoTime, maximumPlaybackRate, applyPlaybackRate, playbackProfile, seekMediaTime, sourceTime } from '../src/playback.ts';
 
 const video = (id, start_ms, end_ms) => ({ id, start_ms, end_ms });
 const gapped = [video('first', 0, 1000), video('second', 11000, 12000), video('third', 22000, 24000)];
@@ -144,4 +144,20 @@ test('compressed preview seeks preserve source millisecond accuracy and avoid du
   assert.equal(seekMediaTime(player, 120.001, 20), false);
   assert.equal(seekMediaTime(player, 120.101, 20), true);
   assert.equal(sourceTime(player.currentTime, 20, video('v', 10000, 300000)), 130101);
+});
+
+
+test('single-video playback never switches source time to the legacy 20x scale', () => {
+  for (const rate of [0.5, 1, 2, 5, 10]) {
+    const playing = playbackProfile(rate, true, false);
+    assert.deepEqual(playing, {fast:false, scale:1, nativeRate:rate});
+    const player = {currentTime:0};
+    seekMediaTime(player, 12.345, playing.scale);
+    assert.equal(sourceTime(player.currentTime, playing.scale, {start_ms:1000,end_ms:60000}), 13345);
+    assert.deepEqual(playbackProfile(rate,false,false), {fast:false,scale:1,nativeRate:1});
+  }
+  assert.equal(playbackProfile(50,true,false).fast, false);
+  assert.equal(maximumPlaybackRate([{fast_url:'legacy'}]),100);
+  assert.equal(maximumPlaybackRate([{}]),10);
+  assert.equal(maximumPlaybackRate([{fast_url:'legacy'},{}]),10);
 });

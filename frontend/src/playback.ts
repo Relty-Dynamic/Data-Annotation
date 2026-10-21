@@ -53,8 +53,8 @@ export function advanceVideoTime(videos: Video[], time: number, delta: number): 
 }
 
 /** Compressed 20x media plays continuously; paused viewing always uses full media. */
-export function playbackProfile(rate: number, playing: boolean) {
-  const fast = playing && rate > 10;
+export function playbackProfile(rate: number, playing: boolean, hasFast = true) {
+  const fast = playing && hasFast && rate > 10;
   const scale = fast ? 20 : 1;
   return { fast, scale, nativeRate: playing ? rate / scale : 1 };
 }
@@ -76,4 +76,9 @@ export function seekMediaTime(player: { currentTime: number }, sourceSeconds: nu
   if (Math.abs(player.currentTime * scale - sourceSeconds) < 0.0005) return false;
   player.currentTime = sourceSeconds / scale;
   return true;
+}
+
+/** A project without a complete legacy fast set uses only native-rate playback. */
+export function maximumPlaybackRate(videos: ReadonlyArray<{fast_url?: string}>) {
+  return videos.length > 0 && videos.every(video => Boolean(video.fast_url)) ? 100 : 10;
 }

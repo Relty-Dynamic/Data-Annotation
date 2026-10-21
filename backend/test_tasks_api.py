@@ -797,6 +797,15 @@ class TaskHostTests(unittest.TestCase):
             self.assertEqual(self.request(client,'POST',path+'/session/browser-ready',{},headers),{'released':False})
             preview=self.request(client,'GET',f"/items/{task['id']}/workspace/previews/v0001?fast=true")
             self.assertEqual(preview['url'],'https://objects.example/fast')
+            # New single-video manifests remain usable, but never pretend that
+            # normal timestamps use the legacy 20x compressed timebase.
+            manifest['videos'][0].pop('fast_url')
+            manifest['videos'][0]['playback_mode']='normal-only'
+            self.assertEqual(self.request(client,'GET',path+'/session/manifest'),manifest)
+            preview=self.request(client,'GET',f"/items/{task['id']}/workspace/previews/v0001")
+            self.assertEqual(preview['url'],'https://objects.example/normal')
+            self.request(client,'GET',f"/items/{task['id']}/workspace/previews/v0001?fast=true",expected=404)
+
         client.cookies.clear()
         self.request(client,'GET',path+'/session/manifest',expected=401)
 

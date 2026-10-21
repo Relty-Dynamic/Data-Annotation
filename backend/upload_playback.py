@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from .desktop_cache import sha256_file, safe_name, collection_name
 from .local_playback import render_local_fast, render_local_thumbnail
 from .session_cache import PROFILE, SessionCache
+from .playback_contract import SINGLE_VIDEO_PROFILE, asset_kinds
 from .storyboards import StoryboardCache
 
 
@@ -51,7 +52,7 @@ def validate(manifest):
     records = manifest.get('cache_files', [])
     if not records and 'cache_profile' not in manifest:
         return []  # Existing upload manifests remain readable.
-    if manifest.get('cache_profile') != PROFILE or not isinstance(records, list) or len(records) > 50000:
+    if manifest.get('cache_profile') not in (PROFILE, SINGLE_VIDEO_PROFILE) or not isinstance(records, list) or len(records) > 50000:
         raise HTTPException(422, '播放缓存清单格式或数量无效。')
     videos = {item.get('name', Path(item['key']).name): item for item in manifest['files']}
     seen, keys = set(), set()
@@ -72,7 +73,7 @@ def validate(manifest):
             raise HTTPException(422, '播放缓存关联、路径或文件校验信息无效。')
         seen.add((name, kind, index))
         keys.add(key)
-    expected = {(name, kind, None) for name in videos for kind in ('fast', 'thumbnail')}
+    expected = {(name, kind, None) for name in videos for kind in asset_kinds(manifest['cache_profile']) if kind != 'normal'}
     expected.update((name, 'sheet', index) for name, video in videos.items()
                     for index in range(((video['duration_ms'] + 999) // 1000 + 99) // 100))
     if seen != expected:
@@ -89,7 +90,7 @@ def hydrate(provider, source, directory, key):
     name = capture['video_name']
     video = next(item for item in manifest['files'] if item['name'] == name)
     own = [item for item in records if item['video_name'] == name]
-    entry = {'profile': PROFILE, 'key': key, 'duration_ms': source['duration_ms'],
+    entry = {'profile': manifest['cache_profile'], 'key': key, 'duration_ms': source['duration_ms'],
              'storyboard': SessionCache._storyboard_metadata(source['duration_ms']), 'sheets': []}
     for item in [dict(video, kind='normal', index=None), *own]:
         kind, index = item['kind'], item['index']
@@ -160,7 +161,8 @@ def direct_manifest(provider, project):
                 sheets.append((index, url))
             else:
                 urls[kind] = url
-        videos.append({'id': video['id'], 'url': urls['normal'], 'fast_url': urls['fast'],
+        videos.append({'id': video['id'], 'url': urls['normal'],
+                       **({'fast_url': urls['fast']} if 'fast' in urls else {'playback_mode': 'normal-only'}),
                        'thumbnail_url': urls['thumbnail'], 'storyboard': {
                            **SessionCache._storyboard_metadata(video['duration_ms']),
                            'state': 'ready', 'detail': None, 'sheets': [url for _, url in sorted(sheets)]}})
