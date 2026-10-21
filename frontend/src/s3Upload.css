@@ -36,3 +36,10 @@
 .s3-upload-progress{border-left:3px solid #72cdb5}.s3-upload-form footer{align-items:stretch;flex-direction:column}.s3-upload-form footer button{width:100%;min-height:42px}
 @media(max-width:760px){.s3-upload-workspace.has-selection{grid-template-columns:minmax(0,1fr)}.s3-upload-materials .s3-upload-select{min-height:85px}}
 @media(max-width:480px){.s3-upload-modes{gap:8px}.s3-upload-modes>button{padding:12px;align-items:flex-start}.s3-upload-modes>button>svg{display:none}.s3-upload-dialog{width:calc(100vw - 20px);padding:16px}.s3-upload-heading h2{font-size:19px}}
+.upload-stage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}
+.upload-stage{padding:10px;border:1px solid #35434e;border-radius:8px;min-width:0}
+.upload-stage[data-state="running"]{border-color:#72cdb5}
+.upload-stage>div{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px}
+.upload-stage span,.upload-stage small{color:#9bafbd;font-size:11px}
+.s3-upload-progress .upload-stage progress{margin:8px 0;height:5px}
+@media(max-width:600px){.upload-stage-grid{grid-template-columns:1fr}}

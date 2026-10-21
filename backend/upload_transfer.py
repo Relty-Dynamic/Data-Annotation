@@ -41,6 +41,8 @@ class TransferProgress:
 
 
 def transfer_files(target, job, prepared, manifest, *, completed_keys=None):
+    check_cancel = getattr(target, 'check_cancel', lambda: None)
+    check_cancel()
     items = manifest['files'] + manifest.get('attachments', []) + manifest.get('cache_files', [])
     tracker = TransferProgress(target, items)
     # Three simultaneous requests at most; files and multipart chunks share the same pool.
@@ -55,6 +57,7 @@ def transfer_files(target, job, prepared, manifest, *, completed_keys=None):
                 with source.open('rb') as stream:
                     stream.seek(offset)
                     while sent < length:
+                        check_cancel()
                         if cancelled.is_set():
                             raise RuntimeError('本轮文件传输已暂停，等待续传。')
                         chunk = stream.read(min(64 * 1024, length - sent))
@@ -82,6 +85,7 @@ def transfer_files(target, job, prepared, manifest, *, completed_keys=None):
             record = target.attachments[offset] if 0 <= offset < len(target.attachments) else None
             source = MockUploadManager._check_local_source(record) if record else prepared / item['key']
             for attempt in range(3):
+                check_cancel()
                 plan = target.request('GET', f"/api/r2/uploads/{job['id']}/files/{index}?single=1")
                 if plan['complete']:
                     # A retried file may already exist; account for all bytes without retransmission.

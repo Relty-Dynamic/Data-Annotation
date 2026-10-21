@@ -18,11 +18,14 @@ LOCK = threading.RLock()
 APPLICATION = 'DataMark-desktop-cache-v1'
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path: Path, on_progress=None) -> str:
     digest = hashlib.sha256()
+    read = 0
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(block)
+            read += len(block)
+            if on_progress is not None:on_progress(read)
     return digest.hexdigest()
 
 
@@ -133,12 +136,12 @@ class DesktopCache:
         owner = str(self.service.root.resolve()) + ':' + project_id
         return '.datamark-ref.' + hashlib.sha256(owner.encode()).hexdigest() + '.json'
 
-    def retain_upload(self, prefix: str, video_name: str, source: Path, *, kind='normal') -> Path:
+    def retain_upload(self, prefix: str, video_name: str, source: Path, *, kind='normal', artifact=None) -> Path:
         """Keep the uploader's verified compressed video independently of staging."""
         project = {'id': hashlib.sha256(('upload:' + prefix).encode()).hexdigest()[:32],
                    'collection_folder_name': prefix.rsplit('/', 1)[-1]}
         directory = self.directory(project)
-        digest = sha256_file(source)
+        digest = artifact.digest_for(source) if artifact is not None else sha256_file(source)
         if not re.fullmatch(r'normal|fast|thumbnail|storyboard-\d+', kind):
             raise HTTPException(422, '上传缓存类型无效。')
         filename = safe_name(Path(video_name).stem) + '.' + digest + '.' + kind + ('.mp4' if kind in ('normal', 'fast') else '.jpg')
