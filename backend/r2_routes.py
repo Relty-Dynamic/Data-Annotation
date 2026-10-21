@@ -264,6 +264,8 @@ def install(app, session, accounts, provider, root):
         found = next((item for item in value['videos'] if item['id'] == video), None)
         if found is None:
             raise HTTPException(404, '视频不存在。')
+        if fast and 'fast_url' not in found:
+            raise HTTPException(404, '该素材仅有普通视频缓存，请更新页面后使用普通视频倍速播放。')
         return {'state': 'ready', 'progress': 100, 'url': found['fast_url'] if fast else found['url']}
 
     @router.put('/projects/{ident}/cache-collection')

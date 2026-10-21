@@ -86,3 +86,12 @@ test('deleting or switching a project releases its decoded images together with 
   assert.equal(decoded.size, 0, 'held LRU references are cleared as part of project cleanup');
   assert.equal(sessionDecodedImages('released'), undefined);
 });
+
+
+test('only explicitly normal-only manifests can omit fast media', () => {
+  const video = {...manifest.videos[0]}; delete video.fast_url;
+  assert.equal(isSessionManifest({...manifest, videos:[video]}), false);
+  assert.equal(isSessionManifest({...manifest, videos:[{...video, playback_mode:'normal-only'}]}), true);
+  assert.equal(isSessionManifest({...manifest, videos:[{...video, playback_mode:'unknown'}]}), false);
+  assert.equal(isSessionManifest({...manifest, videos:[{...manifest.videos[0], playback_mode:'normal-only'}]}), false);
+});

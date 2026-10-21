@@ -73,6 +73,23 @@ try{
     const restored=await call('Runtime.evaluate',{expression:'JSON.stringify(window.measureLayout())',returnByValue:true});
     if(JSON.parse(restored.result.value).errors.length)throw new Error('Layout was not restored after fullscreen: '+restored.result.value);
   }
+  await call('Page.navigate',{url:`http://127.0.0.1:${address.port}/test/layout/index.html?fixture=1&single=1`});
+  await pause(600);
+  const native=await call('Runtime.evaluate',{expression:`(async()=>{
+    const video=document.querySelector('video'),source=video.currentSrc;
+    if(!document.querySelector('[aria-label="50 倍速"]').disabled||!document.querySelector('[aria-label="100 倍速"]').disabled)throw Error('Unverified high speeds enabled');
+    for(const rate of [0.5,1,2,5,10]){
+      document.querySelector('[aria-label="'+rate+' 倍速"]').click();
+      await new Promise(r=>setTimeout(r,30));
+      if(video.playbackRate!==rate||document.querySelector('video')!==video||video.currentSrc!==source)throw Error('Native speed changed media or did not apply');
+    }
+    await video.play();await new Promise(r=>setTimeout(r,100));video.pause();
+    if(video.currentTime<0.1)throw Error('Native playback did not advance');
+    await new Promise(resolve=>{video.addEventListener('seeked',resolve,{once:true});video.currentTime=0.75;});
+    if(Math.abs(video.currentTime-0.75)>0.001||!video.paused)throw Error('Single-video seek lost time or pause');
+    return true;
+  })()`,awaitPromise:true,userGesture:true,returnByValue:true});
+  if(native.result.value!==true)throw new Error('Single-video native playback failed: '+JSON.stringify(native));
   if(process.env.LAYOUT_SCREENSHOTS){
     for(const [width,height] of [[1280,800],[800,500]]){
       await call('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
@@ -82,7 +99,7 @@ try{
       await writeFile(resolve(temp,`layout-${width}x${height}.png`),Buffer.from(shot.data,'base64'));
     }
   }
-  console.log(`PASS: ${results.length} real-component layout cases; page bounds, video/timeline gap, controls, decoded video aspect changes, playback/seek, editor selection, pointer clip seek, fullscreen return, and independent scrolling; DPR ${process.env.LAYOUT_SCALE??1}.`);
+  console.log(`PASS: ${results.length} real-component layout cases; page bounds, video/timeline gap, controls, decoded video aspect changes, playback/seek, editor selection, pointer clip seek, fullscreen return, independent scrolling, and single-video native playback through 10x; DPR ${process.env.LAYOUT_SCALE??1}.`);
 }finally{
   socket?.close();
   if(child && child.exitCode===null){const exited=new Promise(resolve=>child.once('exit',resolve));child.kill();await exited;}

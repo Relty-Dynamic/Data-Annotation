@@ -27,6 +27,8 @@ from .encoding import preparation_parallelism, compact_command
 from .desktop_cache import DesktopCache, collection_name, sha256_file, safe_name
 from .video_selection import active_videos
 
+from .playback_contract import asset_kinds, source_profile
+
 LOGGER = logging.getLogger('uvicorn.error')
 PROFILE = 'playback-480x270-256k32k-v1'
 RESERVE_BYTES = 256 * 1024 * 1024
@@ -705,7 +707,7 @@ class SessionCache:
     def _read_entry(self, directory: Path, key: str, source: dict) -> dict | None:
         try:
             entry = json.loads((directory / (key + '.assets.json')).read_bytes())
-            if entry['profile'] != PROFILE or entry['key'] != key or entry['duration_ms'] != source['duration_ms']:
+            if entry['profile'] != source_profile(source) or entry['key'] != key or entry['duration_ms'] != source['duration_ms']:
                 return None
             story = entry['storyboard']
             count = (source['duration_ms'] + 999) // 1000
@@ -715,7 +717,7 @@ class SessionCache:
                 return None
             if not isinstance(entry['sheets'], list) or len(entry['sheets']) != (count + 99) // 100:
                 return None
-            if not all(isinstance(record, dict) for record in [entry['normal'], entry['fast'], entry['thumbnail'], *entry['sheets']]):
+            if not all(isinstance(record, dict) for record in [*[entry[kind] for kind in asset_kinds(entry['profile'])], *entry['sheets']]):
                 return None
             return entry
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -725,7 +727,7 @@ class SessionCache:
         entry = self._read_entry(directory, key, source)
         if entry is None:
             return None
-        for kind in ('normal', 'fast', 'thumbnail'):
+        for kind in asset_kinds(entry['profile']):
             if self._valid_record(directory, entry[kind], jpeg=kind == 'thumbnail') is None:
                 return None
         if not all(self._valid_record(directory, record, jpeg=True) for record in entry['sheets']):
@@ -1228,19 +1230,20 @@ class SessionCache:
         all_on_nas = True
         for video_id, (entry, asset_directory) in entries:
             all_on_nas = all_on_nas and asset_directory != directory
-            for kind in ('normal', 'fast', 'thumbnail'):
+            for kind in asset_kinds(entry['profile']):
                 assets[(kind, video_id, None)] = (asset_directory / entry[kind]['path'], entry[kind])
             for index, record in enumerate(entry['sheets']):
                 assets[('sheet', video_id, index)] = (asset_directory / record['path'], record)
             url = f'/api/session-media/{ident}/{version}/{video_id}'
-            videos.append({'id': video_id, 'url': url, 'fast_url': url + '?fast=true',
+            videos.append({'id': video_id, 'url': url,
+                           **({'fast_url': url + '?fast=true'} if 'fast' in entry else {'playback_mode': 'normal-only'}),
                            'thumbnail_url': f'/api/session-thumbnails/{ident}/{version}/{video_id}',
                            'storyboard': {**entry['storyboard'], 'state': 'ready', 'detail': None,
                                           'sheets': [f'/api/session-storyboards/{ident}/{version}/{video_id}/{index}' for index in range(len(entry['sheets']))]}})
         video_map = {video['id']: video for video in project['videos']}
         for video in videos:
             video_id = video['id']
-            urls = [('normal', None, video['url']), ('fast', None, video['fast_url']), ('thumbnail', None, video['thumbnail_url']),
+            urls = [('normal', None, video['url']), *([('fast', None, video['fast_url'])] if 'fast_url' in video else []), ('thumbnail', None, video['thumbnail_url']),
                     *[('sheet', index, url) for index, url in enumerate(video['storyboard']['sheets'])]]
             for kind, index, url in urls:
                 path, record = assets[(kind, video_id, index)]

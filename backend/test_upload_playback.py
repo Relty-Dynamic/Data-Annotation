@@ -79,3 +79,64 @@ class PlaybackManifestTests(unittest.TestCase):
         self.assertEqual(len(record['manifest']['files']),1)
         self.assertEqual(len(record['manifest']['cache_files']),4)
         self.assertEqual(len(validate(record['manifest'])),4)
+
+    def test_single_video_contract_is_explicit_and_legacy_stays_strict(self):
+        from backend.playback_contract import SINGLE_VIDEO_PROFILE
+        old = self.manifest()
+        normal = copy.deepcopy(old)
+        normal['cache_files'] = normal['cache_files'][1:]
+        with self.assertRaises(HTTPException):
+            validate(normal)
+        normal['cache_profile'] = SINGLE_VIDEO_PROFILE
+        self.assertEqual(len(validate(normal)), 3)
+        for invalid in [dict(normal, cache_profile='unknown'),
+                        dict(normal, cache_files=old['cache_files']),
+                        dict(normal, cache_files=normal['cache_files'][:-1])]:
+            with self.subTest(invalid=invalid), self.assertRaises(HTTPException):
+                validate(invalid)
+
+    def test_normal_only_direct_manifest_never_signs_a_fast_object(self):
+        from backend.playback_contract import SINGLE_VIDEO_PROFILE
+        manifest = self.manifest()
+        manifest.update(cache_profile=SINGLE_VIDEO_PROFILE, cache_files=manifest['cache_files'][1:])
+        normal = manifest['files'][0]
+        normal.update(size=100, sha256='c' * 64)
+        video = {'id': 'v0001', 'name': normal['name'], 'duration_ms': normal['duration_ms']}
+        project = {'id': 'a' * 32, 'videos': [video], 'collection_folder_name': 'test',
+                   '_sources': {'v0001': {'r2_playback': reference('daily/test', manifest, normal['name'])}}}
+        provider = SimpleNamespace(signed_url=Mock(side_effect=lambda key: 'https://objects.example/' + key))
+        self.assertTrue(direct_ready(project))
+        result = direct_manifest(provider, project)
+        self.assertEqual(len(result['assets']), 4)
+        self.assertEqual(result['videos'][0]['playback_mode'], 'normal-only')
+        self.assertNotIn('fast_url', result['videos'][0])
+        self.assertEqual(sum(asset['media_type'] == 'video/mp4' for asset in result['assets']), 1)
+        self.assertTrue(all('fast' not in call.args[0] for call in provider.signed_url.call_args_list))
+
+    def test_normal_only_hydration_is_reusable_and_damage_is_rejected(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+        from backend.playback_contract import SINGLE_VIDEO_PROFILE
+        from backend.session_cache import SessionCache
+        from backend.upload_playback import hydrate
+        manifest = self.manifest()
+        manifest.update(cache_profile=SINGLE_VIDEO_PROFILE, cache_files=manifest['cache_files'][1:])
+        objects = {}
+        for item in manifest['files'] + manifest['cache_files']:
+            data = b'0000ftyp' + b'0' * 40 if item.get('kind') is None else b'\xff\xd8fixture\xff\xd9'
+            item.update(size=len(data), sha256=hashlib.sha256(data).hexdigest())
+            objects['daily/test/' + item['key']] = data
+        def download(key, path, checksum, size):
+            data = objects[key]
+            self.assertEqual((len(data), hashlib.sha256(data).hexdigest()), (size, checksum))
+            path.write_bytes(data)
+        source = {'duration_ms': 101000, 'r2_playback': reference('daily/test', manifest, manifest['files'][0]['name'])}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            entry = hydrate(SimpleNamespace(download=download), source, directory, 'fixture')
+            sessions = object.__new__(SessionCache)
+            self.assertEqual(sessions._load_entry(directory, 'fixture', source), entry)
+            self.assertNotIn('fast', entry)
+            (directory / entry['normal']['path']).write_bytes(b'broken')
+            self.assertIsNone(sessions._load_entry(directory, 'fixture', source))

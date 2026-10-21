@@ -253,3 +253,19 @@ test('cancelling metadata inspection waits for outstanding reads and writes no r
   release();await assert.rejects(pending,{name:'AbortError'});
   assert.equal(requests(),0);assert.equal(directory.files.size,0);
 });
+
+
+test('normal-only cache downloads one video, reuses it, and keeps historical fast files',async t=>{
+  const {root,requests}=await setup(t),{manifest}=fixture(),signal=new AbortController().signal;
+  await prepareBrowserVideos('project_1',manifest,signal,()=>{});
+  assert.equal(requests(),4);
+  const oldFast=manifest.assets[1].file_name;
+  const video={...manifest.videos[0],playback_mode:'normal-only'};delete video.fast_url;
+  const next={...manifest,version:'normal-only',videos:[video],assets:manifest.assets.filter(item=>item.url!==manifest.videos[0].fast_url)};
+  await prepareBrowserVideos('project_1',next,signal,()=>{});
+  assert.equal(requests(),4,'all normal assets are reused');
+  assert.ok(root.directories.get('1010zengl').files.has(oldFast),'old fast bytes are not removed by preparation');
+  await prepareBrowserVideos('project_2',{...next,collection_name:'new-capture'},signal,()=>{});
+  assert.equal(requests(),7,'fresh capture fetches one MP4 and two images');
+  assert.equal([...root.directories.get('new-capture').files.keys()].filter(name=>name.endsWith('.mp4')).length,1);
+});

@@ -5,6 +5,7 @@ import VideoStage from '../../src/VideoStage';
 import {revealInPanel} from '../../src/revealInPanel';
 import Timeline from '../../src/Timeline';
 import PlaybackSpeed from '../../src/PlaybackSpeed';
+import {applyPlaybackRate, playbackProfile} from '../../src/playback';
 import type {Project,Track} from '../../src/domain';
 import '../../src/style.css';
 import '../../src/layout.css';
@@ -15,6 +16,7 @@ const sizes = [[1920,1080],[1920,1200],[1536,864],[1536,960],[1280,720],[1280,80
   [1366,650],[1440,810],[1024,576],[1024,640],[900,600],[800,500],[600,480]];
 const parameters = new URLSearchParams(location.search);
 const clips=['16x9','4x3','9x16'];
+const single=parameters.has('single');
 const project:Project = {id:'layout-fixture',name:'隔离测试',source_dir:null,revision:1,updated_at:'',
   duration_ms:7_200_000,fixed_tracks:['scene','posture','category'],
   videos:clips.map((name,index)=>({id:name,name,relative_path:name+'.mp4',duration_ms:2_400_000,start_ms:index*2_400_000,end_ms:(index+1)*2_400_000,url:'',thumbnail_url:null})),
@@ -30,9 +32,9 @@ function Fixture(){
     <header className="topbar"><strong>DataMark</strong><h1 className="compact-project-name">隔离布局测试 · 长项目名称不会撑开工作台</h1></header>
     <main className="editor-grid"><section className="left-column">
       <div className="preview-panel"><div className="panel-heading"><h2>视频预览</h2></div>
-        <VideoStage><video ref={video} key={`${clip}-${speed>8}`} src={`./.tmp/${clips[clip]}.mp4?fast=${speed>8}`} muted playsInline preload="auto" aria-label="隔离测试视频"/></VideoStage>
+        <VideoStage><video ref={video} key={`${clip}-${!single&&speed>10}`} src={`./.tmp/${clips[clip]}.mp4?fast=${!single&&speed>10}`} onLoadedMetadata={event=>applyPlaybackRate(event.currentTarget,playbackProfile(speed,true,!single).nativeRate)} muted playsInline preload="auto" aria-label="隔离测试视频"/></VideoStage>
         <div className="player-controls"><div className="play-controls"><button onClick={()=>seek(((clip+2)%3)*2_400_000)}>上一段</button><button className="play-button" onClick={()=>void video.current?.play()}>▶</button><button data-next onClick={next}>下一段</button><span className="player-time">00:00:00.000 / 02:00:00.000</span></div>
-          <div className="play-options"><PlaybackSpeed value={speed} onChange={value=>{video.current?.pause();setSpeed(value);}}/><button className="icon-button">♫</button><button className="icon-button">⛶</button></div></div>
+          <div className="play-options"><PlaybackSpeed value={speed} maximum={single?10:100} onChange={value=>{video.current?.pause();setSpeed(value);if(video.current)applyPlaybackRate(video.current,playbackProfile(value,true,!single).nativeRate);}}/><button className="icon-button">♫</button><button className="icon-button">⛶</button></div></div>
       </div>
       <Timeline project={project} currentTime={time} activeTrack={track} selectedId={selected} onSeek={seek} onTrackSelect={setTrack} onSegmentSelect={(axis,segment,value)=>{setTrack(axis);setSelected(segment.id);seek(value??segment.start_ms);}}
         anchorControls={<><button>添加锚点</button><button>选中区间 00:00:00</button><button>清空</button></>}/>

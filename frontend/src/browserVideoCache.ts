@@ -30,7 +30,7 @@ async function prepare(projectId:string,manifest:SessionManifest,externalSignal:
   if(!/^[a-zA-Z0-9_-]{1,80}$/.test(manifest.version)||(!validPart(manifest.collection_name??'')||(manifest.collection_name?.length??0)>120)||!manifest.assets?.length||manifest.assets.some(item=>!validAsset(item)))throw new Error('服务未提供可校验的桌面缓存清单，请更新服务后重新准备。');
   const assets=manifest.assets;
   if(new Set(assets.map(item=>item.file_name)).size!==assets.length)throw new Error('缓存清单包含重复文件名。');
-  const required=manifest.videos.flatMap(video=>[video.url,video.fast_url,video.thumbnail_url,...video.storyboard.sheets]);
+  const required=manifest.videos.flatMap(video=>[video.url,...(video.playback_mode==='normal-only'?[]:[video.fast_url]),video.thumbnail_url,...video.storyboard.sheets]);
   if(required.some(url=>!assets!.some(item=>item.url===url)))throw new Error('桌面缓存清单缺少必需素材。');
   const root=await cacheDirectory();
   const directory=await root.getDirectoryHandle(manifest.collection_name!,{create:true});
