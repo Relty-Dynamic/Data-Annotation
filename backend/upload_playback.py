@@ -13,7 +13,8 @@ from .playback_contract import SINGLE_VIDEO_PROFILE, asset_kinds
 from .storyboards import StoryboardCache
 
 
-def build(service, prepared, manifest, progress):
+def build(service, prepared, manifest, progress, *, profile=PROFILE):
+    kinds = asset_kinds(profile)
     records = []
     retained = {}
     stop = threading.Event()
@@ -28,10 +29,13 @@ def build(service, prepared, manifest, progress):
         folder = prepared / 'FPV' / 'cache' / identity
         folder.mkdir(parents=True, exist_ok=True)
         fast, thumbnail = folder / 'fast.mp4', folder / 'thumbnail.jpg'
-        render_local_fast(service, normal, fast, duration, lambda value: None, stop)
+        if 'fast' in kinds:
+            render_local_fast(service, normal, fast, duration, lambda value: None, stop)
         render_local_thumbnail(service, normal, thumbnail, duration, stop)
         story = stories.render(normal, digest, duration, service.tool('ffmpeg'), lambda value: None, stop)
-        assets = [('fast', None, fast), ('thumbnail', None, thumbnail)]
+        assets = [('thumbnail', None, thumbnail)]
+        if 'fast' in kinds:
+            assets.insert(0, ('fast', None, fast))
         for index, sheet in enumerate(story['sheets']):
             target = folder / f'sheet-{index:05d}.jpg'
             SessionCache._copy_asset(stories.directory(digest) / sheet, target, stop)
@@ -43,7 +47,7 @@ def build(service, prepared, manifest, progress):
             if service.desktop_cache.enabled:
                 label = f'storyboard-{index:03d}' if kind == 'sheet' else kind
                 retained[path.relative_to(prepared).as_posix()] = service.desktop_cache.retain_upload(manifest['prefix'], name, path, kind=label)
-    manifest.update(cache_profile=PROFILE, cache_files=records)
+    manifest.update(cache_profile=profile, cache_files=records)
     return retained
 
 

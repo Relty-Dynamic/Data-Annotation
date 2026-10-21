@@ -145,6 +145,8 @@ class FolderUploadManager(MockUploadManager):
         if job.get('upload_kind') == 'imu':
             from .imu_upload import finish
             return finish(self, job, service, can_upload)
+        if hasattr(self.store, 'require_upload_support'):
+            self.store.require_upload_support()
         options = job.get('prediction_options', {})
         if getattr(self.store,'pipeline_enabled',False):
             from .upload_pipeline import run

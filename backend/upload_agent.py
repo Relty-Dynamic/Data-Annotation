@@ -65,7 +65,9 @@ def bounded_report(report):
 
 class AgentTarget(RemoteCaptureTarget):
     def response(self, method, path, **kwargs):
-        if path == '/api/auth/me':
+        if path == '/api/health' and method == 'GET':
+            pass
+        elif path == '/api/auth/me':
             path = '/api/r2/helper/identity'
         elif path.startswith('/api/prediction/'):
             path = path.replace('/api/prediction/','/api/r2/helper/prediction/',1)

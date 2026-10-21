@@ -196,6 +196,8 @@ class PublicationConfirmationTests(unittest.TestCase):
         self.progress = []
         def handle(request):
             self.requests.append(request)
+            if request.url.path == '/api/health':
+                return httpx.Response(200,json={'capabilities':['s3-single-video-cache-v1']})
             if request.url.path.endswith('/finish'):
                 self.assertEqual(request.extensions['timeout']['read'], 600)
                 if isinstance(finish_error, int):
@@ -218,7 +220,8 @@ class PublicationConfirmationTests(unittest.TestCase):
     def test_long_publication_wait_and_explicit_progress(self):
         self.publish()
         self.assertIn('校验并发布', self.progress[-1])
-        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(len(self.requests), 4)
+        self.assertEqual(self.requests[0].url.path, '/api/health')
 
     def test_lost_response_and_gateway_timeout_confirm_durable_success(self):
         for error in (httpx.ReadTimeout('fixture'), httpx.RemoteProtocolError('fixture'), 504):
@@ -331,7 +334,15 @@ class FolderUploadRoundTripTests(unittest.TestCase):
     def test_same_page_agent_compresses_uploads_and_keeps_prediction_separate(self):
         self.round_trip(use_agent=True)
 
-    def round_trip(self,use_agent=False):
+    def test_legacy_uploader_cache_still_opens_without_server_conversion(self):
+        from backend.playback_contract import LEGACY_PROFILE
+        with patch.object(RemoteCaptureTarget, 'cache_profile', LEGACY_PROFILE):
+            self.round_trip(legacy=True)
+
+    def round_trip(self,use_agent=False,legacy=False):
+        if not legacy:
+            self.enterContext(patch('backend.upload_playback.render_local_fast',
+                side_effect=AssertionError('single-video upload must never encode a fast copy')))
         base = Path(__file__).resolve().parents[1] / '.tmp'
         base.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=base) as temporary:
@@ -381,6 +392,9 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                 return httpx.Response(200)
             class PublicClient:
                 def request(self, method, path, **kwargs):
+                    if path == '/api/health':
+                        caps = ['s3-single-video-cache-v1'] + (['s3-upload-pipeline-v1'] if use_agent else [])
+                        return httpx.Response(200,json={'capabilities':caps})
                     if path=='/api/r2/helper/identity':
                         return httpx.Response(200,json=USER)
                     path=path.replace('/api/r2/helper/transfer/uploads','/api/r2/uploads',1)
@@ -428,8 +442,11 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                 self.assertEqual(provider.objects,before)
             manifest = provider.optional_json(job['prefix'] + '/manifest.json')[0]
             compressed = provider.get(job['prefix'] + '/' + manifest['files'][0]['key'])
-            self.assertEqual({item['kind'] for item in manifest['cache_files']}, {'fast', 'thumbnail', 'sheet'})
-            self.assertEqual(len(manifest['cache_files']), 3)
+            self.assertEqual(manifest['cache_profile'], 'playback-480x270-256k32k-v1' if legacy else 's3-playback-single-video-v1')
+            self.assertEqual({item['kind'] for item in manifest['cache_files']}, {'thumbnail', 'sheet', 'fast'} if legacy else {'thumbnail', 'sheet'})
+            self.assertEqual(len(manifest['cache_files']), 3 if legacy else 2)
+            self.assertEqual(len([key for key in provider.objects if key.endswith('.mp4')]), 2 if legacy else 1)
+            self.assertEqual(len(list((root / 'desktop/dataMarkProject/1015lixin').glob('*.fast.mp4'))), 1 if legacy else 0)
             cache = list((root / 'desktop/dataMarkProject/1015lixin').glob('*.normal.mp4'))
             self.assertEqual(len(cache), 1)
             self.assertEqual(cache[0].read_bytes(), compressed)
@@ -462,6 +479,8 @@ class FolderUploadRoundTripTests(unittest.TestCase):
                         state=workspace.session_status(project,start=True)
                         download=workspace.session_manifest(project,task['id'])
                     self.assertEqual(state['state'],'ready',state)
+                    self.assertEqual(download['videos'][0].get('playback_mode'), None if legacy else 'normal-only')
+                    self.assertEqual('fast_url' in download['videos'][0], legacy)
                     self.assertTrue(all('/'+job['prefix']+'/' in asset['url'] for asset in download['assets']))
             self.assertFalse(any(key.startswith('media/') for key in provider.objects))
             # Legacy S3 session hydration must also bypass NAS sharing, even if

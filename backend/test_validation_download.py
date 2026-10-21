@@ -158,6 +158,7 @@ class ValidationDownloadTests(unittest.TestCase):
         target=RemoteCaptureTarget(SimpleNamespace(),SimpleNamespace(),progress=messages.append)
         target.transfer_progress=reports.append
         def request(method,path,**kwargs):
+            if path=='/api/health':return {'capabilities':['s3-single-video-cache-v1']}
             if path=='/api/r2/uploads':return dict(id='fixture')
             if method=='POST':return dict(state='validating',verified_files=0,file_count=1,
                 validation_bytes=4*1024**2,validation_total_bytes=8*1024**2)

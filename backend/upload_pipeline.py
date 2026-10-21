@@ -90,7 +90,7 @@ def run(manager, job, user_id, service, can_upload):
             def cache(index,item):
                 check()
                 bundle={**copy.deepcopy(metadata),'files':[item]}
-                retained=build(service,prepared,bundle,target.progress) or {}
+                retained=build(service,prepared,bundle,target.progress,profile=target.cache_profile) or {}
                 if index in normal_desktop:retained[item['key']]=normal_desktop[index]
                 recovery.save(service,job['prefix'],job['records'][index],original_digests[index],bundle,retained)
                 bundles[index]=bundle
@@ -102,7 +102,7 @@ def run(manager, job, user_id, service, can_upload):
                     source=manager._check_local_source(record)
                     target.progress(f'正在核验原视频 {index+1}/{len(job["records"])}：{record["name"]}')
                     original_digests[index]=target.source_digest(record)
-                    reused=recovery.load(service,job['prefix'],record,original_digests[index],prepared)
+                    reused=recovery.load(service,job['prefix'],record,original_digests[index],prepared,profile=target.cache_profile)
                     if reused:
                         bundles[index]={**copy.deepcopy(metadata),**{k:reused[k] for k in ('files','cache_profile','cache_files')}}
                         sent.append(uploads.submit(guarded,stage,index,bundles[index]))
