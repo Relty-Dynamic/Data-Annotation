@@ -610,7 +610,8 @@ html, body, #root { background: var(--bg); }
 .app-shell.video-workspace { overflow: hidden; }
 .video-workspace .editor-grid {
   flex: 1 1 0;
-  grid-template-rows: minmax(0, 1fr) minmax(0, clamp(190px, 36vh, 360px));
+  grid-template-rows: minmax(0, 1fr) minmax(0, min(var(--timeline-natural-height, 250px), clamp(170px, 34vh, 300px)));
+  grid-template-rows: minmax(0, 1fr) minmax(0, min(var(--timeline-natural-height, 250px), clamp(170px, 34dvh, 300px)));
   align-items: stretch;
   overflow: hidden;
 }
