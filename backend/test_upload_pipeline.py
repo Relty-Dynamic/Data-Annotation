@@ -31,6 +31,9 @@ class PipelineTests(unittest.TestCase):
         self.stages=[];self.final=[]
         outer=self
         class Target(RemoteCaptureTarget):
+            def request(inner,method,path,**kwargs):
+                outer.assertEqual((method,path),('GET','/api/health'))
+                return {'capabilities':['s3-single-video-cache-v1','s3-upload-pipeline-v1']}
             def capture_exists(inner,prefix):return False
             def publish_ready(inner,prefix,prepared,manifest,service,*,prepare=False,completed_keys=None):
                 if inner.attachments:manifest['attachments']=attachment_manifest(inner.attachments)
@@ -70,8 +73,9 @@ class PipelineTests(unittest.TestCase):
             self.second.set()
         destination.write_bytes(b'compressed-'+source.name.encode());progress(100)
 
-    def build(self,service,prepared,manifest,progress):
-        manifest.update(cache_profile=PROFILE,cache_files=[])
+    def build(self,service,prepared,manifest,progress,*,profile):
+        self.assertEqual(profile,'s3-playback-single-video-v1')
+        manifest.update(cache_profile=profile,cache_files=[])
         return {}
 
     def test_prediction_compression_upload_overlap_and_publish_once(self):

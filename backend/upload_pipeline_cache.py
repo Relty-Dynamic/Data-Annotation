@@ -5,27 +5,30 @@ import os
 from pathlib import Path
 import shutil
 import uuid
+from fastapi import HTTPException
 
 from .service import document_bytes
 from .desktop_cache import sha256_file
 from .session_cache import PROFILE
 
 
-def index_path(service, prefix, record, digest):
-    key=hashlib.sha256(document_bytes([1,prefix,record['name'],digest,'playback-480x270-256k32k-v1',PROFILE])).hexdigest()
+def index_path(service, prefix, record, digest, *, profile=PROFILE):
+    key=hashlib.sha256(document_bytes([1,prefix,record['name'],digest,'playback-480x270-256k32k-v1',profile])).hexdigest()
     return service.local/'upload-pipeline-index'/(key+'.json')
 
 
-def load(service,prefix,record,digest,prepared):
-    path=index_path(service,prefix,record,digest)
+def load(service,prefix,record,digest,prepared,*,profile=PROFILE):
+    path=index_path(service,prefix,record,digest,profile=profile)
     if not service.desktop_cache.enabled or not path.is_file():return None
     created=[]
     complete=False
     try:
         saved=json.loads(path.read_text())
         if (saved.get('raw_sha256')!=digest or saved.get('prefix')!=prefix or saved.get('source_name')!=record['name']
-                or saved['bundle'].get('cache_profile')!=PROFILE or len(saved['bundle'].get('files',[]))!=1
+                or saved['bundle'].get('cache_profile')!=profile or len(saved['bundle'].get('files',[]))!=1
                 or saved['bundle']['files'][0]['key']!=record['output']):return None
+        from .upload_playback import validate
+        validate(saved['bundle'])
         expected={i['key']:(i['size'],i['sha256']) for i in saved['bundle']['files']+saved['bundle']['cache_files']}
         actual={i['key']:(i['size'],i['sha256']) for i in saved['assets']}
         if expected!=actual:return None
@@ -47,7 +50,7 @@ def load(service,prefix,record,digest,prepared):
             finally:temporary.unlink(missing_ok=True)
         complete=True
         return saved['bundle']
-    except (OSError,ValueError,KeyError,TypeError):return None
+    except (OSError,ValueError,KeyError,TypeError,HTTPException):return None
     finally:
         if not complete:
             for item in created:item.unlink(missing_ok=True)
@@ -57,7 +60,7 @@ def save(service,prefix,record,digest,bundle,retained):
     if not service.desktop_cache.enabled:return
     assets=bundle['files']+bundle['cache_files']
     if any(i['key'] not in retained for i in assets):return
-    path=index_path(service,prefix,record,digest);path.parent.mkdir(parents=True,exist_ok=True)
+    path=index_path(service,prefix,record,digest,profile=bundle['cache_profile']);path.parent.mkdir(parents=True,exist_ok=True)
     value=dict(raw_sha256=digest,prefix=prefix,source_name=record['name'],bundle=bundle,assets=[{**{k:i[k] for k in ('key','size','sha256')},'desktop':str(retained[i['key']])} for i in assets])
     temporary=path.with_name('.'+path.name+'.'+uuid.uuid4().hex+'.tmp')
     try:

@@ -15,15 +15,19 @@ from .native_picker import choose_local_paths
 from .public_setup import public_origin
 from .service import ProjectService
 from .r2_folder import FolderUploadManager, attachment_manifest
+from .playback_contract import SINGLE_VIDEO_PROFILE, SINGLE_VIDEO_CAPABILITY
 
 
 class RemoteCaptureTarget:
+    cache_profile = SINGLE_VIDEO_PROFILE
+
     def __init__(self, client, service, *, attachments=(), progress=None):
         self.client, self.service = client, service
         self.attachments = attachments
         self.progress = progress or (lambda value: None)
         self.transfer_progress = lambda value: None
         self.pipeline_enabled = False
+        self.single_video_ready = False
         self.hash_guard=threading.RLock()
         self.source_hashes={}
         self.source_hash_locks={}
@@ -57,11 +61,21 @@ class RemoteCaptureTarget:
         # The server performs the authoritative conditional-publication check.
         return False
 
+    def require_upload_support(self):
+        health = self.request('GET', '/api/health')
+        capabilities = health.get('capabilities', [])
+        if SINGLE_VIDEO_CAPABILITY not in capabilities:
+            raise HTTPException(409, '平台尚不支持单份视频缓存，请先更新平台后台，再使用新版本机组件上传。')
+        self.pipeline_enabled = 's3-upload-pipeline-v1' in capabilities
+        self.single_video_ready = True
+
     def publish_capture(self, prefix, prepared, manifest, service):
+        if not self.single_video_ready:
+            self.require_upload_support()
         for item in manifest['files']:
             item['duration_ms'] = service.probe(prepared / item['key'])['duration_ms']
         from .upload_playback import build
-        build(service, prepared, manifest, self.progress)
+        build(service, prepared, manifest, self.progress, profile=self.cache_profile)
         return self.publish_ready(prefix,prepared,manifest,service)
 
     def publish_ready(self, prefix, prepared, manifest, service, *, prepare=False, completed_keys=None):

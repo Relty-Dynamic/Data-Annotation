@@ -244,6 +244,7 @@ class UploadPerformanceTests(unittest.TestCase):
         target=RemoteCaptureTarget(SimpleNamespace(),self.service)
         requests=[]
         def request(method,path,**kwargs):
+            if path=='/api/health':return {'capabilities':['s3-single-video-cache-v1']}
             requests.append((method,path))
             if path=='/api/r2/uploads':return {'id':'fixture'}
             if '/finish' in path:return dict(state='validating',verified_files=0,file_count=3)
@@ -259,6 +260,7 @@ class UploadPerformanceTests(unittest.TestCase):
         target=RemoteCaptureTarget(SimpleNamespace(),self.service)
         posts=[]
         def request(method,path,**kwargs):
+            if path=='/api/health':return {'capabilities':['s3-single-video-cache-v1']}
             if path=='/api/r2/uploads':return {'id':'fixture'}
             if method=='POST':
                 posts.append(path)
