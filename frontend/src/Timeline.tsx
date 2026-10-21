@@ -183,6 +183,37 @@ export default function Timeline({ project, currentTime, activeTrack, trackRevea
   }, []);
 
   useLayoutEffect(() => {
+    const root = rootRef.current;
+    const grid = root?.closest<HTMLElement>('.editor-grid');
+    const toolbar = root?.querySelector<HTMLElement>('.tl-toolbar');
+    const fixed = root?.querySelector<HTMLElement>('.tl-fixed-tracks');
+    const tracks = root?.querySelector<HTMLElement>('.tl-tracks-content');
+    const scroll = scrollRef.current;
+    if (!root || !grid || !toolbar || !fixed || !tracks || !scroll) return;
+    const previous = grid.style.getPropertyValue('--timeline-natural-height');
+    let applied = '';
+    const measure = () => {
+      const style = getComputedStyle(root);
+      const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+      const scrollbar = scroll.offsetHeight - scroll.clientHeight;
+      const height = Math.ceil(toolbar.getBoundingClientRect().height + fixed.getBoundingClientRect().height
+        + tracks.getBoundingClientRect().height + scrollbar + border);
+      const value = `${height}px`;
+      if (value !== applied) grid.style.setProperty('--timeline-natural-height', applied = value);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    for (const element of [toolbar, fixed, tracks, scroll]) observer.observe(element);
+    return () => {
+      observer.disconnect();
+      if (grid.style.getPropertyValue('--timeline-natural-height') === applied) {
+        if (previous) grid.style.setProperty('--timeline-natural-height', previous);
+        else grid.style.removeProperty('--timeline-natural-height');
+      }
+    };
+  }, []);
+
+  useLayoutEffect(() => {
     setHoverTime(null);
     finishScrub(true);
     pendingViewRef.current = null;

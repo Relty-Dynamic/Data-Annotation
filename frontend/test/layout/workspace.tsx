@@ -15,10 +15,11 @@ const sizes = [[1920,1080],[1920,1200],[1536,864],[1536,960],[1280,720],[1280,80
   [1366,650],[1440,810],[1024,576],[1024,640],[900,600],[800,500],[600,480]];
 const parameters = new URLSearchParams(location.search);
 const clips=['16x9','4x3','9x16'];
+const mainOnly=parameters.get('lanes')==='main';
 const project:Project = {id:'layout-fixture',name:'隔离测试',source_dir:null,revision:1,updated_at:'',
   duration_ms:7_200_000,fixed_tracks:['scene','posture','category'],
   videos:clips.map((name,index)=>({id:name,name,relative_path:name+'.mp4',duration_ms:2_400_000,start_ms:index*2_400_000,end_ms:(index+1)*2_400_000,url:'',thumbnail_url:null})),
-  annotations:Object.fromEntries(['scene','posture','category'].map(axis=>[axis,Array.from({length:12},(_,lane)=>({id:axis+lane,label:'测试',start_ms:0,end_ms:3_600_000,lane}))]))};
+  annotations:Object.fromEntries(['scene','posture','category'].map(axis=>[axis,Array.from({length:mainOnly?1:12},(_,lane)=>({id:axis+lane,label:'测试',start_ms:0,end_ms:3_600_000,lane}))]))};
 
 function Fixture(){
   const [time,setTime]=useState(0),[speed,setSpeed]=useState(1),[clip,setClip]=useState(0),[selected,setSelected]=useState<string|null>(null),[track,setTrack]=useState<Track>('posture');
@@ -54,6 +55,7 @@ function measure(){
   check(app.scrollHeight<=app.clientHeight+1 && document.documentElement.scrollHeight<=innerHeight+1,'whole-page overflow');
   check(app.scrollWidth<=app.clientWidth+1,'horizontal page overflow');
   check(timeline.bottom<=innerHeight && timeline.top>=preview.bottom,'timeline outside viewport or overlapping video');
+  check(Math.abs(timeline.bottom-rect('.editor-grid').bottom)<1,'timeline does not reach workspace bottom');
   check(timeline.top-preview.bottom<=12,'blank between preview and timeline');
   check(video.height>=65 && video.width>=35,'video collapsed');
   const media=get('video') as HTMLVideoElement,frame=rect('.video-frame'),slot=rect('.video-slot');
@@ -67,16 +69,19 @@ function measure(){
     const r=button.getBoundingClientRect();
     check(r.left>=controls.left-1 && r.right<=controls.right+1 && r.bottom<=controls.bottom+1,'clipped player button');
   }
-  check(tracks.clientHeight>=34 && tracks.scrollHeight>tracks.clientHeight,'annotation lanes not scrollable');
+  const contentHeight=rect('.tl-tracks-content').height;
+  check(tracks.clientHeight>=34,'annotation lanes collapsed');
+  if(mainOnly)check(tracks.clientHeight<=Math.ceil(contentHeight)+1,'unused timeline height steals video space');
+  else check(tracks.scrollHeight>tracks.clientHeight,'annotation lanes not scrollable');
   const top=rect('.tl-ruler').top;
   tracks.scrollTop=80;side.scrollTop=100;
-  check(tracks.scrollTop>0 && side.scrollTop>0,'panel cannot scroll');
+  check((contentHeight<=tracks.clientHeight+1 || tracks.scrollTop>0) && side.scrollTop>0,'panel cannot scroll');
   check(rect('.tl-ruler').top===top && app.scrollTop===0,'panel scroll moved ruler or whole page');
   tracks.scrollTop=0;side.scrollTop=0;
   const horizontal=get('.tl-scroll');horizontal.scrollLeft=200;
   check(horizontal.scrollLeft>0,'timeline cannot scroll horizontally');
   horizontal.scrollLeft=0;
-  return {viewport:[innerWidth,innerHeight],review:parameters.get('review'),gap:timeline.top-preview.bottom,videoHeight:video.height,errors};
+  return {viewport:[innerWidth,innerHeight],review:parameters.get('review'),lanes:mainOnly?'main':'many',gap:timeline.top-preview.bottom,videoHeight:video.height,timelineHeight:timeline.height,errors};
 }
 
 async function interactions(){
@@ -124,11 +129,13 @@ if(parameters.has('fixture')){
     const frame=document.createElement('iframe');frame.style.border='0';document.body.append(frame);
     // Reuse each mounted component while resizing to exercise ResizeObserver.
     for(const review of ['false','true']){
-      frame.src=`?fixture=1&review=${review}`;
+      for(const lanes of ['main','many']){
+      frame.src=`?fixture=1&review=${review}&lanes=${lanes}`;
       await new Promise<void>(resolve=>frame.onload=()=>resolve());await pause(200);
       for(const [width,height] of sizes){
         frame.style.width=width+'px';frame.style.height=height+'px';await pause(80);
         results.push(await (frame.contentWindow as unknown as {exerciseLayout:()=>Promise<ReturnType<typeof measure>>}).exerciseLayout());
+      }
       }
     }
     frame.remove();

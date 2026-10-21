@@ -54,7 +54,7 @@ try{
   if(!results)throw new Error('Layout fixture did not complete');
   await writeFile(resolve(temp,`layout-${browser.includes('Edge')?'edge':'chrome'}-${process.env.LAYOUT_SCALE??1}.json`),JSON.stringify(results,null,2));
   const failures=results.filter(result=>result.errors.length);
-  if(results.length!==26 || failures.length)throw new Error(JSON.stringify({count:results.length,failures},null,2));
+  if(results.length!==52 || failures.length)throw new Error(JSON.stringify({count:results.length,failures},null,2));
   // Real pointer events exercise the video strip's pointer-capture seek path.
   await call('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:Number(process.env.LAYOUT_SCALE??1),mobile:false});
   await call('Page.navigate',{url:`http://127.0.0.1:${address.port}/test/layout/index.html?fixture=1`});
