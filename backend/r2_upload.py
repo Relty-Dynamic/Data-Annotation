@@ -28,18 +28,23 @@ class RemoteCaptureTarget:
         self.transfer_progress = lambda value: None
         self.pipeline_enabled = False
         self.single_video_ready = False
+        self.check_cancel = lambda: None
         self.hash_guard=threading.RLock()
         self.source_hashes={}
         self.source_hash_locks={}
 
-    def source_digest(self, record):
+    def source_digest(self, record, progress=None):
         from .mock_s3 import MockUploadManager, file_sha256
         path=MockUploadManager._check_local_source(record)
         key=(str(path),record['size'],record['mtime_ns'],record['device'],record['inode'])
         with self.hash_guard:lock=self.source_hash_locks.setdefault(key,threading.RLock())
         with lock:
             if key not in self.source_hashes:
-                value=file_sha256(path)
+                if progress is None:
+                    value=file_sha256(path)
+                else:
+                    from .desktop_cache import sha256_file
+                    value=sha256_file(path, progress)
                 MockUploadManager._check_local_source(record)
                 self.source_hashes[key]=value
             return self.source_hashes[key]
@@ -79,6 +84,12 @@ class RemoteCaptureTarget:
         return self.publish_ready(prefix,prepared,manifest,service)
 
     def publish_ready(self, prefix, prepared, manifest, service, *, prepare=False, completed_keys=None):
+        receipt = self.begin_publish(prefix, prepared, manifest, service,
+                                     prepare=prepare, completed_keys=completed_keys)
+        self.wait_publish(receipt)
+
+    def begin_publish(self, prefix, prepared, manifest, service, *, prepare=False, completed_keys=None):
+        self.check_cancel()
         # Stable request metadata permits restart/resume without storing tokens.
         manifest.pop('created_at', None)
         if self.attachments:
@@ -86,6 +97,7 @@ class RemoteCaptureTarget:
         job = self.request('POST', '/api/r2/uploads', json=manifest)
         from .upload_transfer import transfer_files
         transfer_files(self, job, prepared, manifest, completed_keys=completed_keys)
+        self.check_cancel()
         self.progress('文件已传输，正在校验并发布采集目录，请稍候。')
         finish_url = f"/api/r2/uploads/{job['id']}/finish?background=1" + ('&prepare=1' if prepare else '')
         expected = 'verified' if prepare else 'ready'
@@ -103,6 +115,13 @@ class RemoteCaptureTarget:
                 result = None
             if not result or result.get('state') not in accepted | {'validating'}:
                 raise HTTPException(504, '文件已传输，但尚未确认采集目录发布结果。请稍后重试，已上传内容可续传，不会覆盖已有目录。') from None
+        return dict(job=job, finish_url=finish_url, prepare=prepare, result=result)
+
+    def wait_publish(self, receipt):
+        job, finish_url, prepare, result = (receipt[key] for key in ('job', 'finish_url', 'prepare', 'result'))
+        expected = 'verified' if prepare else 'ready'
+        accepted = {expected, 'ready'} if prepare else {expected}
+        self.check_cancel()
         deadline = time.monotonic() + 7200
         while result.get('state') == 'validating' or (not prepare and result.get('state') == 'verified'):
             checked, total = result.get('verified_files', 0), result.get('file_count', 0)
@@ -115,6 +134,7 @@ class RemoteCaptureTarget:
             if time.monotonic() >= deadline:
                 raise HTTPException(504, '后台仍在核验，请稍后重试继续；已上传内容保留。')
             time.sleep(2)
+            self.check_cancel()
             result = self.request('GET', f"/api/r2/uploads/{job['id']}", timeout=30)
             if result.get('state') in {'validating','verified'} and result.get('validation_active') is False:
                 # Resume after an API restart; errors remain visible until an explicit retry.

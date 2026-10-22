@@ -35,17 +35,21 @@ class PipelineTests(unittest.TestCase):
                 outer.assertEqual((method,path),('GET','/api/health'))
                 return {'capabilities':['s3-single-video-cache-v1','s3-upload-pipeline-v1']}
             def capture_exists(inner,prefix):return False
+            def begin_publish(inner,prefix,prepared,manifest,service,*,prepare=False,completed_keys=None):
+                outer.assertTrue(prepare)
+                if inner.attachments:manifest['attachments']=attachment_manifest(inner.attachments)
+                outer.stages.append(manifest)
+                outer.first.set()
+                return manifest
+            def wait_publish(inner,receipt):
+                pass
             def publish_ready(inner,prefix,prepared,manifest,service,*,prepare=False,completed_keys=None):
                 if inner.attachments:manifest['attachments']=attachment_manifest(inner.attachments)
-                if prepare:
-                    outer.stages.append(manifest)
-                    outer.first.set()
-                else:
-                    outer.final.append(manifest)
-                    outer.assertTrue(outer.second.is_set())
-                    outer.assertEqual(len(outer.stages),2)
-                    outer.assertTrue(any(a['key']=='prediction/posture.json' for a in manifest.get('attachments',[])))
-                    outer.assertEqual(len(completed_keys),2)
+                outer.final.append(manifest)
+                outer.assertTrue(outer.second.is_set())
+                outer.assertEqual(len(outer.stages),2)
+                outer.assertTrue(any(a['key']=='prediction/posture.json' for a in manifest.get('attachments',[])))
+                outer.assertEqual(len(completed_keys),2)
         self.target=Target(SimpleNamespace(),SimpleNamespace())
         self.target.pipeline_enabled=True
         self.manager=FolderUploadManager(self.target,self.root/'staging')
@@ -73,7 +77,7 @@ class PipelineTests(unittest.TestCase):
             self.second.set()
         destination.write_bytes(b'compressed-'+source.name.encode());progress(100)
 
-    def build(self,service,prepared,manifest,progress,*,profile):
+    def build(self,service,prepared,manifest,progress,*,profile,artifacts):
         self.assertEqual(profile,'s3-playback-single-video-v1')
         manifest.update(cache_profile=profile,cache_files=[])
         return {}
@@ -109,7 +113,7 @@ class PipelineTests(unittest.TestCase):
         def fail(*args,**kwargs):
             self.first.set()
             raise HTTPException(503,'fixture upload interrupted')
-        with patch.object(self.manager,'_compress_video',side_effect=self.compress),patch('backend.upload_pipeline.build',side_effect=self.build),patch.object(type(self.target),'publish_ready',side_effect=fail):
+        with patch.object(self.manager,'_compress_video',side_effect=self.compress),patch('backend.upload_pipeline.build',side_effect=self.build),patch.object(type(self.target),'begin_publish',side_effect=fail):
             with self.assertRaises(HTTPException):self.manager.finish(job['id'],USER['id'],self.service,lambda user:True)
         self.assertFalse(self.final)
         self.assertEqual(self.manager.status(job['id'],USER['id'])['state'],'error')
@@ -149,7 +153,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_batch_progress_never_replaces_collection_progress(self):
         job=self.manager.start(USER,'test',None,None,self.selection['selection_id'])
-        self.started.set();original=type(self.target).publish_ready
+        self.started.set();original=type(self.target).begin_publish
         def publish(target,prefix,prepared,manifest,service,**kwargs):
             if kwargs.get('prepare'):
                 target.transfer_progress(dict(state='uploading',progress=100))
@@ -161,7 +165,7 @@ class PipelineTests(unittest.TestCase):
             if not kwargs.get('prepare'):
                 self.final.append(manifest);return
             return original(target,prefix,prepared,manifest,service,**kwargs)
-        with patch.object(self.manager,'_compress_video',side_effect=self.compress),patch('backend.upload_pipeline.build',side_effect=self.build),patch.object(type(self.target),'publish_ready',publish):
+        with patch.object(self.manager,'_compress_video',side_effect=self.compress),patch('backend.upload_pipeline.build',side_effect=self.build),patch.object(type(self.target),'begin_publish',publish),patch.object(type(self.target),'publish_ready',lambda *args,**kwargs:None):
             self.assertEqual(self.manager.finish(job['id'],USER['id'],self.service,lambda user:True)['state'],'ready')
 
 

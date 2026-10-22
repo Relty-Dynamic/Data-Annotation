@@ -7,7 +7,8 @@ import threading
 
 from fastapi import HTTPException
 
-from .mock_s3 import file_sha256
+from .upload_artifact import UploadArtifact
+from .upload_progress import UploadProgress
 from .upload_playback import build
 from .upload_errors import failure_detail
 from . import upload_pipeline_cache as recovery
@@ -20,12 +21,17 @@ def run(manager, job, user_id, service, can_upload):
     stop=threading.Event()
     failures=[]
     gate=threading.RLock()
+    telemetry = UploadProgress(len(job['records']), options.get('prediction') == 'generate')
+    with manager.lock:
+        job['_upload_progress'] = telemetry
     workspace=manager.staging/job['id'];prepared=workspace/'publish'
-    def check():
+    def check_stopped():
         if stop.is_set():
             with gate:
                 if failures:raise failures[0]
             raise HTTPException(409,'处理已停止，尚未发布采集目录。')
+    def check():
+        check_stopped()
         if not can_upload(user_id):
             raise HTTPException(403,'上传权限已关闭，未发布采集目录。')
     def guarded(function,*args):
@@ -35,8 +41,9 @@ def run(manager, job, user_id, service, can_upload):
                 first = not failures
                 failures.append(error)
             stop.set()
+            telemetry.finish('error')
             if first:
-                stage = {'predict':'姿势预标注','stage':'视频上传或核验','cache':'播放缓存生成','compress':'视频压缩'}.get(function.__name__, '本机处理')
+                stage = {'predict':'姿势预标注','stage':'视频上传','complete_verification':'云端核验','cache':'播放缓存生成','compress':'视频压缩'}.get(function.__name__, '本机处理')
                 with manager.lock:
                     job.update(state='error',detail=failure_detail(error, stage))
                     if hasattr(error, 'prediction_failure'):
@@ -50,9 +57,10 @@ def run(manager, job, user_id, service, can_upload):
         if not stop.is_set():target.progress('预标注 · '+text)
     def predict():
         from .prediction_prepare import prepare_prediction
-        current,result=prepare_prediction(target,service,selection['root'],selection['folder'],
-            {role:options[role+'_device'].strip() for role in ('chest','thigh')},
-            progress=prediction_progress,cancel=check,clock_group=options.get('clock_group') or None)
+        with telemetry.measure('prediction', 0):
+            current,result=prepare_prediction(target,service,selection['root'],selection['folder'],
+                {role:options[role+'_device'].strip() for role in ('chest','thigh')},
+                progress=prediction_progress,cancel=check,clock_group=options.get('clock_group') or None)
         selection['folder']=current
         update(prediction_result=result)
         return current['attachments']
@@ -60,7 +68,9 @@ def run(manager, job, user_id, service, can_upload):
     metadata={k:job[k] for k in ('prefix','collector_name','uploader_name','capture_date','note')}
     metadata.update(schema_version=1,uploaded_by=user_id,uploaded_by_username=job['uploaded_by_username'],video_profile='playback-480x270-256k32k-v1')
     completed=set();bundles={};sent=[];staged=set()
-    original_digests={};normal_desktop={}
+    original_digests={};artifacts={};normal_desktop={}
+    pending_validation = threading.BoundedSemaphore(2)
+    validating = []
     try:
         with manager.lock:
             if job['state'] not in {'ready_to_compress','error'}:
@@ -69,30 +79,63 @@ def run(manager, job, user_id, service, can_upload):
                        prediction_detail='',detail='预标注、压缩与上传正在并行处理。')
             job.pop('prediction_failure', None)
         prepared.mkdir(parents=True,exist_ok=True)
-        # One encoder, one cache builder, one transfer group; the slowest group
-        # does not stop earlier groups from preparing the next clip.
-        with ThreadPoolExecutor(max_workers=1) as prediction, ThreadPoolExecutor(max_workers=1) as uploads:
+        # Keep one transfer group (three S3 requests), with at most two
+        # uploaded clips awaiting verification. The next upload need not wait
+        # for the previous clip's complete remote validation.
+        with ThreadPoolExecutor(max_workers=1) as prediction, ThreadPoolExecutor(max_workers=2) as verifications, ThreadPoolExecutor(max_workers=1) as uploads:
             prediction_job=prediction.submit(guarded,predict) if options.get('prediction')=='generate' else None
-            def stage(index,bundle):
+            def complete_verification(index, bundle, remote, receipt):
                 check()
-                def progress(text):
-                    if not stop.is_set():target.progress(text)
-                remote=type(target)(target.client,service,attachments=initial_attachments if index==0 else [],progress=progress)
-                remote.transfer_progress=target.transfer_progress
-                remote.source_digest=target.source_digest
-                remote.publish_ready(job['prefix'],prepared,bundle,service,prepare=True)
+                telemetry.begin('verify', index)
+                remote.wait_publish(receipt)
+                check()
+                telemetry.complete('verify', index)
                 with gate:
                     completed.update((i['key'],i['sha256']) for i in bundle['files']+bundle.get('attachments',[])+bundle['cache_files'])
                     staged.add(index)
                     count=len(staged)
-                update(clips_verified=count,progress=round(count/len(job['records'])*95,1),
-                       detail=f'已有 {count}/{len(job["records"])} 段完成上传核验，继续准备采集。')
+                    update(clips_verified=count,progress=round(count/len(job['records'])*95,1),
+                           detail=f'已有 {count}/{len(job["records"])} 段完成上传核验，继续准备采集。')
+            def verify(index, bundle, remote, receipt):
+                try:
+                    # Record failure/cancellation before releasing a slot to
+                    # the next transfer; preserve the original diagnostic.
+                    return guarded(complete_verification,index,bundle,remote,receipt)
+                finally:
+                    pending_validation.release()
+            def stage(index,bundle):
+                while not pending_validation.acquire(timeout=.1):
+                    check_stopped()
+                handed_off = False
+                try:
+                    check()
+                    def progress(text):
+                        if not stop.is_set():target.progress(text)
+                    remote=type(target)(target.client,service,attachments=initial_attachments if index==0 else [],progress=progress)
+                    remote.check_cancel=check_stopped
+                    remote.source_digest=target.source_digest
+                    def transfer(values):
+                        key = 'verify' if values.get('state') == 'validating' else 'upload'
+                        telemetry.advance(key, index, values.get('progress', 0))
+                        if not stop.is_set():target.transfer_progress(values)
+                    remote.transfer_progress=transfer
+                    with telemetry.measure('upload', index):
+                        receipt=remote.begin_publish(job['prefix'],prepared,bundle,service,prepare=True)
+                    validating.append(verifications.submit(verify,index,bundle,remote,receipt))
+                    handed_off = True
+                finally:
+                    if not handed_off:pending_validation.release()
             def cache(index,item):
                 check()
                 bundle={**copy.deepcopy(metadata),'files':[item]}
-                retained=build(service,prepared,bundle,target.progress,profile=target.cache_profile) or {}
-                if index in normal_desktop:retained[item['key']]=normal_desktop[index]
-                recovery.save(service,job['prefix'],job['records'][index],original_digests[index],bundle,retained)
+                artifact = artifacts[index]
+                with telemetry.measure('cache', index):
+                    retained=build(service,prepared,bundle,target.progress,profile=target.cache_profile,
+                                   artifacts={item['key']: artifact}) or {}
+                    if index in normal_desktop:
+                        retained[item['key']]=normal_desktop[index]
+                    artifact.digest_for(prepared/item['key'])
+                    recovery.save(service,job['prefix'],job['records'][index],original_digests[index],bundle,retained)
                 bundles[index]=bundle
                 sent.append(uploads.submit(guarded,stage,index,bundle))
             with ThreadPoolExecutor(max_workers=1) as caches:
@@ -101,9 +144,15 @@ def run(manager, job, user_id, service, can_upload):
                     check()
                     source=manager._check_local_source(record)
                     target.progress(f'正在核验原视频 {index+1}/{len(job["records"])}：{record["name"]}')
-                    original_digests[index]=target.source_digest(record)
-                    reused=recovery.load(service,job['prefix'],record,original_digests[index],prepared,profile=target.cache_profile)
+                    with telemetry.measure('source', index):
+                        def hashing(read):
+                            check_stopped()
+                            telemetry.advance('source', index, read/record['size']*100)
+                        original_digests[index]=target.source_digest(record, progress=hashing)
+                        reused=recovery.load(service,job['prefix'],record,original_digests[index],prepared,profile=target.cache_profile)
                     if reused:
+                        telemetry.complete('compress', index)
+                        telemetry.complete('cache', index)
                         bundles[index]={**copy.deepcopy(metadata),**{k:reused[k] for k in ('files','cache_profile','cache_files')}}
                         sent.append(uploads.submit(guarded,stage,index,bundles[index]))
                         target.progress(f'复用本机已校验缓存 {index+1}/{len(job["records"])}，继续上传。')
@@ -111,18 +160,25 @@ def run(manager, job, user_id, service, can_upload):
                     destination=prepared/record['output'];destination.parent.mkdir(parents=True,exist_ok=True)
                     def progress(percent,number=index+1):
                         if stop.is_set():check()
+                        telemetry.advance('compress', index, percent)
                         update(detail=f'正在压缩第 {number}/{len(job["records"])} 段视频：{percent:.0f}%。')
-                    manager._compress_video(service,source,destination,progress)
-                    manager._check_local_source(record)
-                    if service.desktop_cache.enabled:
-                        normal_desktop[index]=service.desktop_cache.retain_upload(job['prefix'],source.name,destination)
-                    item=dict(source=record['path'],key=record['output'],size=destination.stat().st_size,
-                              sha256=file_sha256(destination),duration_ms=service.probe(destination)['duration_ms'])
+                    with telemetry.measure('compress', index):
+                        manager._compress_video(service,source,destination,progress)
+                        manager._check_local_source(record)
+                        artifact=UploadArtifact.read(destination)
+                        artifacts[index]=artifact
+                        item=dict(source=record['path'],key=record['output'],size=artifact.stamp[2],
+                                  sha256=artifact.sha256,duration_ms=service.probe(destination)['duration_ms'])
+                        artifact.digest_for(destination)
+                        if service.desktop_cache.enabled:
+                            normal_desktop[index]=service.desktop_cache.retain_upload(
+                                job['prefix'], record['name'], destination, artifact=artifact)
                     cached.append(caches.submit(guarded,cache,index,item))
                 for index,record in enumerate(job['records']):
                     guarded(compress,index,record)
                 for future in cached:future.result()
             for future in sent:future.result()
+            for future in validating:future.result()
             if prediction_job and not prediction_job.done():
                 update(state='preparing_prediction',detail='视频和缓存已上传核验，正在等待姿势预标注完成。')
             target.attachments=prediction_job.result() if prediction_job else initial_attachments
@@ -130,14 +186,19 @@ def run(manager, job, user_id, service, can_upload):
         manifest={**metadata,'files':[bundles[i]['files'][0] for i in range(len(bundles))],
                   'cache_profile':bundles[0]['cache_profile'],
                   'cache_files':[item for i in range(len(bundles)) for item in bundles[i]['cache_files']]}
-        target.publish_ready(job['prefix'],prepared,manifest,service,completed_keys=completed)
+        target.check_cancel=check_stopped
+        with telemetry.measure('publish', 0):
+            target.publish_ready(job['prefix'],prepared,manifest,service,completed_keys=completed)
+        telemetry.finish('ready')
         update(state='ready',progress=100,detail='完整采集已核验并发布。')
         return manager.status(job['id'],user_id)
     except Exception as error:
         stop.set()
+        telemetry.finish('error')
         with gate:actual=failures[0] if failures else error
         with manager.lock:
             if job['state'] != 'error':job.update(state='error',detail=failure_detail(actual))
         raise actual
     finally:
+        target.check_cancel=lambda: None
         shutil.rmtree(workspace,ignore_errors=True)
