@@ -20,6 +20,7 @@ class CollectionOutputs:
         self.store, self.media, self.editor = store, media, editor
         self.provider = media.service.provider
         self.lock = threading.RLock()
+        self.nas_sync = None
         with store.db() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS capture_output_people(
@@ -47,6 +48,11 @@ class CollectionOutputs:
                     body['migrated_layout'] = True
                 db.execute("UPDATE capture_output_jobs SET body=?,state='pending',error=NULL WHERE id=?",
                            (json.dumps(body,ensure_ascii=False),ident))
+
+    def enable_nas_sync(self):
+        from .nas_delivery import NasDelivery
+        self.nas_sync = NasDelivery(self)
+        return self.nas_sync
 
     def _migration_final(self, body):
         """Rebuild the active collection result per file from frozen plans."""
@@ -220,7 +226,16 @@ class CollectionOutputs:
                 'directory':prefix+'/final','files':{'delivery-'+delivery['id']+'.csv':'\ufeff'+stream.getvalue()},
                 'metadata':{'delivery_id':delivery['id']},'dependencies':[final for _,final in items if final]})
 
+        if self.nas_sync is not None and groups:
+            self.nas_sync.register(db,delivery,groups)
+
     def status(self, db, task_id):
+        result = self._status(db,task_id)
+        if result is not None and self.nas_sync is not None:
+            result['nas'] = self.nas_sync.status(db,task_id)
+        return result
+
+    def _status(self, db, task_id):
         rows = db.execute('SELECT state,error FROM capture_output_jobs WHERE id IN (SELECT job_id FROM capture_output_links WHERE task_id=?)',(task_id,)).fetchall()
         if not rows:
             task = self.store._read(db,'tasks',task_id)
@@ -316,6 +331,8 @@ class CollectionOutputs:
             for ident in ids:
                 if not self._run(ident,set()):
                     break
+            if self.nas_sync is not None:
+                self.nas_sync.wake()
             with self.store.db() as db:
                 return self.status(db,task_id)
 
@@ -363,4 +380,6 @@ class CollectionOutputs:
                 delivery = self.store._read(db,'deliveries',raw['delivery_id'])
                 tasks = [self.store._read(db,'tasks',ident) for ident in delivery['task_ids']]
                 self.delivery(db,tasks,delivery,self.store.artifacts.get(delivery['artifact_key']),names)
+        if self.nas_sync is not None:
+            self.nas_sync.retry(task_id)
         return self.flush(task_id)

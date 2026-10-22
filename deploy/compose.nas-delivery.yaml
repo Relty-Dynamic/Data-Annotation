@@ -1,0 +1,38 @@
+# Standalone worker: no published ports, network, account DB, or S3 credentials.
+# API shares only its existing task-state/nas-sync directory with this worker.
+name: datamark-nas-delivery
+services:
+  worker:
+    image: ${DATAMARK_NAS_SYNC_IMAGE:?Use the tested platform image}
+    command: [/opt/venv/bin/python, -m, backend.nas_delivery_worker,
+      --queue, /queue, --nas-root, /nas, --mount-root, /nas, --state-dir, /locks]
+    user: "1000:1000"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    network_mode: none
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cpus: 1
+    mem_limit: 512m
+    pids_limit: 128
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    volumes:
+      - type: bind
+        source: ${DATAMARK_TASK_STATE_DIR:?Existing public task state}/nas-sync
+        target: /queue
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_NAS_DAILY_ROOT:?Existing mounted NAS daily root}
+        target: /nas
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATAMARK_FINAL_SYNC_LOCK_DIR:?Existing cron runner state directory}
+        target: /locks
+        bind:
+          create_host_path: false

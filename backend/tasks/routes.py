@@ -325,6 +325,14 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
             return endpoint
         router.add_api_route('/items/{task_id}/' + action, make_endpoint(method), methods=['POST'])
 
+    @router.get('/items/{task_id}/outputs/status')
+    def output_status(task_id: str, request: Request):
+        store.get_task(actor(request),task_id)
+        if store.outputs is None:
+            raise HTTPException(404,'此存储模式不使用 S3 采集结果目录。')
+        with store.db() as db:
+            return store.outputs.status(db,task_id)
+
     @router.post('/items/{task_id}/outputs/retry')
     def retry_outputs(task_id: str, request: Request):
         if store.outputs is None:

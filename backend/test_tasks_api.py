@@ -735,6 +735,7 @@ class TaskHostTests(unittest.TestCase):
         workspace.media=ProjectMedia(service,'s3',lambda actor,ident:True)
         store=app.state.tasks
         store.outputs=CollectionOutputs(store,workspace.media,workspace.service)
+        nas_sync=store.outputs.enable_nas_sync()
         headers=self.login(client,'admin')
         self.request(client,'POST','/collections',{'collection_id':project['id'],'collector_id':'fixture',
             'date':'2026-10-15','scene':'室内','quality':'passed'},headers)
@@ -772,7 +773,15 @@ class TaskHostTests(unittest.TestCase):
             'expected_revisions':{task['id']:task['revision']},'request_id':'export'},headers)
         self.assertEqual(delivery['output_sync'][0]['state'],'ready')
         self.assertIn(prefix+'/timeline/final/delivery-'+delivery['id']+'.csv',provider.objects)
+        self.assertEqual(delivery['output_sync'][0]['nas']['state'],'pending')
+        nas_sync.dispatch_once()
+        status=self.request(client,'GET',path+'/outputs/status')
+        self.assertEqual(status['state'],'ready')
+        self.assertEqual(status['nas']['state'],'pending')
+        self.login(client,'a')
+        self.request(client,'GET',path+'/outputs/status',expected=403)
         client.cookies.clear()
+        self.request(client,'GET',path+'/outputs/status',expected=401)
         self.request(client,'POST',path+'/outputs/retry',{},headers,expected=401)
 
     def test_direct_task_cache_routes_do_not_start_or_read_server_preparation(self):

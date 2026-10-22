@@ -202,7 +202,8 @@ def find_collections(root, captures):
     return found
 
 
-def sync_capture(store, root, capture, *, apply=False, collections=None, directory='finally'):
+def sync_capture(store, root, capture, *, apply=False, collections=None, directory='finally', check_cancel=lambda: None):
+    check_cancel()
     object_key(capture)
     if not capture.startswith('daily/') or len(capture.split('/')) not in (2, 3):
         raise SyncError('采集路径须为 daily/采集目录 或 daily/日期/采集目录。')
@@ -282,6 +283,7 @@ def sync_capture(store, root, capture, *, apply=False, collections=None, directo
         raise SyncError('NAS 来源记录在同步期间变化，未开始写入。')
     if (pending_path.read_bytes() if pending_path.exists() else None) != pending_raw:
         raise SyncError('NAS 未完成同步记录在同步期间变化，未开始写入。')
+    check_cancel()
     if not downloads and local_raw == remote_raw and source_raw == expected_source:
         pending_path.unlink(missing_ok=True)
         if pending_raw is not None:
@@ -311,6 +313,7 @@ def sync_capture(store, root, capture, *, apply=False, collections=None, directo
     pending['accepted_at'] = remote['metadata']['accepted_at']
     atomic_write(pending_path, json.dumps(pending, ensure_ascii=False).encode())
     for name, data in downloads.items():
+        check_cancel()
         guarded_write(safe_path(root, parts + ['timeline', directory, name]), data,
                       originals[name], backup / name if backup else None)
     # Verify every selected file, including reused files, before publishing marker.
@@ -319,6 +322,7 @@ def sync_capture(store, root, capture, *, apply=False, collections=None, directo
             raise SyncError('NAS 整批读回校验失败，未更新完成清单。')
     if store.get(remote_key) != remote_raw:
         raise SyncError('S3 验收版本在写入期间变化，未更新完成清单；下次重试。')
+    check_cancel()
     guarded_write(marker_path, remote_raw, local_raw, backup / MARKER if backup else None)
     pending_path.unlink()
     sync_directory(target)

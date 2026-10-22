@@ -44,6 +44,10 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
     shared = os.getenv("DATAMARK_SHARED_ACCOUNTS", "0") == "1"
     accounts = accounts or (AccountClient() if shared else None)
     from .tasks.routes import enabled as tasks_enabled, install as install_tasks
+    nas_setting = os.getenv('DATAMARK_NAS_DELIVERY_SYNC', '0')
+    if nas_setting not in ('0','1'):
+        raise ValueError('DATAMARK_NAS_DELIVERY_SYNC must be 0 or 1')
+    nas_delivery = None
     task_workspaces = None
     r2_service = r2_media = None
     r2_config = os.getenv('DATAMARK_R2_CONFIG', '').strip()
@@ -57,9 +61,13 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app):
+        if nas_delivery is not None:
+            nas_delivery.start()
         try:
             yield
         finally:
+            if nas_delivery is not None:
+                nas_delivery.close()
             if accounts:
                 accounts.close()
             if task_workspaces:
@@ -174,6 +182,11 @@ def create_app(*, accounts: AccountClient | None = None) -> FastAPI:
             accounts=RemoteAccounts(accounts), media=r2_media,
             source_tools=r2_media.source_tools if r2_media else None,
             artifact_store=ObjectArtifacts(r2_provider) if r2_media else None)
+
+    if nas_setting == '1':
+        if not task_workspaces or not task_workspaces.store.outputs:
+            raise ValueError('NAS delivery sync requires public S3 tasks')
+        nas_delivery = task_workspaces.store.outputs.enable_nas_sync()
 
     @app.api_route("/api/{path:path}", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"])
     def unavailable(path: str):
