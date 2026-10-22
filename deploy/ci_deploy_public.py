@@ -172,6 +172,8 @@ class PublicDeployment:
                 or settings.get('DATAMARK_TASKS_STATE') != '/task-state'
                 or settings.get('DATAMARK_TASKS_ARTIFACTS') != '/task-artifacts'):
             raise DeploymentError('existing public R2 and task features must stay enabled')
+        if str(settings.get('DATAMARK_NAS_DELIVERY_SYNC', '0')) not in ('0', '1'):
+            raise DeploymentError('DATAMARK_NAS_DELIVERY_SYNC must be 0 or 1')
         allowed = {'/run/secrets/r2.json', '/r2-state', '/task-state', '/task-artifacts'}
         self.prediction_enabled = bool(settings.get('DATAMARK_PREDICTION_URL'))
         if self.prediction_enabled:

@@ -4,6 +4,7 @@ services:
   api:
     environment:
       DATAMARK_TASKS_ENABLED: "1"
+      DATAMARK_NAS_DELIVERY_SYNC: ${DATAMARK_NAS_DELIVERY_SYNC:-0}
       DATAMARK_TASKS_STATE: /task-state
       DATAMARK_TASKS_ARTIFACTS: /task-artifacts
     volumes:

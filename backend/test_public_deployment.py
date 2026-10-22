@@ -161,6 +161,18 @@ class PublicDeploymentTests(unittest.TestCase):
                 self.assertFalse(any(c[:2] == ('docker', 'stop') for c in self.calls))
                 self.rendered = original
 
+    def test_nas_delivery_opt_in_keeps_public_mounts_and_rejects_invalid_setting(self):
+        settings=self.rendered['services']['api']['environment']
+        settings['DATAMARK_NAS_DELIVERY_SYNC']='1'
+        self.deployment.deploy()
+        self.assertTrue(all(v['target'] not in ('/nas','/accounts/.local')
+                            for v in self.rendered['services']['api']['volumes']))
+        settings['DATAMARK_NAS_DELIVERY_SYNC']='invalid'
+        before=len(self.calls)
+        with self.assertRaisesRegex(DeploymentError,'DATAMARK_NAS_DELIVERY_SYNC'):
+            self.deployment.deploy()
+        self.assertFalse(any('stop' in c for c in self.calls[before:]))
+
     def test_release_marker_and_image_pin_guards(self):
         self.assertEqual(prepare_release(self.home, NEW), self.release)
         (self.release / '.release-commit').write_text(OLD)

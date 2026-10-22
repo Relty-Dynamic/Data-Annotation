@@ -523,7 +523,35 @@ daily/日期/采集目录/timeline/
 
 结果目录同步计划与任务变更一起持久化；S3 同步失败时已提交/已验收任务与计划保留，界面明确显示未同步并提供“同步采集结果目录”，重试及服务重启不重复增加版本号。已有 S3 采集任务可通过该按钮补齐历史提交、已验收最终结果及已有交付 CSV，原内部结果保持不变；已删除任务停止同步。文件逐项读回核验后才显示同步完成，个人版本另有隐藏完成清单，`final/` 也保存隐藏结果清单。升级后，旧同步计划改为向 `final/` 补齐同一份已冻结的最终 JSON 和 CSV，原 `finally/` 及 `timeline/` 根目录的旧 CSV 保留；启动只更新待同步计划，实际写入由原同步流程完成，重试不产生新个人版本。历史最终结果按每个文件选择未删除任务的最新已验收版本，保留其他任务输出的轴，只依赖实际贡献文件的提交版本。最终文件写入前持久化内容摘要，中断后可识别本次部分写入并恢复；完成清单读回核验后清除临时写入记录，外部修改仍拒绝覆盖。新姓名与 `final` 或 `finally` 同名时追加账号后缀；历史姓名目录已占用 `final` 时停止最终结果同步并提示核对，保留原文件。此同步仅用于具有完整采集身份的 S3 任务；NAS、本机传统项目和桌面播放缓存的保存位置沿用原规则。
 
-### 定期将 S3 验收结果复制到 NAS
+### 交付核验成功后同步最终 JSON 到 NAS
+
+公网 S3 任务可通过 `DATAMARK_NAS_DELIVERY_SYNC=1` 启用交付触发同步，默认 `0`，普通升级不会自动启用，也不会修改已有 cron。管理员生成交付批次后，只有整批采集的 S3 最终结果及交付 CSV 全部写入并读回核验成功，后台才释放 NAS 同步任务。仅验收通过不触发。NAS 只接收本次交付的最终逐轴 JSON 和核验用隐藏记录，不复制 CSV、视频或个人版本，不删除 S3 源文件。
+
+交付记录和待同步事件在同一个任务数据库事务中保存；先冻结本批次实际交付的 JSON，再写入并读回核验 S3 的 `tasks/nas-deliveries/<交付批次ID>/<同步项ID>/` 不可变快照。NAS 服务消费与这些快照一致的持久队列内容，不能从稍后变化的 `timeline/final/` 取新版本冒充本次交付。仅有完整 S3 采集身份的任务参与此流程，NAS 任务及传统项目沿用原规则。
+
+公网 API 不挂载 NAS；独立 Linux 服务只挂载公网任务状态目录下的 `nas-sync/` 队列、NAS daily 目录及本地进程锁目录，无账号库、任务库、S3 凭据、网络访问或对外端口。队列变更通过 Linux 文件事件唤醒服务；启动时恢复未完成事件，失败重试按 5 秒起逐步退避至最多 5 分钟，空闲时不定期扫描桶。每次同步仅定位事件对应的采集目录；NAS 文件系统必须是已挂载的 CIFS/NFS，普通本机目录或失效挂载拒绝写入。
+
+NAS 目标仍按现有唯一同名采集匹配，写入 `timeline/final/`，不新建采集目录。逐文件摘要核验、备份、来源绑定及中断恢复沿用下方单次工具；已交付的其他轴保留，旧事件不能覆盖更新的同轴结果。NAS 离线会重试；重名目录、人工修改、版本冲突等暂停并提示管理员核对后重试。任务详情单独显示 NAS 等待、处理中、失败或读回核验成功，不将“交付成功”解释为“NAS 已同步”。NAS 失败保留已完成交付。删除任务会取消未完成同步，正在执行的文件操作可能先完成，已经写入的结果与审计保留；尚未释放的整批交付含已删除任务时，该批同步取消。
+
+上线切换需要单独执行，不属于普通 PR 合并后的自动发布：
+
+1. 部署含本功能的版本，在公网受保护持久配置中设置 `DATAMARK_NAS_DELIVERY_SYNC=1` 并按正常发布流程重启 API；确认已有 `tasks/state/nas-sync/events.sqlite3`，目录由运行账号持有且不经符号链接。API 与 NAS 服务必须在同一台 Linux 主机，共享同一本地队列目录。
+2. 核对宿主机 `/mnt/nas/homes` 的 CIFS/NFS 挂载及现有 daily 目录、运行账号读写权限、硬链接及目录同步能力。备份 crontab，仅停用旧 final 同步条目，等待正在执行的一轮结束；其余定时任务保留。锁目录须与旧 runner 相同，容器中的 NAS 根目录也须同为 `/nas`，避免切换期间并发写入。
+3. 使用已测试的完整提交镜像显式启动独立服务，例如在发布目录执行：
+
+   ```sh
+   DATAMARK_NAS_SYNC_IMAGE='datamark-r2:<完整提交号>' \
+   DATAMARK_TASK_STATE_DIR=/home/relty/services/datamark-public-setup/tasks/state \
+   DATAMARK_NAS_DAILY_ROOT=/mnt/nas/homes/datacollection/daily \
+   DATAMARK_FINAL_SYNC_LOCK_DIR=/home/relty/services/datamark-final-sync/state \
+   docker compose -f deploy/compose.nas-delivery.yaml up -d
+   ```
+
+4. 用获准交付的真实批次验收：验收动作不入队、生成交付后自动同步、NAS 每个 JSON 与本批次快照摘要一致、无 CSV/视频复制、重复重试不产生新交付。保留切换记录及旧 cron 备份。独立服务不随常规 Jenkins 自动更新，后续升级也须显式选用已测试镜像。
+
+启用时不自动扫历史数据；需要补同步的历史已交付任务，通过原“同步采集结果目录”入口显式重试，按该交付批次冻结的版本补建事件。回退时先停止独立服务，再将开关恢复为 `0` 并按正常流程重启 API；队列与已同步结果保留。恢复旧 cron 必须明确接受它会扫描全部已验收结果、而非仅已交付结果的旧行为，并沿用备份配置。代码测试不代表真实 NAS 联调或上线完成。
+
+### 历史单次同步工具与定时方式
 
 `deploy/sync_final_timelines.py` 在能够读取 S3/R2、且已经挂载 NAS 的 Linux 机器上单次运行，可由 cron 定期调用。它从 S3 的 `daily/<日期>/<采集目录>/timeline/final/` 读取验收 JSON，在 NAS 的 `homes/datacollection/daily/` 现有层级中递归查找同名采集目录，然后写入该目录下的 `timeline/final/`。例如 S3 的 `daily/20261021/1021张三/timeline/final/`，可以对应 NAS 已存在的 `daily/1021张三/timeline/final/`，也可以对应 `daily/20261021/1021张三/timeline/final/`；以 NAS 实际唯一匹配的位置为准，不强加日期层级。兼容 S3 不含日期层的 `daily/<采集目录>/`。历史 `timeline/finally/` 仍可同步到 NAS 同名子目录；同一采集同时存在两种目录的完成清单时，优先选择当前 `final/`，校验失败也不会回退复制旧 `finally/`。
 
@@ -544,7 +572,7 @@ JSON 全部校验后才开始写入。每个文件先写入并核验临时文件
 
 写入 JSON 前，脚本在目标目录持久保存 `.datamark-sync-pending.json`，记录本次及未完成尝试中允许的内容摘要。中断或写入期间 S3 再次换版后，下次可识别脚本自身的部分写入并继续同步；不在记录和完成清单内的实际人工修改仍拒绝覆盖。完成清单提交成功后清理这份记录；失败时保留记录及备份，不把未完成批次报告为成功。不要手工删除未完成记录或覆盖文件来绕过冲突。另存隐藏的 `.datamark-sync-source.json` 绑定 S3 采集前缀，防止不同年份的同名采集在后续运行中混入同一 NAS 目录。
 
-核对预演及一次实际复制的日志后，为同一个运行账号配置每天晚上 23:00 扫描一次，时间以运行机器的时区为准。例如（按现场路径调整，不会由脚本自动安装）：
+以下为历史 23:00 定时方式，仅供维护原流程或经确认后回退；新交付流程不依赖此任务，也不会自动安装或移除此条目。时间以运行机器时区为准：
 
 ```cron
 0 23 * * * { cd /srv/datamark-sync && PYTHONNOUSERSITE=1 /srv/datamark-sync/.venv/bin/python -m deploy.sync_final_timelines --config /srv/datamark-sync/.local/r2-readonly.json --nas-root /mnt/nas/homes/datacollection/daily --mount-root /mnt/nas --apply; } >> /srv/datamark-sync/.local/final-sync.log 2>&1

@@ -1,9 +1,19 @@
 import {useEffect,useState} from 'react';
 import {authFetch} from '../auth';
-export type TaskOutputStatus={state:'ready'|'pending'|'error';detail:string;ready?:number;total?:number};
+export type NasOutputStatus={state:'ready'|'pending'|'running'|'error';detail:string;ready:number;total:number;retryable:boolean;retry_scheduled:boolean};
+export type TaskOutputStatus={state:'ready'|'pending'|'error';detail:string;ready?:number;total?:number;nas?:NasOutputStatus|null};
 export default function TaskOutputSync({taskId,status}:{taskId:string;status?:TaskOutputStatus|null}){
  const [current,setCurrent]=useState(status),[busy,setBusy]=useState(false),[error,setError]=useState('');
  useEffect(()=>{setCurrent(status);setError('');},[taskId,status]);
+ useEffect(()=>{
+  if(!current?.nas||busy||current.nas.state==='ready'||current.nas.state==='error'&&!current.nas.retry_scheduled)return;
+  let alive=true,inFlight=false;
+  const timer=setInterval(()=>{if(inFlight)return;inFlight=true;void authFetch(`/api/tasks/items/${encodeURIComponent(taskId)}/outputs/status`).then(async response=>{
+   if(!response.ok)return;const value=await response.json();
+   if(alive&&value&&['ready','pending','error'].includes(value.state)&&typeof value.detail==='string')setCurrent(value);
+  }).catch(()=>{}).finally(()=>{inFlight=false;});},3000);
+  return ()=>{alive=false;clearInterval(timer);};
+ },[taskId,busy,current?.nas?.state,current?.nas?.retry_scheduled]);
  if(!current)return null;
  async function retry(){
   setBusy(true);setError('');
@@ -17,5 +27,5 @@ export default function TaskOutputSync({taskId,status}:{taskId:string;status?:Ta
   }catch(cause){setError(cause instanceof Error?cause.message:'结果目录同步失败，请重试。');}
   finally{setBusy(false);}
  }
- return <section className={'task-output-sync '+current.state} aria-label="采集结果目录同步"><p role={current.state==='error'?'alert':'status'}>{busy?'正在同步采集目录并读回核验…':current.detail}</p>{current.state!=='ready'&&<button type="button" className="secondary" disabled={busy} onClick={()=>void retry()}>{busy?'同步中…':'同步采集结果目录'}</button>}{error&&<p role="alert">{error}</p>}</section>;
+ return <section className={'task-output-sync '+current.state} aria-label="采集结果目录同步"><p role={current.state==='error'?'alert':'status'}>{busy?'正在同步采集目录并读回核验…':current.detail}</p>{current.nas&&<p role={current.nas.state==='error'?'alert':'status'}>NAS 同步：{current.nas.detail}</p>}{(current.state!=='ready'||current.nas?.state==='error'&&current.nas.retryable)&&<button type="button" className="secondary" disabled={busy} onClick={()=>void retry()}>{busy?'同步中…':current.state==='ready'?'重试 NAS 同步':'同步采集结果目录'}</button>}{error&&<p role="alert">{error}</p>}</section>;
 }

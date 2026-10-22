@@ -477,8 +477,13 @@ class TaskStore:
             previous_status = task['status']
             task.update(status='deleted', deleted_from_status=previous_status,
                         deleted_by=actor['id'], deleted_at=stamp())
+            if self.outputs is not None and self.outputs.nas_sync is not None:
+                self.outputs.nas_sync.cancel(db, id)
             self._finish(db, actor, task, 'delete_task', previous_status=previous_status)
-            return {'id': id, 'status': 'deleted', 'revision': task['revision']}
+            result = {'id': id, 'status': 'deleted', 'revision': task['revision']}
+        if self.outputs is not None and self.outputs.nas_sync is not None:
+            self.outputs.nas_sync.wake()
+        return result
 
     def assign_task(self, actor, id, body, *, participants=None):
         with self.db() as db:
