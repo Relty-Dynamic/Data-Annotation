@@ -84,6 +84,27 @@ class DesktopCacheTests(unittest.TestCase):
         self.assertEqual({path.name:path.read_bytes() for path in old.glob('*.mp4')}, original)
         self.assertTrue(all((self.desktop / 'card' / record['file_name']).exists() for record in manifest['assets']))
 
+    def test_upload_artifact_reuses_source_digest_but_still_verifies_copied_bytes(self):
+        from backend.upload_artifact import UploadArtifact
+        from fastapi import HTTPException
+        source = self.root / 'compressed.mp4'
+        source.write_bytes(b'finalized compressed content')
+        artifact = UploadArtifact.read(source)
+        cache = self.service.desktop_cache
+        with patch('backend.desktop_cache.sha256_file', wraps=sha256_file) as digest:
+            retained = cache.retain_upload('daily/20261021/1021test', 'capture.avi', source, artifact=artifact)
+        self.assertEqual(retained.read_bytes(), source.read_bytes())
+        self.assertEqual(digest.call_count, 1)
+        self.assertNotEqual(digest.call_args.args[0], source)
+        self.assertEqual(digest.call_args.args[0].suffix, '.partial')
+        def corrupt_copy(original, destination):
+            destination.write_bytes(b'corrupt copy')
+        with patch('backend.desktop_cache.shutil.copyfile', side_effect=corrupt_copy):
+            with self.assertRaises(HTTPException) as failure:
+                cache.retain_upload('daily/20261021/1021other', 'capture.avi', source, artifact=artifact)
+        self.assertEqual(failure.exception.status_code, 422)
+        self.assertEqual(list((self.desktop / '1021other').glob('*.mp4')), [])
+
     def test_upload_cache_survives_staging_cleanup_and_retry(self):
         import shutil
         staging = self.root / 'upload-staging'

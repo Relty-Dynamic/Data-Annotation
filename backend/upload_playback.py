@@ -13,7 +13,7 @@ from .playback_contract import SINGLE_VIDEO_PROFILE, asset_kinds
 from .storyboards import StoryboardCache
 
 
-def build(service, prepared, manifest, progress, *, profile=PROFILE):
+def build(service, prepared, manifest, progress, *, profile=PROFILE, artifacts=None):
     kinds = asset_kinds(profile)
     records = []
     retained = {}
@@ -24,7 +24,8 @@ def build(service, prepared, manifest, progress, *, profile=PROFILE):
         normal = prepared / video['key']
         name = normal.name
         duration = video['duration_ms']
-        digest = sha256_file(normal)
+        artifact = (artifacts or {}).get(video['key'])
+        digest = artifact.digest_for(normal) if artifact is not None else sha256_file(normal)
         identity = hashlib.sha256((name + ':' + digest).encode()).hexdigest()
         folder = prepared / 'FPV' / 'cache' / identity
         folder.mkdir(parents=True, exist_ok=True)
@@ -33,6 +34,8 @@ def build(service, prepared, manifest, progress, *, profile=PROFILE):
             render_local_fast(service, normal, fast, duration, lambda value: None, stop)
         render_local_thumbnail(service, normal, thumbnail, duration, stop)
         story = stories.render(normal, digest, duration, service.tool('ffmpeg'), lambda value: None, stop)
+        if artifact is not None:
+            artifact.digest_for(normal)
         assets = [('thumbnail', None, thumbnail)]
         if 'fast' in kinds:
             assets.insert(0, ('fast', None, fast))

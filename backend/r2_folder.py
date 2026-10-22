@@ -197,6 +197,8 @@ class FolderUploadManager(MockUploadManager):
         job = self._job(ident, user_id)
         with self.lock:
             result.update({key:job[key] for key in ('clips_total','clips_verified','prediction_detail','prediction_failure') if key in job})
+            if job.get('_upload_progress') is not None:
+                result['preparation'] = job['_upload_progress'].snapshot()
             if job.get('upload_kind') == 'imu':
                 result.update(upload_kind='imu', selected=len(job['attachments']), total=len(job['attachments']))
         prediction = job.get('prediction_result')
