@@ -1,8 +1,8 @@
 import type {Account} from '../auth';
-import type {TaskItem,TaskRole} from './types';
+import type {TaskItem,TaskCapability} from './types';
 import {taskStatusName} from './types.ts';
 export interface TaskChoice {key:string;id:string;kind:'annotate'|'review';name:string;detail:string;status:string;url:string;waiting:boolean}
-export function assignedTaskChoices(user:Pick<Account,'id'>&Partial<Pick<Account,'role'>>,tasks:TaskItem[],roles:TaskRole[]=[]):TaskChoice[]{
+export function assignedTaskChoices(user:Pick<Account,'id'>&Partial<Pick<Account,'role'>>,tasks:TaskItem[],roles:TaskCapability[]=[]):TaskChoice[]{
  return tasks.filter(task=>!['deleted','pending','unassigned'].includes(task.status)).flatMap(task=>{
   const base={id:task.id,name:task.collection?`${task.collection.name} · ${task.collection.videos.length} 段视频`:task.video?.collection_name?`${task.video.collection_name} · ${task.video.video_name??task.video_id}`:task.video?.video_name??task.video_id,detail:`${task.rule?.name??'标注任务'} · 截止 ${task.deadline}`,status:taskStatusName(task)};
   const own=task.annotator_ids.includes(user.id),manager=user.role==='admin'||roles.includes('leader');

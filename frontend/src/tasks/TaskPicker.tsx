@@ -4,9 +4,9 @@ import {ChevronDown,ClipboardList,Search,RefreshCw} from 'lucide-react';
 import type {Account} from '../auth';
 import {taskRequest} from './TaskPanel';
 import {assignedTaskChoices,type TaskChoice} from './taskChoices';
-import type {TaskItem,TaskRole} from './types';
+import type {TaskItem,TaskCapability} from './types';
 export default function TaskPicker({user,currentTask,review,disabled,onChoose}:{user:Account;currentTask:string|null;review:boolean;disabled:boolean;onChoose:(choice:TaskChoice)=>void}){
- const [roles,setRoles]=useState<TaskRole[]>([]);
+ const [roles,setRoles]=useState<TaskCapability[]>([]);
  const [tasks,setTasks]=useState<TaskItem[]>([]),[loading,setLoading]=useState(true),[error,setError]=useState(''),[query,setQuery]=useState('');
  const [open,setOpen]=useState(false);
  const trigger=useRef<HTMLButtonElement>(null),menu=useRef<HTMLDialogElement>(null),mounted=useRef(true);
@@ -20,7 +20,7 @@ export default function TaskPicker({user,currentTask,review,disabled,onChoose}:{
   return()=>{dialog.close();document.removeEventListener('fullscreenchange',fullscreen);};
  },[open,disabled]);
  useEffect(()=>{if(disabled)setOpen(false)},[disabled]);
- async function refresh(){setLoading(true);try{const [value,me]=await Promise.all([taskRequest<TaskItem[]>('/items'),taskRequest<{roles:TaskRole[]}>('/me')]);if(mounted.current){setTasks(value);setRoles(me.roles);setError('');}}catch(cause){if(mounted.current)setError(cause instanceof Error?cause.message:'任务读取失败');}finally{if(mounted.current)setLoading(false);}}
+ async function refresh(){setLoading(true);try{const [value,me]=await Promise.all([taskRequest<TaskItem[]>('/items'),taskRequest<{roles:TaskCapability[]}>('/me')]);if(mounted.current){setTasks(value);setRoles(me.roles);setError('');}}catch(cause){if(mounted.current)setError(cause instanceof Error?cause.message:'任务读取失败');}finally{if(mounted.current)setLoading(false);}}
  useEffect(()=>{mounted.current=true;void refresh();return()=>{mounted.current=false}},[user.id]);
  const choices=assignedTaskChoices(user,tasks,roles),current=choices.find(choice=>choice.id===currentTask&&choice.kind===(review?'review':'annotate'));
  const visible=choices.filter(choice=>`${choice.name} ${choice.detail} ${choice.status}`.toLowerCase().includes(query.trim().toLowerCase()));

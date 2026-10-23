@@ -19,11 +19,13 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from .service import AXES, validate_project_name
+from .roles import ACCOUNT_ROLES, ROLE_MODEL, ROLE_SCHEMA
 
 
 SESSION_SECONDS = 12 * 60 * 60
 USERNAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._@+-]{2,119}$")
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PUBLIC_USER_COLUMNS = 'u.id,u.username,u.display_name,u.email,u.role,u.active,u.can_upload,r.role AS account_role,r.task_access'
 
 
 def _password_hash(password: str, salt: bytes | None = None) -> str:
@@ -90,6 +92,8 @@ class AuthStore:
             if "email" not in {row[1] for row in con.execute("PRAGMA table_info(users)")}:
                 con.execute("ALTER TABLE users ADD COLUMN email TEXT")
             con.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users(email COLLATE NOCASE) WHERE email IS NOT NULL")
+            # Existing accounts stay untouched until the explicit migration runs.
+            con.executescript(ROLE_SCHEMA)
         if os.name != "nt":
             os.chmod(self.path, 0o600)
 
@@ -112,12 +116,12 @@ class AuthStore:
         with self.connection() as con:
             return con.execute("SELECT 1 FROM users WHERE role='admin' AND active=1 LIMIT 1").fetchone() is not None
 
-    def create_user(self, username: str, display_name: str, password: str, role: str = "annotator",
+    def create_user(self, username: str, display_name: str, password: str, role: str = "member",
                     email: str | None = None, *, email_login: bool = False) -> dict:
         username, display_name = username.strip(), display_name.strip()
         email = email.strip().lower() if email else None
         valid_username = (username == email and len(username) <= 254 and EMAIL.fullmatch(username)) if email_login else USERNAME.fullmatch(username)
-        if (not valid_username or not 1 <= len(display_name) <= 80 or role not in {"admin", "annotator"}
+        if (not valid_username or not 1 <= len(display_name) <= 80 or role not in {*ACCOUNT_ROLES, "annotator"}
                 or (email is not None and (len(email) > 254 or not EMAIL.fullmatch(email)))):
             raise HTTPException(422, "账号、姓名或角色格式不正确。")
         try:
@@ -130,19 +134,51 @@ class AuthStore:
                 if email_login and con.execute("SELECT 1 FROM users WHERE username=? COLLATE NOCASE OR email=? COLLATE NOCASE", (email, email)).fetchone():
                     raise HTTPException(409, "账号或邮箱已存在。")
                 con.execute("INSERT INTO users (id,username,display_name,email,role,password_hash,active,can_upload) VALUES (?,?,?,?,?,?,1,0)",
-                            (ident, username, display_name, email, role, encoded))
+                            (ident, username, display_name, email, 'admin' if role == 'admin' else 'annotator', encoded))
+                if role in ACCOUNT_ROLES:
+                    con.execute('INSERT INTO account_roles VALUES (?,?,1)', (ident, role))
+                    if role == 'leader':
+                        con.execute('UPDATE users SET can_upload=1 WHERE id=?', (ident,))
             except sqlite3.IntegrityError as error:
                 raise HTTPException(409, "账号或邮箱已存在。") from error
-        return {"id": ident, "username": username, "display_name": display_name, "email": email, "role": role,
-                "active": True, "can_upload": role == "admin"}
+        with self.connection() as con:
+            row = con.execute('SELECT ' + PUBLIC_USER_COLUMNS + ' FROM users u LEFT JOIN account_roles r ON r.user_id=u.id WHERE u.id=?', (ident,)).fetchone()
+        return {**self._public(row), 'active': bool(row['active'])}
 
     def list_users(self, *, include_deleted: bool = False) -> list[dict]:
         with self.connection() as con:
-            query = "SELECT id,username,display_name,email,role,active,can_upload FROM users"
+            query = 'SELECT ' + PUBLIC_USER_COLUMNS + ' FROM users u LEFT JOIN account_roles r ON r.user_id=u.id'
             if not include_deleted:
-                query += " WHERE id NOT IN (SELECT user_id FROM deleted_accounts)"
-            rows = con.execute(query + " ORDER BY username").fetchall()
-        return [{**dict(row), "can_upload": bool(row["can_upload"]) or row["role"] == "admin"} for row in rows]
+                query += " WHERE u.id NOT IN (SELECT user_id FROM deleted_accounts)"
+            rows = con.execute(query + " ORDER BY u.username").fetchall()
+        return [{**self._public(row), 'active': bool(row['active'])} for row in rows]
+
+    def set_role(self, user_id: str, role: str, actor_id: str, *, task_access: bool | None = None) -> dict:
+        if role not in ACCOUNT_ROLES or (task_access is not None and type(task_access) is not bool):
+            raise HTTPException(422, '请选择管理员、组长或成员。')
+        with self.connection() as con:
+            con.execute('BEGIN IMMEDIATE')
+            actor = con.execute("SELECT role,active FROM users WHERE id=? AND id NOT IN (SELECT user_id FROM deleted_accounts)", (actor_id,)).fetchone()
+            if not actor or actor['role'] != 'admin' or not actor['active']:
+                raise HTTPException(403, '只有管理员可调整角色。')
+            self._require_not_deleted(con, user_id)
+            previous = con.execute('SELECT role,active FROM users WHERE id=?', (user_id,)).fetchone()
+            if not previous:
+                raise HTTPException(404, '账号不存在。')
+            if previous['role'] == 'admin' and role != 'admin' and previous['active'] and con.execute("SELECT count(*) FROM users WHERE role='admin' AND active=1 AND id NOT IN (SELECT user_id FROM deleted_accounts)").fetchone()[0] <= 1:
+                raise HTTPException(409, '不能降级最后一个有效管理员。')
+            saved = con.execute('SELECT role,task_access FROM account_roles WHERE user_id=?', (user_id,)).fetchone()
+            if task_access is None:
+                task_access = bool(saved['task_access']) if saved and saved['role'] == role else True
+            if saved and saved['role'] == role and bool(saved['task_access']) == task_access:
+                return self._public(con.execute('SELECT ' + PUBLIC_USER_COLUMNS + ' FROM users u JOIN account_roles r ON r.user_id=u.id WHERE u.id=?', (user_id,)).fetchone())
+            con.execute('INSERT INTO account_roles VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET role=excluded.role,task_access=excluded.task_access', (user_id, role, int(task_access)))
+            con.execute('UPDATE users SET role=?,can_upload=? WHERE id=?', ('admin' if role == 'admin' else 'annotator', int(role in ('admin', 'leader')), user_id))
+            con.execute('INSERT INTO account_role_events VALUES (?,?,?,?,?,?,?)', (uuid.uuid4().hex, actor_id, user_id, int(time.time()), saved['role'] if saved else previous['role'], role, int(task_access)))
+            con.execute('DELETE FROM sessions WHERE user_id=?', (user_id,))
+            con.execute('DELETE FROM editing_sessions WHERE user_id=?', (user_id,))
+            row = con.execute('SELECT ' + PUBLIC_USER_COLUMNS + ' FROM users u JOIN account_roles r ON r.user_id=u.id WHERE u.id=?', (user_id,)).fetchone()
+            return self._public(row)
 
     def delete_user(self, user_id: str, actor_id: str) -> None:
         with self.connection() as con:
@@ -273,9 +309,9 @@ class AuthStore:
             attempts = [con.execute("SELECT failures,blocked_until FROM login_attempts WHERE key=?", (key,)).fetchone() for key in keys]
             if any(attempt and attempt["blocked_until"] > int(time.time()) for attempt in attempts):
                 raise HTTPException(429, "登录尝试过多，请稍后再试。")
-            row = con.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE AND active=1", (username,)).fetchone()
+            row = con.execute("SELECT u.*,r.role AS account_role,r.task_access FROM users u LEFT JOIN account_roles r ON r.user_id=u.id WHERE u.username=? COLLATE NOCASE AND u.active=1", (username,)).fetchone()
             if not row and "@" in username:
-                row = con.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE AND active=1", (username,)).fetchone()
+                row = con.execute("SELECT u.*,r.role AS account_role,r.task_access FROM users u LEFT JOIN account_roles r ON r.user_id=u.id WHERE u.email=? COLLATE NOCASE AND u.active=1", (username,)).fetchone()
             if not row or not _verify_password(password, row["password_hash"]):
                 for key, attempt in zip(keys, attempts):
                     failures = (attempt["failures"] if attempt else 0) + 1
@@ -292,14 +328,17 @@ class AuthStore:
 
     @staticmethod
     def _public(row: sqlite3.Row) -> dict:
-        return {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "email": row["email"],
-                "role": row["role"], "can_upload": row["role"] == "admin" or bool(row["can_upload"])}
+        result = {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "email": row["email"],
+                  "role": row["role"], "can_upload": row["role"] == "admin" or bool(row["can_upload"])}
+        if 'account_role' in row.keys() and row['account_role'] is not None:
+            result.update(role=row['account_role'], role_model=ROLE_MODEL, task_access=bool(row['task_access']))
+        return result
 
     def session(self, token: str | None) -> tuple[dict, str] | None:
         if not token:
             return None
         with self.connection() as con:
-            row = con.execute("SELECT u.*,s.csrf_hash,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+            row = con.execute('SELECT ' + PUBLIC_USER_COLUMNS + ',s.csrf_hash,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN account_roles r ON r.user_id=u.id WHERE s.token_hash=?', (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
         if not row or not row["active"] or row["expires_at"] <= int(time.time()):
             return None
         return self._public(row), row["csrf_hash"]
@@ -349,7 +388,7 @@ class AuthStore:
             con.execute("DELETE FROM editing_sessions WHERE touched_at<?", (current - 45,))
             con.execute("INSERT INTO editing_sessions VALUES (?,?,?,?) ON CONFLICT(project_id,tab_id) DO UPDATE SET user_id=excluded.user_id,touched_at=excluded.touched_at",
                         (project_id, tab_id, user_id, current))
-            rows = con.execute("SELECT DISTINCT u.id,u.display_name,u.role FROM editing_sessions e JOIN users u ON u.id=e.user_id WHERE e.project_id=? AND e.user_id!=? AND u.active=1",
+            rows = con.execute("SELECT DISTINCT u.id,u.display_name,COALESCE(r.role,u.role) FROM editing_sessions e JOIN users u ON u.id=e.user_id LEFT JOIN account_roles r ON r.user_id=u.id WHERE e.project_id=? AND e.user_id!=? AND u.active=1",
                                (project_id, user_id)).fetchall()
             return [{"id": row[0], "display_name": row[1], "role": row[2]} for row in rows]
 

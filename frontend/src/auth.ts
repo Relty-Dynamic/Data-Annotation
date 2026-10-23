@@ -1,7 +1,8 @@
 import {taskFromSearch,taskRequestUrl} from './tasks/transport.ts';
 import {apiUrl, separateApiOrigin} from './apiOrigin.ts';
+import type {AccountRole} from './accountRoles';
 
-export type Account = {id:string; username:string; display_name:string; email:string|null; role:'admin'|'annotator'; can_upload:boolean};
+export type Account = {id:string; username:string; display_name:string; email:string|null; role:AccountRole|'annotator'; role_model?:string; task_access?:boolean; can_upload:boolean};
 let csrfToken = '';
 export function setCsrfToken(value: string) { csrfToken = value; }
 

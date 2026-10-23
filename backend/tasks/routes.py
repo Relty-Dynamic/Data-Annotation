@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response, RedirectResponse
 from ..media_response import CancellableFileResponse
 from .storage import FileArtifacts, UnavailableMedia
 from .workspace import Workspaces
+from ..roles import ACCOUNT_ROLES, canonical
 
 
 def enabled():
@@ -76,6 +77,8 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
         return user
 
     def grant_roles(user, account, roles, request):
+        if canonical(account) and account.get('role') != 'admin':
+            raise HTTPException(409, '该账号已使用三角色模型，请通过账号角色接口调整。')
         granted = store.set_roles(user, account['id'], roles)
         can_upload = account.get('role') == 'admin' or 'leader' in granted['roles']
         if account.get('role') != 'admin':
@@ -92,12 +95,18 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     def account_list(request: Request):
         user = admin(request)
         grants = {item['user_id']: item['roles'] for item in store.list_roles(user)}
-        return [{**account, 'task_roles': grants.get(account['id'], [])}
+        return [{**account, 'task_roles': store.roles(account)['roles'] if canonical(account) else grants.get(account['id'], [])}
                 for account in accounts('list', user, {}, request)]
 
     @router.post('/accounts')
     def account_create(body: dict, request: Request):
         user = admin(request)
+        if 'roles' not in body or 'role' in body:
+            role = body.get('role', 'member')
+            if role not in ACCOUNT_ROLES:
+                raise HTTPException(422, '请选择管理员、组长或成员。')
+            account = accounts('create', user, {**body, 'role': role}, request)
+            return {**account, 'task_roles': store.roles(account)['roles']}
         roles = body.get('roles')
         if not isinstance(roles, list) or not roles or any(role not in ('annotator', 'reviewer', 'leader') for role in roles):
             raise HTTPException(422, '请至少选择一个有效任务角色。')
@@ -117,7 +126,7 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
     @router.put('/accounts/{user_id}/{action}')
     def account_update(user_id: str, action: str, body: dict, request: Request):
         user = admin(request)
-        if action not in ('upload', 'active', 'password'):
+        if action not in ('upload', 'active', 'password', 'role'):
             raise HTTPException(404, '账号操作不存在。')
         return accounts(action, user, {**body, 'user_id': user_id}, request)
 
@@ -136,7 +145,7 @@ def install(app, actor_for_request, users_for_request, media=None, axis_library=
         user = actor(request)
         if user.get('role') != 'admin' and 'leader' not in store.roles(user)['roles']:
             raise HTTPException(403, '只有管理员或组长可查看分配账号。')
-        return [{k: u.get(k) for k in ('id','display_name','role','active','can_upload')} for u in users_for_request(request)]
+        return [{k: u.get(k) for k in ('id','display_name','role','active','can_upload','role_model','task_access')} for u in users_for_request(request)]
 
     @router.get('/roles')
     def list_roles(request: Request):

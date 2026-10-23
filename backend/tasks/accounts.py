@@ -1,6 +1,7 @@
 """Account administration through the existing local or Ubuntu account store."""
 from fastapi import HTTPException
 from ..auth import EMAIL
+from ..roles import ACCOUNT_ROLES
 
 DEFAULT_PASSWORD = '1234567890'
 
@@ -19,10 +20,16 @@ def administer(auth, actor, action, body):
         if not isinstance(name, str) or not isinstance(password, str):
             raise HTTPException(422, '请填写姓名和初始密码。')
         email = email.strip().lower()
-        return auth.create_user(email, name, password, email=email, email_login=True)
+        # Explicit old-client requests keep their legacy grants until migration.
+        role = body.get('role', 'annotator' if 'roles' in body else 'member')
+        if role not in (*ACCOUNT_ROLES, 'annotator'):
+            raise HTTPException(422, '请选择管理员、组长或成员。')
+        return auth.create_user(email, name, password, role=role, email=email, email_login=True)
     user_id = body.get('user_id')
     if not isinstance(user_id, str) or not user_id:
         raise HTTPException(422, '请选择账号。')
+    if action == 'role':
+        return {'ok': True, 'user': auth.set_role(user_id, body.get('role'), actor['id'])}
     if action == 'upload':
         if type(body.get('can_upload')) is not bool:
             raise HTTPException(422, '请指定上传权限。')

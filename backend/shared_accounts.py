@@ -75,7 +75,7 @@ def create_app(root: Path | None = None) -> FastAPI:
             raise HTTPException(401, '请先登录。')
         # Fixed private bridge. The task host additionally checks manager roles;
         # no passwords, email addresses or session records leave this endpoint.
-        return {'users': [{key: item.get(key) for key in ('id','display_name','role','active','can_upload')}
+        return {'users': [{key: item.get(key) for key in ('id','display_name','role','active','can_upload','role_model','task_access')}
                           for item in auth.list_users(include_deleted=True)]}
 
     @app.post('/v1/admin/accounts')

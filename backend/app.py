@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .roles import is_project_member
 import hashlib
 import hmac
 import ipaddress
@@ -716,7 +717,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         previous = state["previous"]
         owner_id = auth.assignment(previous["id"]) if previous else None
         owner = next((item for item in auth.list_users(include_deleted=True) if item["id"] == owner_id), None) if owner_id else None
-        takeover = bool(user and user["role"] == "annotator" and owner_id and owner_id != user["id"])
+        takeover = bool(is_project_member(user) and owner_id and owner_id != user["id"])
         payload = {"source": str(state["source"]), "project_id": previous["id"] if previous else None,
                    "revision": previous["revision"] if previous else None, "owner_id": owner_id,
                    "hashes": state["hashes"], "user_id": user["id"] if user else None}
@@ -767,14 +768,14 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                             raise HTTPException(409, "接管已有认领人须完成两次确认。")
                     elif body.claim_token or body.claim_mode or body.takeover_confirmations:
                         raise HTTPException(409, "目录状态已变化，请重新检查后领取。")
-                allowed = auth.allowed_project_ids(user) if user and user["role"] == "annotator" else None
+                allowed = auth.allowed_project_ids(user) if is_project_member(user) else None
                 if allowed is not None:
                     allowed.update(item["id"] for item in service.projects() if auth.assignment(item["id"]) is None)
                 project = service.open_path(body.path, name=body.name, allowed_project_ids=None if takeover else allowed,
                                             claim_mode=body.claim_mode, claim_hashes=claim_state["hashes"] if claim_state else None)
                 if takeover and user:
                     auth.assign(project["id"], user["id"])
-            if user and user["role"] == "annotator" and not takeover and not auth.claim(project["id"], user["id"]):
+            if is_project_member(user) and not takeover and not auth.claim(project["id"], user["id"]):
                 raise HTTPException(403, "该素材已由其他标注员领取。")
             return {**project, **service.initialize_track_library(project["id"], track_library.defaults(), actor=user)}
 
@@ -808,14 +809,14 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
         user = request.state.user if auth_required else None
         with service.lock:
             project = service.open_files(body.paths, name=body.name, source_writeback=not configured_origin)
-            if user and user["role"] == "annotator" and not auth.claim(project["id"], user["id"]):
+            if is_project_member(user) and not auth.claim(project["id"], user["id"]):
                 raise HTTPException(403, "该素材已由其他标注员领取。")
             return {**project, **service.initialize_track_library(project["id"], track_library.defaults(), actor=user)}
 
     def open_mock_folder(folder: Path, name: str, request: Request, key: str | None = None) -> dict:
         with service.lock:
             user = getattr(request.state, "user", None)
-            allowed = auth.allowed_project_ids(user) if user and user["role"] == "annotator" else None
+            allowed = auth.allowed_project_ids(user) if is_project_member(user) else None
             if allowed is not None:
                 allowed.update(item["id"] for item in service.projects() if auth.assignment(item["id"]) is None)
             project = service.open_path(str(folder), name=name or None, allowed_project_ids=allowed)
@@ -828,7 +829,7 @@ def create_app(root: Path | None = None, on_idle=None, *, auth_required: bool = 
                     for source in stored["_sources"].values():
                         source["precompressed"] = True
             service.save(stored)
-            if user and user["role"] == "annotator" and not auth.claim(stored["id"], user["id"]):
+            if is_project_member(user) and not auth.claim(stored["id"], user["id"]):
                 raise HTTPException(403, "该项目已由其他标注员领取。")
             return service.initialize_track_library(stored["id"], track_library.defaults(), actor=user)
 

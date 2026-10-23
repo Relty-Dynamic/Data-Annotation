@@ -1,7 +1,7 @@
 import {formatOperationTime} from '../operationTime';
 import {useEffect,useState,type FormEvent} from 'react';
 import {authFetch,type Account} from '../auth';
-import {taskStatusName,parseVideoCsv,videoCsvTemplate,type TaskAxis,type TaskItem,type TaskRule,type TaskVideo,type TaskRole} from './types';
+import {taskStatusName,parseVideoCsv,videoCsvTemplate,type TaskAxis,type TaskItem,type TaskRule,type TaskVideo,type TaskCapability} from './types';
 import TaskDetailDialog from './TaskDetailDialog';
 import TaskList from './TaskList';
 import TaskDelivery from './TaskDelivery';
@@ -26,9 +26,9 @@ function auditText(entry:unknown):string{const e=entry as Record<string,unknown>
 const tabIcons={tasks:ClipboardList,videos:FolderOpen,assign:Users,rules:BookOpen,delivery:PackageCheck};
 const freshAxis=():TaskAxis=>({id:'',name:'',mode:'state',labels:[]});
 export default function TaskPanel({user,onClose,onOpenTask}:{user:Account;onClose:()=>void;onOpenTask:(taskId:string)=>void}){
- const [roles,setRoles]=useState<TaskRole[]>([]),[items,setItems]=useState<TaskItem[]>([]),[rules,setRules]=useState<TaskRule[]>([]),[videos,setVideos]=useState<TaskVideo[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[selected,setSelected]=useState<TaskItem|null>(null),[filter,setFilter]=useState(''),[tab,setTab]=useState('tasks'),[pendingOnly,setPendingOnly]=useState(false);
+ const [roles,setRoles]=useState<TaskCapability[]>([]),[items,setItems]=useState<TaskItem[]>([]),[rules,setRules]=useState<TaskRule[]>([]),[videos,setVideos]=useState<TaskVideo[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[selected,setSelected]=useState<TaskItem|null>(null),[filter,setFilter]=useState(''),[tab,setTab]=useState('tasks'),[pendingOnly,setPendingOnly]=useState(false);
  const [sources,setSources]=useState<TaskSource[]>([]),[sourceId,setSourceId]=useState(''),[sourceError,setSourceError]=useState('');
- const [accounts,setAccounts]=useState<Array<{id:string;display_name:string;role?:string;active:boolean;can_upload:boolean}>>([]),[grants,setGrants]=useState<Array<{user_id:string;roles:TaskRole[]}>>([]);
+ const [accounts,setAccounts]=useState<Array<{id:string;display_name:string;role?:string;active:boolean;can_upload:boolean}>>([]),[grants,setGrants]=useState<Array<{user_id:string;roles:TaskCapability[]}>>([]);
  const accountName=(id:string)=>accounts.find(a=>a.id===id)?.display_name??selected?.participants?.find(a=>a.id===id)?.display_name??id;
  const [success,setSuccess]=useState('');
  const [ruleToDelete,setRuleToDelete]=useState<TaskRule|null>(null);
@@ -41,8 +41,8 @@ export default function TaskPanel({user,onClose,onOpenTask}:{user:Account;onClos
  const [collector,setCollector]=useState('');
  useEffect(()=>{setCollector(uploadedCollector)},[sourceId,uploadedCollector]);
  async function reload(includeDeleted=showDeleted){
-  const me=await taskRequest<{roles:TaskRole[]}>('/me');
-  const currentRoles:TaskRole[]=user.role==='admin'?['annotator','leader','reviewer']:me.roles??[];
+  const me=await taskRequest<{roles:TaskCapability[]}>('/me');
+  const currentRoles:TaskCapability[]=user.role==='admin'?['annotator','leader','reviewer']:me.roles??[];
   setRoles(currentRoles);
   if(!currentRoles.length)setRules([]);
   if(!currentRoles.includes('leader')){setAccounts([]);setGrants([]);setDeliveries([]);}

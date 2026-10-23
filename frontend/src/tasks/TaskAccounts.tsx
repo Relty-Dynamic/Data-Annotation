@@ -1,29 +1,28 @@
 import {useEffect, useState, type FormEvent} from 'react';
 import {ChevronDown, Search, X} from 'lucide-react';
 import {taskRequest} from './TaskPanel';
-import type {TaskRole} from './types';
+import {accountRole,accountRoleNames,type AccountRole} from '../accountRoles';
+import type {TaskCapability} from './types';
 import {filterAccounts, type AccountRoleFilter} from './accountFilters';
 import './accounts.css';
 
-type ManagedAccount = {id:string; username:string; email:string|null; display_name:string; role:string; active:boolean|number; can_upload:boolean; task_roles:TaskRole[]};
-const roleOptions:Array<[TaskRole,string]> = [['annotator','标注人'],['leader','组长'],['reviewer','复核员']];
+type ManagedAccount = {id:string; username:string; email:string|null; display_name:string; role:string; active:boolean|number; can_upload:boolean; task_roles:TaskCapability[]};
+const roleOptions:Array<[AccountRole,string]> = [['member','成员'],['leader','组长'],['admin','管理员']];
 const initialPassword = '1234567890';
-function roleName(account:ManagedAccount) {
-  return [account.role==='admin'?'超级管理员':'', ...roleOptions.filter(([role])=>account.task_roles.includes(role)).map(([,name])=>name)].filter(Boolean).join('、') || '未授权';
-}
-function RoleChoices({roles,onChange,disabled=false}:{roles:TaskRole[];onChange:(roles:TaskRole[])=>void;disabled?:boolean}) {
-  return <div className="account-role-choices">{roleOptions.map(([role,label])=><label key={role} className={roles.includes(role)?'selected':''}>
-    <input type="checkbox" checked={roles.includes(role)} disabled={disabled} onChange={event=>onChange(event.target.checked?[...roles,role]:roles.filter(value=>value!==role))}/>{label}
-  </label>)}</div>;
+function roleName(account:ManagedAccount) {return accountRoleNames[accountRole(account)];}
+function RoleChoices({role,onChange,disabled=false}:{role:AccountRole;onChange:(role:AccountRole)=>void;disabled?:boolean}) {
+ return <div className="account-role-choices">{roleOptions.map(([value,label])=><label key={value} className={role===value?'selected':''}>
+  <input type="radio" name="account-role" checked={role===value} disabled={disabled} onChange={()=>onChange(value)}/>{label}
+ </label>)}</div>;
 }
 export default function TaskAccounts({onClose}:{onClose:()=>void}) {
   const [accounts,setAccounts]=useState<ManagedAccount[]>([]);
   const [nameSearch,setNameSearch]=useState(''), [roleFilter,setRoleFilter]=useState<AccountRoleFilter>('all');
   const visibleAccounts=filterAccounts(accounts,nameSearch,roleFilter);
-  const [email,setEmail]=useState(''), [name,setName]=useState(''), [password,setPassword]=useState(initialPassword), [roles,setRoles]=useState<TaskRole[]>(['annotator']);
+  const [email,setEmail]=useState(''), [name,setName]=useState(''), [password,setPassword]=useState(initialPassword);
   const [busy,setBusy]=useState(false), [error,setError]=useState(''), [notice,setNotice]=useState('');
   const [resetId,setResetId]=useState(''), [resetPassword,setResetPassword]=useState(initialPassword);
-  const [editingId,setEditingId]=useState(''), [editingRoles,setEditingRoles]=useState<TaskRole[]>([]);
+  const [editingId,setEditingId]=useState(''), [editingRole,setEditingRole]=useState<AccountRole>('member');
   const editingAccount=accounts.find(account=>account.id===editingId);
   const [deletingId,setDeletingId]=useState('');
   const deletingAccount=accounts.find(account=>account.id===deletingId);
@@ -45,9 +44,9 @@ export default function TaskAccounts({onClose}:{onClose:()=>void}) {
   }
   function create(event:FormEvent) {
     event.preventDefault();void run(async()=>{
-      await taskRequest('/accounts','POST',{email:email.trim(),display_name:name.trim(),roles,password});
-      setEmail('');setName('');setRoles(['annotator']);setPassword(initialPassword);
-      setNotice('账号已创建，任务角色已保存。可使用邮箱和初始密码登录。');
+      await taskRequest('/accounts','POST',{email:email.trim(),display_name:name.trim(),role:'member',password});
+      setEmail('');setName('');setPassword(initialPassword);
+      setNotice('账号已创建，默认角色为成员。可使用邮箱和初始密码登录。');
     });
   }
   function closeRoles() {if(!busy){setEditingId('');document.getElementById(`account-role-${editingId}`)?.focus();}}
@@ -59,14 +58,14 @@ export default function TaskAccounts({onClose}:{onClose:()=>void}) {
       <form className="admin-form account-create-form" onSubmit={create}>
         <label>账号（邮箱）<input type="email" maxLength={254} value={email} onChange={event=>setEmail(event.target.value)} autoComplete="off" required disabled={busy}/></label>
         <label>标注人姓名<input value={name} maxLength={80} placeholder="例如李鑫" onChange={event=>setName(event.target.value)} required disabled={busy}/></label>
-        <fieldset className="account-role-field"><legend>角色（可多选）</legend><RoleChoices roles={roles} onChange={setRoles} disabled={busy}/></fieldset>
+        <p className="account-role-hint">新账号默认角色：成员。创建后管理员可调整角色。</p>
         <label>初始密码<input type="text" value={password} minLength={8} maxLength={1024} autoComplete="off" onChange={event=>setPassword(event.target.value)} required disabled={busy}/></label>
-        <div className="account-create-actions"><button className="primary" disabled={busy||!roles.length}>创建账号</button></div>
+        <div className="account-create-actions"><button className="primary" disabled={busy}>创建账号</button></div>
       </form>
       <h3>已创建账号</h3>
       <div className="account-filters">
         <label className="account-name-search"><span>按姓名搜索</span><div><Search size={15} aria-hidden="true"/><input type="search" value={nameSearch} placeholder="输入姓名或部分姓名" onChange={event=>setNameSearch(event.target.value)}/></div></label>
-        <label>按角色筛选<select value={roleFilter} onChange={event=>setRoleFilter(event.target.value as AccountRoleFilter)}><option value="all">全部角色</option>{roleOptions.map(([role,label])=><option key={role} value={role}>{label}</option>)}<option value="admin">超级管理员</option><option value="none">未授权</option></select></label>
+        <label>按角色筛选<select value={roleFilter} onChange={event=>setRoleFilter(event.target.value as AccountRoleFilter)}><option value="all">全部角色</option>{roleOptions.map(([role,label])=><option key={role} value={role}>{label}</option>)}</select></label>
         <button className="secondary" disabled={!nameSearch&&roleFilter==='all'} onClick={()=>{setNameSearch('');setRoleFilter('all');}}>重置</button>
         <span className="account-filter-count" role="status">显示 {visibleAccounts.length} / {accounts.length} 个账号</span>
       </div>
@@ -74,7 +73,7 @@ export default function TaskAccounts({onClose}:{onClose:()=>void}) {
         {visibleAccounts.map(account=><tr key={account.id}>
           <td>{account.display_name}{!account.active&&<span className="account-inactive">已停用</span>}</td>
           <td className="account-email">{account.email??account.username}</td>
-          <td><button id={`account-role-${account.id}`} className="account-role-trigger" aria-label={`选择${account.display_name}的角色`} aria-haspopup="dialog" aria-expanded={editingId===account.id} disabled={busy} onClick={()=>{setEditingId(account.id);setEditingRoles([...account.task_roles]);}}>{roleName(account)}<ChevronDown size={13}/></button></td>
+          <td><button id={`account-role-${account.id}`} className="account-role-trigger" aria-label={`选择${account.display_name}的角色`} aria-haspopup="dialog" aria-expanded={editingId===account.id} disabled={busy} onClick={()=>{setEditingId(account.id);setEditingRole(accountRole(account));}}>{roleName(account)}<ChevronDown size={13}/></button></td>
           <td><select className={`account-upload-select ${account.can_upload?'enabled':''}`} aria-label={`${account.display_name}的上传权限`} value={account.can_upload?'enabled':'disabled'} disabled={busy||account.role==='admin'} onChange={event=>{const canUpload=event.target.value==='enabled';void run(async()=>{await taskRequest(`/accounts/${account.id}/upload`,'PUT',{can_upload:canUpload});setNotice('上传权限已更新。');});}}><option value="enabled">已开放</option><option value="disabled">未开放</option></select></td>
           <td><div className="account-row-actions">
             <button className="secondary" disabled={busy} onClick={()=>{setResetId(account.id);setResetPassword(initialPassword);}}>重置密码</button>
@@ -94,10 +93,10 @@ export default function TaskAccounts({onClose}:{onClose:()=>void}) {
       <h2>删除账号</h2><p className="account-delete-target">{deletingAccount.display_name}<br/>{deletingAccount.email??deletingAccount.username}</p><p className="account-role-hint">账号将移出列表并停止登录。已有标注、任务和操作记录保留，原邮箱账号仍保留用于追溯。</p>{error&&<p className="account-message error" role="alert">{error}</p>}<div className="password-actions"><button type="button" className="secondary" disabled={busy} autoFocus onClick={()=>setDeletingId('')}>取消</button><button className="secondary account-delete" disabled={busy}>确认删除</button></div>
     </form></div>}
     {editingAccount&&<div className="modal-backdrop account-role-backdrop" onClick={event=>{if(event.target===event.currentTarget)closeRoles();}}>
-      <form className="admin-panel account-role-dialog" role="dialog" aria-modal="true" aria-label={`${editingAccount.display_name}的角色`} onSubmit={event=>{event.preventDefault();void run(async()=>{await taskRequest('/roles','PUT',{user_id:editingAccount.id,roles:editingRoles});setEditingId('');setNotice(`${editingAccount.display_name} 的任务角色已更新。`);});}}>
+      <form className="admin-panel account-role-dialog" role="dialog" aria-modal="true" aria-label={`${editingAccount.display_name}的角色`} onSubmit={event=>{event.preventDefault();void run(async()=>{await taskRequest(`/accounts/${editingAccount.id}/role`,'PUT',{role:editingRole});setEditingId('');setNotice(`${editingAccount.display_name} 的角色已更新，原登录已失效。`);});}}>
         <div className="admin-header"><h2>{editingAccount.display_name}的角色</h2><button className="icon-button" type="button" aria-label="关闭角色选择" onClick={closeRoles} disabled={busy} autoFocus><X size={17}/></button></div>
-        <RoleChoices roles={editingRoles} onChange={setEditingRoles} disabled={busy}/>
-        <p className="account-role-hint">可选择多个角色；全部取消将撤销任务权限。</p>
+        <RoleChoices role={editingRole} onChange={setEditingRole} disabled={busy}/>
+        <p className="account-role-hint">选择一个角色。组长和管理员允许自我复核；成员不能自我复核。</p>
         {error&&<p className="account-message error" role="alert">{error}</p>}
         <div className="password-actions"><button type="button" className="secondary" disabled={busy} onClick={closeRoles}>取消</button><button className="primary" disabled={busy}>保存</button></div>
       </form>

@@ -18,6 +18,7 @@ from backend.public_setup import create_app as public_app
 from backend.service import empty_annotations, now
 from backend.shared_accounts import AccountClient, create_app as account_app
 from backend.tasks.storage import FileArtifacts, ObjectArtifacts
+from deploy.migrate_account_roles import migrate
 
 
 class TaskHostTests(unittest.TestCase):
@@ -81,7 +82,7 @@ class TaskHostTests(unittest.TestCase):
             'videos': [{'id': 'v0001', 'name': 'clip.mp4', 'relative_path': 'clip.mp4', 'duration_ms': 10000,
                 'start_ms': 0, 'end_ms': 10000, 'original_media_start_ms': 0,
                 'recording_start': '2026-10-15T00:00:00+08:00'}],
-            '_sources': {'v0001': {'path': str(source), 'stamp': stamp}}}
+            '_sources': {'v0001': {'path': str(source), 'stamp': stamp, 'duration_ms': 10000}}}
         app.state.service.save(self.project)
         self.video = {'video_id': 'clip', 'collector_id': 'collector', 'date': '2026-10-15',
             'scene': 'inside', 'duration_ms': 10000, 'quality': 'passed',
@@ -131,7 +132,7 @@ class TaskHostTests(unittest.TestCase):
         self.request(client, 'PUT', '/roles', body, headers)
         self.request(client, 'PUT', '/roles', {**body, 'user_id': self.users['inactive']['id']}, headers, 422)
         roster = self.request(client, 'GET', '/users')
-        self.assertEqual({'id', 'display_name', 'role', 'active', 'can_upload'}, set(roster[0]))
+        self.assertEqual({'id', 'display_name', 'role', 'active', 'can_upload', 'role_model', 'task_access'}, set(roster[0]))
         self.assertEqual([{**item, 'can_upload': True} if item['id'] == self.users['a']['id'] else item
                           for item in original], self.auth.list_users())
         self.login(client, 'a')
@@ -452,6 +453,93 @@ class TaskHostTests(unittest.TestCase):
         self.assertEqual([], self.request(client, 'GET', f'/items/{task_id}')['submissions'])
         self.assertTrue(self.request(client, 'GET', url)['task_readonly'])
 
+    def test_in_progress_legacy_draft_survives_role_cutover_and_completes_delivery(self):
+        # Old accounts and task grants exist before the canonical role migration.
+        with self.auth.connection() as db:
+            db.execute('DELETE FROM account_roles')
+        annotations = {'posture': [
+            {'id': 'before-cutover', 'label': '坐', 'start_ms': 123, 'end_ms': 900, 'lane': 0},
+            {'id': 'after-cutover', 'label': '坐', 'start_ms': 2000, 'end_ms': 3000, 'lane': 0},
+        ]}
+        old_app = create_app(self.root, source_root=self.root / 'nas')
+        with TestClient(old_app, base_url='https://nas.example.com') as client:
+            task = self.initialize(old_app, client)
+            task_id = task['id']
+            path = f'/items/{task_id}'
+            workspace = path + '/workspace/project'
+            headers = self.login(client, 'a')
+            old_session = client.cookies.get('datamark_session')
+            saved = self.request(client, 'PUT', workspace + '/draft', {
+                'expected_revision': task['revision'],
+                'annotations': {'posture': annotations['posture'][:1]},
+            }, headers)
+            headers = self.login(client, 'b')
+            submitted = self.request(client, 'POST', path + '/submit', {
+                'expected_revision': saved['revision'], 'annotations': annotations,
+            }, headers)
+            peer_submission = submitted['current_submissions'][self.users['b']['id']]
+            self.assertEqual('annotating', submitted['status'])
+            self.login(client, 'a')
+            old_detail = self.request(client, 'GET', path)
+            old_draft = self.request(client, 'GET', workspace)
+            self.assertEqual(1, old_detail['submitted_count'])
+            self.assertEqual([], old_detail['submissions'], 'peer submission stays private')
+
+        # Stop the old host, migrate, and open a fresh host against the same data.
+        with old_app.state.tasks.db() as db:
+            task_snapshot = list(db.iterdump())
+        artifacts = {p.relative_to(self.artifacts): p.read_bytes()
+                     for p in self.artifacts.rglob('*') if p.is_file()}
+        result = migrate(self.auth.path, [old_app.state.tasks.path], apply=True,
+                         backup_dir=self.root / 'role-backups')
+        self.assertTrue(result['applied'])
+        self.assertIsNone(self.auth.session(old_session))
+        with old_app.state.tasks.db() as db:
+            self.assertEqual(task_snapshot, list(db.iterdump()))
+        self.assertEqual(artifacts, {p.relative_to(self.artifacts): p.read_bytes()
+                                    for p in self.artifacts.rglob('*') if p.is_file()})
+
+        new_app = create_app(self.root, source_root=self.root / 'nas')
+        with TestClient(new_app, base_url='https://nas.example.com') as client:
+            headers = self.login(client, 'a')
+            self.assertEqual('member', client.get('/api/auth/me').json()['role'])
+            restored = self.request(client, 'GET', workspace)
+            self.assertFalse(restored['task_readonly'])
+            self.assertEqual(old_draft['annotations'], restored['annotations'])
+            self.assertEqual(old_draft['revision'], restored['revision'])
+            self.assertEqual(old_detail, self.request(client, 'GET', path))
+            continued = self.request(client, 'PUT', workspace + '/draft', {
+                'expected_revision': restored['revision'], 'annotations': annotations,
+            }, headers)
+            task = self.request(client, 'POST', path + '/submit', {
+                'expected_revision': continued['revision'], 'annotations': annotations,
+            }, headers)
+            self.assertEqual('submitted', task['status'])
+            self.assertEqual(peer_submission, task['current_submissions'][self.users['b']['id']])
+            self.assertTrue(self.request(client, 'GET', workspace)['task_readonly'])
+            headers = self.login(client, 'reviewer')
+            self.assertEqual('member', client.get('/api/auth/me').json()['role'])
+            task = self.request(client, 'POST', path + '/start-review',
+                                {'expected_revision': task['revision']}, headers)
+            task = self.request(client, 'POST', path + '/review',
+                                {'expected_revision': task['revision'], 'action': 'pass'}, headers)
+            headers = self.login(client, 'lead')
+            self.assertEqual('leader', client.get('/api/auth/me').json()['role'])
+            task = self.request(client, 'POST', path + '/accept',
+                                {'expected_revision': task['revision']}, headers)
+            self.assertEqual('accepted', task['status'])
+            delivery = self.request(client, 'POST', '/deliveries', {
+                'task_ids': [task_id], 'expected_revisions': {task_id: task['revision']},
+                'request_id': 'legacy-cutover-delivery',
+            }, headers)
+            self.assertEqual('delivered', self.request(client, 'GET', path)['status'])
+            history = self.request(client, 'GET', path + '/history')['submissions']
+            self.assertIn(peer_submission, history)
+            csv = client.get('/api/tasks/deliveries/' + delivery['id'])
+            self.assertEqual(200, csv.status_code, csv.text)
+            self.assertIn('123', csv.text)
+            self.assertIn('2000', csv.text)
+
     def test_task_delete_requires_manager_csrf_preserves_history_and_frees_type(self):
         app, client = self.host()
         task = self.initialize(app, client)
@@ -553,7 +641,7 @@ class TaskHostTests(unittest.TestCase):
                     headers = self.login(client, 'admin', public=True)
                     self.request(client, 'PUT', '/roles', {'user_id': self.users['lead']['id'], 'roles': ['leader']}, headers)
                     roster = self.request(client, 'GET', '/users')
-                    self.assertEqual({'id', 'display_name', 'role', 'active', 'can_upload'}, set(roster[0]))
+                    self.assertEqual({'id', 'display_name', 'role', 'active', 'can_upload', 'role_model', 'task_access'}, set(roster[0]))
                     self.request(client, 'POST', '/videos', {'source': {'backend': 'nas', 'key': '/mnt/nas'}}, headers, 503)
                     self.request(client, 'POST', '/sources/import', {'path': '/mnt/nas'}, headers, 503)
                     headers = self.login(client, 'lead', public=True)
