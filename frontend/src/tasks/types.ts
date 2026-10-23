@@ -1,5 +1,5 @@
 import type {Segment} from '../domain';
-export type TaskRole = 'annotator'|'reviewer'|'leader';
+export type TaskCapability = 'annotator'|'reviewer'|'leader';
 export interface TaskAxis {id:string;name:string;mode:'state'|'event';labels:string[];minimum_ms?:number;transport_labels?:string[];transport_types?:string[]}
 export interface TaskRule {id:string;name:string;task_type:string;axes:TaskAxis[];boundary_tolerance_ms?:number|null}
 export type TaskSegment = Segment & {transport_type?:string;needs_review?:boolean;review_reason?:string};

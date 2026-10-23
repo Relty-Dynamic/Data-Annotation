@@ -15,6 +15,7 @@ from .validation import validate_annotations
 from .recording import with_recording_layout
 from .diff import differences
 from ..service import AXES, valid_custom_axis
+from ..roles import canonical, capabilities
 
 
 class TaskError(Exception):
@@ -90,6 +91,8 @@ class TaskStore:
         db.execute('INSERT INTO audit VALUES (?,?,?)', (entry['id'], task_id, json.dumps(entry, ensure_ascii=False)))
 
     def _roles(self, db, actor):
+        if canonical(actor):
+            return capabilities(actor)
         if actor.get('role') == 'admin':
             return ['annotator', 'leader', 'reviewer']
         row = db.execute('SELECT body FROM roles WHERE user_id=?', (actor['id'],)).fetchone()
@@ -102,7 +105,8 @@ class TaskStore:
 
     def roles(self, actor):
         with self.db() as db:
-            return {'roles': self._roles(db, actor)}
+            return {'roles': self._roles(db, actor), 'role': actor.get('role'),
+                    'role_model': actor.get('role_model', 'legacy'), 'task_access': actor.get('task_access', True)}
 
     def set_roles(self, actor, user_id, roles):
         if actor.get('role') != 'admin':

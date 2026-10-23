@@ -1,7 +1,7 @@
-import type {TaskRole} from './types';
+import type {TaskCapability} from './types';
 
-export function taskTabs(platformRole:string,roles:TaskRole[],canUpload:boolean):string[][]{
- const manager=platformRole==='admin'||roles.includes('leader');
+export function taskTabs(platformRole:string,roles:TaskCapability[],canUpload:boolean):string[][]{
+ const manager=platformRole==='admin'||platformRole==='leader'||platformRole==='annotator'&&roles.includes('leader');
  return [['tasks',manager?'任务列表':'我的任务'],
   ...(canUpload||manager?[['videos','素材与质检']]:[]),
   ...(manager?[['assign','任务分配']]:[]),
@@ -9,7 +9,7 @@ export function taskTabs(platformRole:string,roles:TaskRole[],canUpload:boolean)
   ...(manager?[['delivery','验收交付']]:[])];
 }
 
-export async function loadTaskPanelData(roles:TaskRole[],canUpload:boolean,read:(path:string)=>Promise<unknown>,receive:(path:string,value:unknown)=>void,sourceFailed:(error:unknown)=>void){
+export async function loadTaskPanelData(roles:TaskCapability[],canUpload:boolean,read:(path:string)=>Promise<unknown>,receive:(path:string,value:unknown)=>void,sourceFailed:(error:unknown)=>void){
  const manager=roles.includes('leader');
  const paths=['/items',...(roles.length?['/rules']:[]),...(manager?['/users','/roles','/deliveries']:[]),
   ...(canUpload?['/sources']:[]),...(manager||canUpload?['/videos']:[])];

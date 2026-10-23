@@ -5,16 +5,16 @@ import TaskReview from './TaskReview';
 import SuccessDialog from './SuccessDialog';
 import TaskOutputSync from './TaskOutputSync';
 import {reviewStage} from './taskChoices';
-import type {TaskItem,TaskRole,TaskVersion} from './types';
+import type {TaskItem,TaskCapability,TaskVersion} from './types';
 export default function TaskWorkbenchReview({taskId,user,time,onSeek,onPreview,onDirty,onBusy,selection}:{taskId:string;user:Account;time:number;onSeek:(time:number)=>void;onPreview:(version:TaskVersion)=>void;onDirty:(dirty:boolean)=>void;onBusy:(busy:boolean)=>void;selection?:{axis:string;start_ms:number;end_ms:number}}){
- const [task,setTask]=useState<TaskItem|null>(null),[roles,setRoles]=useState<TaskRole[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[versionId,setVersionId]=useState(''),[reset,setReset]=useState(0),[dirty,setDirty]=useState(false),[notice,setNotice]=useState(''),[success,setSuccess]=useState(''),[historyLoading,setHistoryLoading]=useState(false);
+ const [task,setTask]=useState<TaskItem|null>(null),[roles,setRoles]=useState<TaskCapability[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(false),[versionId,setVersionId]=useState(''),[reset,setReset]=useState(0),[dirty,setDirty]=useState(false),[notice,setNotice]=useState(''),[success,setSuccess]=useState(''),[historyLoading,setHistoryLoading]=useState(false);
  const previewRef=useRef(onPreview);previewRef.current=onPreview;
  const actionPending=useRef(false);
  function markDirty(value:boolean){setDirty(value);onDirty(value);}
  useEffect(()=>{
   let alive=true;
   setTask(null);setError('');setSuccess('');setNotice('');
-  void Promise.all([taskRequest<TaskItem>(`/items/${taskId}`),taskRequest<{roles:TaskRole[]}>('/me')]).then(([detail,me])=>{
+  void Promise.all([taskRequest<TaskItem>(`/items/${taskId}`),taskRequest<{roles:TaskCapability[]}>('/me')]).then(([detail,me])=>{
    if(!alive)return;
    setTask(detail);setRoles(user.role==='admin'?['leader','reviewer','annotator']:me.roles);
    const version=detail.submissions?.[0];if(version){setVersionId(version.id);previewRef.current(version);}

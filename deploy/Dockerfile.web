@@ -37,6 +37,7 @@ COPY deploy/ci-deploy-intranet.sh /app/deploy/ci-deploy-intranet.sh
 COPY deploy/wait_intranet_ready.py /app/deploy/wait_intranet_ready.py
 COPY deploy/ci_deploy_public.py /app/deploy/ci_deploy_public.py
 COPY deploy/prepare_public_rules.py /app/deploy/prepare_public_rules.py
+COPY deploy/migrate_account_roles.py /app/deploy/migrate_account_roles.py
 COPY deploy/sync_final_timelines.py /app/deploy/sync_final_timelines.py
 COPY deploy/deploy_worker.py deploy/compose.yaml /app/deploy/
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
